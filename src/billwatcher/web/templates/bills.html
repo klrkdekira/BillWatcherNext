@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}Search: {{ q }}{% else %}Browse bills{% endif %} — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>{% if q %}Search results for “{{ q }}”{% else %}Browse bills{% endif %}</h1>
+<form action="/bills" method="get">
+  <label for="q">Search</label><input id="q" name="q" value="{{ q }}" maxlength="200">
+  <label for="chamber">Chamber</label><select id="chamber" name="chamber"><option value="">All</option><option value="dewan_rakyat" {% if chamber == "dewan_rakyat" %}selected{% endif %}>Dewan Rakyat</option><option value="dewan_negara" {% if chamber == "dewan_negara" %}selected{% endif %}>Dewan Negara</option></select>
+  <label for="status">Status</label><input id="status" name="status" value="{{ status }}">
+  <label for="year">Year</label><input id="year" name="year" inputmode="numeric" value="{{ year }}">
+  <label><input type="checkbox" name="include_superseded" value="1" {% if include_superseded %}checked{% endif %}> Search superseded document text</label>
+  <button>Apply filters</button>
+</form>
+<p>{{ results.total }} result{% if results.total != 1 %}s{% endif %}.</p>
+{% if results.items %}<ol class="bill-list" start="{{ (results.page - 1) * results.page_size + 1 }}">{% for bill in results.items %}<li><a href="/bills/{{ bill.slug }}"><strong>{{ bill.identifier_raw }}</strong> <span lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></a><div>Last checked: {{ bill.last_checked_at }}</div></li>{% endfor %}</ol>{% else %}<p>No bills match these filters. Try fewer terms or browse all bills.</p>{% endif %}
+<nav aria-label="Pagination">{% if results.page > 1 %}<a href="?{{ query_string }}&page={{ results.page - 1 }}">Previous</a>{% endif %}{% if results.page * results.page_size < results.total %}<a href="?{{ query_string }}&page={{ results.page + 1 }}">Next</a>{% endif %}</nav>
+{% endblock %}

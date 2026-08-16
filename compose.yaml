@@ -1,0 +1,89 @@
+name: billwatchernext
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_DB: $POSTGRES_DB
+      POSTGRES_USER: $POSTGRES_USER
+      POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  migrate:
+    build: .
+    command: ["billwatcher", "migrate"]
+    env_file: .env
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [backend]
+    restart: "no"
+
+  app:
+    build: .
+    command: ["billwatcher", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    volumes:
+      - blobs:/var/lib/billwatcher/blobs:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    logging: *logging
+    read_only: true
+    tmpfs: [/tmp]
+
+  worker:
+    build: .
+    command: ["billwatcher", "worker"]
+    env_file: .env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    volumes:
+      - blobs:/var/lib/billwatcher/blobs
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks: [backend]
+    logging: *logging
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    environment:
+      SITE_HOST: $SITE_HOST
+    depends_on:
+      app: {condition: service_healthy}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks: [backend, public]
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+  public:
+
+volumes:
+  postgres_data:
+  blobs:
+  caddy_data:
+  caddy_config:

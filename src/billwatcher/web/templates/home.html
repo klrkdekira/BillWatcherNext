@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Malaysian Parliament bills — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>Search Malaysian Parliament bills</h1>
+<p>Browse bill metadata and documents with source provenance and version history.</p>
+<form action="/search" method="get" role="search">
+  <label for="home-q">Bill code, title, presenter, status, or document text</label>
+  <div class="search"><input id="home-q" name="q" type="search"><button>Search</button></div>
+</form>
+{% if oldest_success %}<p class="freshness">All healthy coverage targets checked since {{ oldest_success }}.</p>{% else %}<p class="notice">No successful crawl has been recorded yet.</p>{% endif %}
+<h2>Newest bills</h2>
+{% if bills %}<ul class="bill-list">{% for bill in bills %}<li><a href="/bills/{{ bill.slug }}"><strong>{{ bill.identifier_raw }}</strong> <span lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></a></li>{% endfor %}</ul>{% else %}<p>No bills have been ingested.</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,107 @@
+.DEFAULT_GOAL := help
+UV ?= uv
+COMPOSE ?= docker compose
+BACKUP_DIR ?=
+BLOB_BACKUP_DEST ?=
+RESTORE_PATH ?=
+BLOB_RESTORE_PATH ?=
+
+.PHONY: help setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+
+help: ## Show available targets
+	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+setup: ## Install the exact locked development environment
+	$(UV) sync --locked --all-groups
+
+lock: ## Validate uv.lock without changing it
+	$(UV) lock --check
+
+format: ## Format Python sources
+	$(UV) run ruff format src tests migrations
+
+lint: ## Run Ruff checks
+	$(UV) run ruff check src tests migrations
+
+typecheck: ## Run strict mypy
+	$(UV) run mypy src
+
+test: ## Run all offline tests
+	$(UV) run pytest
+
+test-live: ## Run tiny live tests only with BILLWATCHER_LIVE_TEST=1
+	@test "$$BILLWATCHER_LIVE_TEST" = "1" || { echo "Set BILLWATCHER_LIVE_TEST=1 to opt in"; exit 2; }
+	$(UV) run pytest -m live -q
+
+check: lint typecheck test ## Run every offline quality gate
+
+serve: ## Run the local development server
+	$(UV) run billwatcher serve --reload
+
+migrate: ## Upgrade the configured database to Alembic head
+	$(UV) run billwatcher migrate
+
+scrape: ## Explicitly run one approved live incremental crawl
+	$(UV) run billwatcher scrape --approve-live
+
+scrape-full: ## Explicitly run one approved live full crawl
+	$(UV) run billwatcher scrape --full --approve-live
+
+status: ## Print runtime coverage, queue, run, and pipeline status
+	$(UV) run billwatcher status
+
+doctor: ## Fail on critical anomalies or invariant/storage failures
+	$(UV) run billwatcher doctor
+
+reparse: ## Dry-run snapshot replay; pass ARGS=--apply to mutate
+	$(UV) run billwatcher reparse $(ARGS)
+
+reextract: ## Dry-run extraction backfill; pass ARGS=--apply to mutate
+	$(UV) run billwatcher reextract $(ARGS)
+
+rechunk: ## Dry-run Release 3 chunk backfill
+	$(UV) run billwatcher rechunk $(ARGS)
+
+reembed: ## Dry-run Release 3 embedding backfill
+	$(UV) run billwatcher reembed $(ARGS)
+
+verify-storage: ## Verify every database blob reference on disk
+	$(UV) run billwatcher verify-storage
+
+prune-blobs: ## Dry-run unreferenced blob pruning; pass ARGS=--apply
+	$(UV) run billwatcher prune-blobs $(ARGS)
+
+fixtures-refresh: ## Validate stored snapshots offline without crawling
+	$(UV) run billwatcher reparse
+
+docker-build: ## Build the locked production image
+	$(COMPOSE) build --pull
+
+compose-up: ## Start the production-shaped stack without deleting volumes
+	$(COMPOSE) up -d
+
+compose-down: ## Stop the stack without deleting volumes
+	$(COMPOSE) down
+
+logs: ## Follow bounded application and worker logs
+	$(COMPOSE) logs --tail=200 -f app worker
+
+backup: ## Dump PostgreSQL; requires BACKUP_DIR
+	@test -n "$(BACKUP_DIR)" || { echo "BACKUP_DIR is required"; exit 2; }
+	@mkdir -p "$(BACKUP_DIR)"
+	$(COMPOSE) exec -T db sh -c 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc' > "$(BACKUP_DIR)/billwatcher-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+backup-blobs: ## Copy blobs; requires BLOB_BACKUP_DEST
+	@test -n "$(BLOB_BACKUP_DEST)" || { echo "BLOB_BACKUP_DEST is required"; exit 2; }
+	$(COMPOSE) cp worker:/var/lib/billwatcher/blobs/. "$(BLOB_BACKUP_DEST)"
+
+restore: ## Guarded DB restore; requires RESTORE_PATH and CONFIRM_RESTORE=yes
+	@test -f "$(RESTORE_PATH)" || { echo "RESTORE_PATH must name a dump"; exit 2; }
+	@test "$$CONFIRM_RESTORE" = "yes" || { echo "Set CONFIRM_RESTORE=yes"; exit 2; }
+	$(COMPOSE) exec -T db sh -c 'pg_restore --clean --if-exists -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(RESTORE_PATH)"
+
+restore-blobs: ## Guarded blob restore; requires BLOB_RESTORE_PATH and CONFIRM_RESTORE=yes
+	@test -d "$(BLOB_RESTORE_PATH)" || { echo "BLOB_RESTORE_PATH must name a directory"; exit 2; }
+	@test "$$CONFIRM_RESTORE" = "yes" || { echo "Set CONFIRM_RESTORE=yes"; exit 2; }
+	$(COMPOSE) cp --archive=false "$(BLOB_RESTORE_PATH)/." worker:/var/lib/billwatcher/blobs
+	$(COMPOSE) exec -T --user 0 worker chown -R 10001:10001 /var/lib/billwatcher/blobs

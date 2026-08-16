@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ bill.identifier_raw }} — {{ site_name }}{% endblock %}
+{% block head %}<link rel="canonical" href="{{ json_ld.url }}"><meta property="og:title" content="{{ bill.identifier_raw }} — {{ bill.title_bm or bill.title_en }}"><script type="application/ld+json">{{ json_ld | tojson }}</script>{% endblock %}
+{% block content %}
+<h1>{{ bill.identifier_raw }} — <span lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></h1>
+{% if bill.title_en %}<p lang="en">{{ bill.title_en }}</p>{% endif %}
+<p class="notice">This is a parliamentary bill, not a statement that it is enacted or currently in force.</p>
+<dl><dt>Last checked</dt><dd>{{ bill.last_checked_at }}</dd><dt>Last changed</dt><dd>{{ bill.last_changed_at }}</dd></dl>
+{% if bill.absent_streak %}<p class="warning">This bill has not been seen in {{ bill.absent_streak }} recent complete runs.</p>{% endif %}
+<h2>Chamber timelines</h2>
+{% for chamber in chambers %}<section><h3>{{ "Dewan Rakyat" if chamber.chamber == "dewan_rakyat" else "Dewan Negara" }}</h3><dl><dt>Published status</dt><dd>{{ chamber.status_raw }}</dd><dt>Normalized status</dt><dd>{{ chamber.status_normalized }} (our classification)</dd>{% if chamber.presenter_raw %}<dt>Presenter</dt><dd>{{ chamber.presenter_raw }}</dd>{% endif %}</dl><p><a href="{{ chamber.source_url }}" rel="external">Official listing</a></p></section>{% else %}<p>No chamber records.</p>{% endfor %}
+<h2>Official documents and saved versions</h2>
+{% for item in documents %}<section><h3>{{ item.document.title_raw or item.document.document_kind }}</h3><p>Language: {{ item.document.language }}. <a href="{{ item.document.canonical_source_url }}" rel="external">Current official URL</a></p>{% if item.versions %}<table><thead><tr><th>Version</th><th>Retrieved</th><th>Bytes</th><th>Pages</th><th>Hash</th><th>State</th></tr></thead><tbody>{% for version in item.versions %}<tr><td>{{ version.version_no }}</td><td>Our copy was retrieved on {{ version.retrieved_at }}</td><td>{{ version.byte_size }}</td><td>{{ version.page_count or "Pending" }}</td><td><code>{{ version.content_sha256[:12] }}</code></td><td>{{ "Current" if version.is_current else "Superseded" }}{% if version.validation_status != "accepted" %}; {{ version.validation_status }}{% endif %}</td></tr>{% endfor %}</tbody></table>{% else %}<p>Download pending; no saved version yet.</p>{% endif %}</section>{% else %}<p>No official documents are linked.</p>{% endfor %}
+<h2>Parliamentary observations</h2>
+{% if events %}<ul>{% for event in events %}<li>{{ event.observed_at }}: {{ event.source_label }} — {{ event.source_value }} (Parliament observation)</li>{% endfor %}</ul>{% else %}<p>No events recorded.</p>{% endif %}
+<h2>Corrections to our record</h2>
+{% if changes %}<ul>{% for change in changes %}<li>{{ change.changed_at }}: {{ change.field_path }} corrected by {{ change.change_source }}.</li>{% endfor %}</ul>{% else %}<p>No corrections recorded.</p>{% endif %}
+<p>Found an error? Use the contact details on the <a href="/about">methodology page</a>.</p>
+{% endblock %}

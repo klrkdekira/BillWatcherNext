@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Recent corrections — {{ site_name }}{% endblock %}
+{% block content %}<h1>Recent changes to our record</h1><p>These are changes in this index and do not necessarily mean Parliament changed its position.</p>{% if changes %}<ol>{% for change in changes %}<li>{{ change.changed_at }}: {{ change.entity_type }} {{ change.field_path }} ({{ change.change_source }})</li>{% endfor %}</ol>{% else %}<p>No corrections recorded.</p>{% endif %}{% endblock %}
