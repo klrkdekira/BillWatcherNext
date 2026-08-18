@@ -62,4 +62,4 @@ markers = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/billwatcher/web/app.py" = ["B008"]
+"src/billwatcher/web/routes.py" = ["B008"]

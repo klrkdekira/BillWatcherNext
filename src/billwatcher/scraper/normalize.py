@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import date
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+from billwatcher.domain.vocabulary import NORMALIZED_STATUSES
+
 _TRACKING_PARAMETERS = {
     "fbclid",
     "gclid",
@@ -194,7 +196,13 @@ _STATUS_MAP = {
 }
 
 
+# A mapping that produced a value outside the controlled vocabulary would write a status the
+# database, filters, and UI do not know about, so the two are kept in step at import time.
+assert set(_STATUS_MAP.values()) <= NORMALIZED_STATUSES
+
+
 def normalize_status(raw: str) -> str:
+    """Map only explicit phrases. An unrecognised status is `unknown`, never a guess."""
     return _STATUS_MAP.get(normalize_text(raw).casefold(), "unknown")
 
 

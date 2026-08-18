@@ -6,8 +6,45 @@ the conventions that are not visible in a column definition.
 ## Event fingerprints
 
 Bill event fingerprints are SHA-256 over the stable serialization of bill ID, chamber, event type,
-start/end dates, sequence, normalized source label, and normalized source value. Run, snapshot,
-and observation timestamps are deliberately excluded so replay is idempotent.
+start date, end date, sequence, normalized source label, and normalized source value, joined with
+`|`. Run, snapshot, and observation timestamps are deliberately excluded so replay is idempotent.
+The single implementation is `billwatcher.scraper.ingest.event_fingerprint`.
+
+## Dated listing columns
+
+Dated columns are matched by their header text, never by position, and each projects onto one
+event type:
+
+| Column (Malay or English) | Event type | `chamber_records` column |
+| --- | --- | --- |
+| Bacaan Kali Pertama / First reading | `first_reading` | `first_read_on` |
+| Bacaan Kali Kedua / Second reading | `second_reading` | `second_read_on` |
+| Bacaan Kali Ketiga / Third reading | `third_reading` | `third_read_on` |
+| Dirujuk Kepada Jawatankuasa / Committee referral | `committee_referral` | `referred_on` |
+| Tarikh Diluluskan / Date passed | `passed` | `passed_on` |
+
+A cell holding a range (`13–14 Julai 2026`) produces one event with both `event_on` and
+`event_on_end`. A cell holding several dates produces several events with an incrementing
+`sequence`. The `chamber_records` column is a convenience projection of the first span only;
+`bill_events` is the authoritative history.
+
+An unparseable cell keeps its raw text, leaves the date column NULL, and raises
+`unparseable_date`. It is never silently dropped.
+
+## Rows that cannot be parsed
+
+A row whose identifier will not normalize, whose title or status is empty, or whose year is
+malformed is retained as a `ParseIssue` rather than aborting the page (HANDOFF 11.3 step 7).
+Ingestion turns those into `unparseable_identifier` anomalies carrying the raw cell values. A
+repeated row with identical content collapses; a repeat with a conflicting title raises
+`duplicate_identifier_conflict`. A page whose rows are *all* unparseable still fails loudly,
+because a current listing that yields zero bills is a broken parse, not an empty Parliament.
+
+## Anomalies
+
+`billwatcher.operations.record_anomaly` is the only way an anomaly is written. It deduplicates by
+kind plus entity and increments `occurrence_count`, so a recurring condition accumulates on one
+row instead of filling the table.
 
 ## Search unit ownership
 

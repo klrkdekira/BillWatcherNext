@@ -9,7 +9,6 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from billwatcher.models import (
-    Anomaly,
     Bill,
     Blob,
     ChamberRecord,
@@ -18,6 +17,7 @@ from billwatcher.models import (
     ScrapeRun,
     SourceSnapshot,
 )
+from billwatcher.operations import record_anomaly
 from billwatcher.scraper.fetch import Fetcher, FetchResult
 from billwatcher.scraper.ingest import IngestCounts, ingest_listing
 from billwatcher.scraper.parse_listing import ListingParseError, ParsedListing, parse_listing
@@ -486,15 +486,13 @@ class ScrapeOrchestrator:
         *,
         url: str | None = None,
     ) -> None:
-        self.session.add(
-            Anomaly(
-                kind=kind,
-                severity=severity,
-                entity_type=entity_type,
-                entity_id=entity_id,
-                url=url,
-                detail_json=detail,
-                first_seen_at=now,
-                last_seen_at=now,
-            )
+        record_anomaly(
+            self.session,
+            kind=kind,
+            severity=severity,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            detail=detail,
+            now=now,
+            url=url,
         )

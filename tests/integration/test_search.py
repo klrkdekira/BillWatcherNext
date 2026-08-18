@@ -93,3 +93,33 @@ def test_superseded_document_text_requires_explicit_opt_in() -> None:
             include_superseded=True,
         )
         assert [item.identifier_normalized for item in historical.items] == ["DR-15-2026"]
+
+
+def test_english_titles_are_searchable_alongside_malay_ones() -> None:
+    """The English listing reconciles onto the same bill by normalized identifier only."""
+    with seeded() as database:
+        listing = parse_listing((FIXTURES / "current_dr_en.html").read_text(), source_url=URL)
+        ingest_listing(
+            database,
+            listing,
+            chamber="dewan_rakyat",
+            language="en",
+            source_url=URL,
+            snapshot_id="english",
+            run_id="run",
+            checked_at=NOW,
+        )
+        database.flush()
+
+        bill = database.scalars(
+            select(Bill).where(Bill.identifier_normalized == "DR-15-2026")
+        ).one()
+        assert bill.title_bm == "RUU Perlindungan Saksi"
+        assert bill.title_en == "Witness Protection Bill"
+
+        english = search_bills(database, query="Witness Protection")
+        assert english.items == (bill,)
+        malay = search_bills(database, query="Perlindungan Saksi")
+        assert malay.items == (bill,)
+        # One bill, not two: the English page must not create a second record.
+        assert len(database.scalars(select(Bill)).all()) == 2

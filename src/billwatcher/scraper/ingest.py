@@ -1,12 +1,13 @@
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from billwatcher.domain.vocabulary import EVENT_TYPE_TO_CHAMBER_FIELD
 from billwatcher.models import (
-    Anomaly,
     Bill,
     BillDocument,
     BillEvent,
@@ -16,12 +17,21 @@ from billwatcher.models import (
     FetchQueueItem,
     SourceSnapshot,
 )
+from billwatcher.operations import record_anomaly
 from billwatcher.scraper.changes import update_tracked_field
 from billwatcher.scraper.normalize import canonicalize_url, normalize_text
-from billwatcher.scraper.parse_listing import ParsedListing, parse_listing
+from billwatcher.scraper.parse_listing import (
+    ParsedDateCell,
+    ParsedListing,
+    parse_listing,
+)
 from billwatcher.search.indexer import rebuild_bill_metadata_unit
 from billwatcher.storage.blobs import BlobStore
 from billwatcher.version import PARSER_VERSION
+
+# Anomaly detail is bounded (HANDOFF 8); a broken page must not write an unbounded blob.
+MAX_ISSUE_ROWS = 20
+MAX_ISSUE_VALUES = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +57,13 @@ def ingest_listing(
     change_source: str = "scrape",
 ) -> IngestCounts:
     inserted = updated = chamber_inserted = changes = events = queued = 0
+    _record_parse_issues(
+        session,
+        listing,
+        source_url=source_url,
+        snapshot_id=snapshot_id,
+        observed_at=checked_at,
+    )
     for parsed in listing.records:
         bill = session.scalar(
             select(Bill).where(Bill.identifier_normalized == parsed.identifier.normalized)
@@ -160,6 +177,20 @@ def ingest_listing(
             observed_at=checked_at,
         ):
             events += 1
+        dated_changes, dated_events = _apply_dated_columns(
+            session,
+            bill=bill,
+            chamber_record=chamber_record,
+            chamber=chamber,
+            cells=parsed.dates,
+            source_url=source_url,
+            snapshot_id=snapshot_id,
+            run_id=run_id,
+            checked_at=checked_at,
+            change_source=change_source,
+        )
+        changes += dated_changes
+        events += dated_events
         rebuild_bill_metadata_unit(session, bill)
         for raw_url in parsed.document_urls:
             if _link_and_queue_document(
@@ -203,6 +234,86 @@ def replay_snapshot(
     )
 
 
+def event_fingerprint(
+    *,
+    bill_id: str,
+    chamber: str,
+    event_type: str,
+    event_on: date | None,
+    event_on_end: date | None,
+    sequence: int,
+    source_label: str,
+    source_value: str,
+) -> str:
+    """The recipe documented in docs/data-model.md.
+
+    Run, snapshot, and observation timestamps are excluded so replaying the same bytes at the
+    same parser version produces the same fingerprints and therefore no duplicate events.
+    """
+    stable = "|".join(
+        (
+            bill_id,
+            chamber,
+            event_type,
+            event_on.isoformat() if event_on else "",
+            event_on_end.isoformat() if event_on_end else "",
+            str(sequence),
+            normalize_text(source_label).casefold(),
+            normalize_text(source_value).casefold(),
+        )
+    )
+    return hashlib.sha256(stable.encode()).hexdigest()
+
+
+def _insert_event(
+    session: Session,
+    *,
+    bill: Bill,
+    chamber: str,
+    event_type: str,
+    source_label: str,
+    source_value: str,
+    source_url: str,
+    snapshot_id: str,
+    run_id: str,
+    observed_at: datetime,
+    event_on: date | None = None,
+    event_on_end: date | None = None,
+    sequence: int = 0,
+) -> bool:
+    fingerprint = event_fingerprint(
+        bill_id=bill.id,
+        chamber=chamber,
+        event_type=event_type,
+        event_on=event_on,
+        event_on_end=event_on_end,
+        sequence=sequence,
+        source_label=source_label,
+        source_value=source_value,
+    )
+    if session.scalar(select(BillEvent.id).where(BillEvent.fingerprint == fingerprint)):
+        return False
+    session.add(
+        BillEvent(
+            bill_id=bill.id,
+            chamber=chamber,
+            event_type=event_type,
+            event_on=event_on,
+            event_on_end=event_on_end,
+            sequence=sequence,
+            source_label=source_label,
+            source_value=source_value,
+            source_url=source_url,
+            snapshot_id=snapshot_id,
+            run_id=run_id,
+            parser_version=PARSER_VERSION,
+            observed_at=observed_at,
+            fingerprint=fingerprint,
+        )
+    )
+    return True
+
+
 def _insert_status_event(
     session: Session,
     *,
@@ -214,38 +325,87 @@ def _insert_status_event(
     run_id: str,
     observed_at: datetime,
 ) -> bool:
-    stable = "|".join(
-        (
-            bill.id,
-            chamber,
-            "status_observed",
-            "",
-            "",
-            "0",
-            normalize_text("status").casefold(),
-            normalize_text(status_raw).casefold(),
-        )
+    return _insert_event(
+        session,
+        bill=bill,
+        chamber=chamber,
+        event_type="status_observed",
+        source_label="Status",
+        source_value=status_raw,
+        source_url=source_url,
+        snapshot_id=snapshot_id,
+        run_id=run_id,
+        observed_at=observed_at,
     )
-    fingerprint = hashlib.sha256(stable.encode()).hexdigest()
-    if session.scalar(select(BillEvent.id).where(BillEvent.fingerprint == fingerprint)):
-        return False
-    session.add(
-        BillEvent(
-            bill_id=bill.id,
-            chamber=chamber,
-            event_type="status_observed",
-            sequence=0,
-            source_label="Status",
-            source_value=status_raw,
-            source_url=source_url,
-            snapshot_id=snapshot_id,
+
+
+def _apply_dated_columns(
+    session: Session,
+    *,
+    bill: Bill,
+    chamber_record: ChamberRecord,
+    chamber: str,
+    cells: Sequence[ParsedDateCell],
+    source_url: str,
+    snapshot_id: str,
+    run_id: str,
+    checked_at: datetime,
+    change_source: str,
+) -> tuple[int, int]:
+    """Project dated listing columns onto events and the chamber-record shortcut columns.
+
+    Events are the authoritative history: a cell holding a range keeps both ends, and a cell
+    holding several dates produces several events with an incrementing sequence (HANDOFF 11.5).
+    """
+    changes = events = 0
+    for cell in cells:
+        if cell.error is not None:
+            _upsert_anomaly(
+                session,
+                "unparseable_date",
+                "warn",
+                "chamber_record",
+                chamber_record.id,
+                source_url,
+                checked_at,
+                {"label": cell.label, "raw": cell.raw, "error": cell.error},
+            )
+            continue
+        for sequence, span in enumerate(cell.ranges):
+            if _insert_event(
+                session,
+                bill=bill,
+                chamber=chamber,
+                event_type=cell.event_type,
+                source_label=cell.label,
+                source_value=cell.raw,
+                source_url=source_url,
+                snapshot_id=snapshot_id,
+                run_id=run_id,
+                observed_at=checked_at,
+                event_on=span.start,
+                event_on_end=span.end,
+                sequence=sequence,
+            ):
+                events += 1
+        field = EVENT_TYPE_TO_CHAMBER_FIELD.get(cell.event_type)
+        if field is None or not cell.ranges:
+            continue
+        if update_tracked_field(
+            session,
+            entity=chamber_record,
+            entity_type="chamber_record",
+            field_path=field,
+            incoming=cell.ranges[0].start,
+            changed_at=checked_at,
+            change_source=change_source,
             run_id=run_id,
-            parser_version=PARSER_VERSION,
-            observed_at=observed_at,
-            fingerprint=fingerprint,
-        )
-    )
-    return True
+            snapshot_id=snapshot_id,
+            source_url=source_url,
+        ):
+            chamber_record.last_changed_at = checked_at
+            changes += 1
+    return changes, events
 
 
 def _link_and_queue_document(
@@ -318,28 +478,55 @@ def _upsert_anomaly(
     now: datetime,
     detail: dict[str, object],
 ) -> None:
-    anomaly = session.scalar(
-        select(Anomaly).where(
-            Anomaly.kind == kind,
-            Anomaly.entity_type == entity_type,
-            Anomaly.entity_id == entity_id,
-            Anomaly.resolved_at.is_(None),
-        )
+    record_anomaly(
+        session,
+        kind=kind,
+        severity=severity,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        url=url,
+        detail=detail,
+        now=now,
     )
-    if anomaly:
-        anomaly.last_seen_at = now
-        anomaly.occurrence_count += 1
-        anomaly.detail_json = detail
-    else:
-        session.add(
-            Anomaly(
-                kind=kind,
-                severity=severity,
-                entity_type=entity_type,
-                entity_id=entity_id,
-                url=url,
-                detail_json=detail,
-                first_seen_at=now,
-                last_seen_at=now,
-            )
+
+
+def _record_parse_issues(
+    session: Session,
+    listing: ParsedListing,
+    *,
+    source_url: str,
+    snapshot_id: str,
+    observed_at: datetime,
+) -> None:
+    """Turn retained bad rows into anomalies so nothing disappears without a trace.
+
+    Anomalies deduplicate by kind plus entity (HANDOFF 8), so one snapshot yields at most one
+    anomaly per kind, carrying a bounded list of the offending rows.
+    """
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for issue in listing.issues:
+        conflict = issue.reason.startswith("duplicate identifier")
+        key = (
+            ("duplicate_identifier_conflict", "critical")
+            if conflict
+            else ("unparseable_identifier", "warn")
+        )
+        grouped.setdefault(key, []).append(
+            {
+                "row": issue.row_number,
+                "reason": issue.reason,
+                "raw_identifier": issue.raw_identifier,
+                "raw_values": list(issue.raw_values)[:MAX_ISSUE_VALUES],
+            }
+        )
+    for (kind, severity), rows in grouped.items():
+        _upsert_anomaly(
+            session,
+            kind,
+            severity,
+            "source_snapshot",
+            snapshot_id,
+            source_url,
+            observed_at,
+            {"count": len(rows), "rows": rows[:MAX_ISSUE_ROWS]},
         )

@@ -1,12 +1,61 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from billwatcher.models import Anomaly, Blob, CoverageTarget, DocumentVersion
 from billwatcher.storage.blobs import BlobStore
+
+
+def record_anomaly(
+    session: Session,
+    *,
+    kind: str,
+    severity: str,
+    detail: dict[str, Any],
+    now: datetime,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    url: str | None = None,
+) -> Anomaly:
+    """Upsert one anomaly, deduplicating by kind plus entity (HANDOFF 8).
+
+    A recurring condition must accumulate an occurrence count on one row rather than filling
+    the table with copies, because `/status` and `make doctor` read these as a work list.
+    """
+    lookup = select(Anomaly).where(
+        Anomaly.kind == kind,
+        Anomaly.resolved_at.is_(None),
+    )
+    lookup = lookup.where(
+        Anomaly.entity_type.is_(None) if entity_type is None else Anomaly.entity_type == entity_type
+    )
+    lookup = lookup.where(
+        Anomaly.entity_id.is_(None) if entity_id is None else Anomaly.entity_id == entity_id
+    )
+    existing = session.scalar(lookup)
+    if existing is not None:
+        existing.last_seen_at = now
+        existing.occurrence_count += 1
+        existing.detail_json = detail
+        if url:
+            existing.url = url
+        return existing
+    anomaly = Anomaly(
+        kind=kind,
+        severity=severity,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        url=url,
+        detail_json=detail,
+        first_seen_at=now,
+        last_seen_at=now,
+    )
+    session.add(anomaly)
+    return anomaly
 
 
 def evaluate_coverage(session: Session, *, now: datetime | None = None) -> list[CoverageTarget]:

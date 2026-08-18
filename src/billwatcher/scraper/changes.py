@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -9,9 +9,38 @@ from billwatcher.scraper.normalize import normalize_text
 from billwatcher.version import PARSER_VERSION
 
 
+def jsonable(value: Any) -> Any:
+    """Render a stored value for the JSON change log without losing it.
+
+    `record_changes.value_before` and `value_after` are JSON columns, so dates and timestamps
+    are written as ISO-8601 text. The entity itself keeps the real typed value.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def coerce_like(current: Any, incoming: Any) -> Any:
+    """Bring a JSON-decoded override value back to the column's type before assigning it."""
+    if (
+        isinstance(incoming, str)
+        and isinstance(current, date)
+        and not isinstance(current, datetime)
+    ):
+        try:
+            return date.fromisoformat(incoming)
+        except ValueError:
+            return incoming
+    return incoming
+
+
 def normalized_equal(before: Any, after: Any) -> bool:
     if isinstance(before, str) and isinstance(after, str):
         return normalize_text(before) == normalize_text(after)
+    if isinstance(before, date | datetime) or isinstance(after, date | datetime):
+        return bool(jsonable(before) == jsonable(after))
     return bool(before == after)
 
 
@@ -63,7 +92,7 @@ def update_tracked_field(
     )
     value = incoming
     if override is not None:
-        value = override.value
+        value = coerce_like(before, override.value)
         if not normalized_equal(incoming, override.upstream_value_at_creation):
             _upsert_override_conflict(
                 session,
@@ -81,8 +110,8 @@ def update_tracked_field(
             entity_type=entity_type,
             entity_id=entity.id,
             field_path=field_path,
-            value_before=before,
-            value_after=value,
+            value_before=jsonable(before),
+            value_after=jsonable(value),
             changed_at=changed_at,
             change_source=change_source,
             run_id=run_id,

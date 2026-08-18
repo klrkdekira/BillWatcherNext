@@ -14,6 +14,7 @@ from billwatcher.models import (
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.queue import fail_item, finish_item, lease_next
 from billwatcher.scraper.service import (
+    evaluate_extraction_health,
     persist_current_extraction,
     persist_document_observation,
 )
@@ -98,6 +99,7 @@ def process_one_document(
             if current is None:
                 raise RuntimeError("accepted version was not promoted")
             persist_current_extraction(session, version=current, blob_store=blob_store)
+            evaluate_extraction_health(session, now=now)
         document.absent_streak = 0
         finish_item(item, owner=owner)
     except Exception as error:

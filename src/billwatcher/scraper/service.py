@@ -12,6 +12,7 @@ from billwatcher.models import (
     DocumentRelation,
     DocumentVersion,
 )
+from billwatcher.operations import record_anomaly
 from billwatcher.scraper.versioning import (
     DownloadObservation,
     KnownVersion,
@@ -142,30 +143,15 @@ def _add_anomaly(
     now: datetime,
     detail: dict[str, object],
 ) -> None:
-    existing = session.scalar(
-        select(Anomaly).where(
-            Anomaly.kind == kind,
-            Anomaly.entity_type == "document",
-            Anomaly.entity_id == document.id,
-            Anomaly.resolved_at.is_(None),
-        )
-    )
-    if existing is not None:
-        existing.last_seen_at = now
-        existing.occurrence_count += 1
-        existing.detail_json = detail
-        return
-    session.add(
-        Anomaly(
-            kind=kind,
-            severity=severity,
-            entity_type="document",
-            entity_id=document.id,
-            url=document.canonical_source_url,
-            detail_json=detail,
-            first_seen_at=now.astimezone(UTC),
-            last_seen_at=now.astimezone(UTC),
-        )
+    record_anomaly(
+        session,
+        kind=kind,
+        severity=severity,
+        entity_type="document",
+        entity_id=document.id,
+        url=document.canonical_source_url,
+        detail=detail,
+        now=now.astimezone(UTC),
     )
 
 
@@ -282,3 +268,83 @@ def _propose_reissue_relations(session: Session, *, document: Document, blob_sha
                 "shared_blob": blob_sha256,
             },
         )
+
+
+# HANDOFF 10.5: extraction failures are expected at a low rate (scanned documents, odd PDFs);
+# a spike means the extractor or the upstream document format changed.
+EXTRACTION_SPIKE_WINDOW = 20
+EXTRACTION_SPIKE_MIN_SAMPLE = 5
+EXTRACTION_SPIKE_FRACTION = 0.5
+
+
+def evaluate_extraction_health(
+    session: Session,
+    *,
+    now: datetime,
+    window: int = EXTRACTION_SPIKE_WINDOW,
+    min_sample: int = EXTRACTION_SPIKE_MIN_SAMPLE,
+    threshold: float = EXTRACTION_SPIKE_FRACTION,
+) -> float | None:
+    """Raise `extraction_failure_spike` when the recent failure rate exceeds the baseline.
+
+    Returns the measured failure rate, or None when there is too little data to judge.
+    """
+    recent = session.scalars(
+        select(DocumentExtraction)
+        .where(DocumentExtraction.is_current.is_(True))
+        .order_by(DocumentExtraction.created_at.desc())
+        .limit(window)
+    ).all()
+    if len(recent) < min_sample:
+        return None
+    failed = sum(1 for row in recent if row.status in {"failed", "empty"})
+    rate = failed / len(recent)
+    existing = session.scalar(
+        select(Anomaly).where(
+            Anomaly.kind == "extraction_failure_spike",
+            Anomaly.resolved_at.is_(None),
+        )
+    )
+    if rate < threshold:
+        if existing is not None:
+            existing.resolved_at = now
+        return rate
+    record_anomaly(
+        session,
+        kind="extraction_failure_spike",
+        severity="warn",
+        detail={
+            "failure_rate": round(rate, 4),
+            "threshold": threshold,
+            "sample": len(recent),
+            "failed": failed,
+        },
+        now=now,
+    )
+    return rate
+
+
+def record_pagination_loop(
+    session: Session,
+    *,
+    url: str,
+    snapshot_id: str | None,
+    error: Exception,
+    page: int,
+    now: datetime,
+) -> None:
+    """Record that a paginated target repeated a body or spent its page budget.
+
+    HANDOFF 10.5 defines this as a warning: the run stops paginating and keeps what it already
+    parsed rather than grinding against a target that never terminates.
+    """
+    record_anomaly(
+        session,
+        kind="pagination_loop",
+        severity="warn",
+        entity_type="source_snapshot" if snapshot_id else None,
+        entity_id=snapshot_id,
+        url=url,
+        detail={"page": page, "reason": str(error)[:500]},
+        now=now,
+    )

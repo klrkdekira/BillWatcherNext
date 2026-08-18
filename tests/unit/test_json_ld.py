@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from billwatcher.models import Bill, ChamberRecord
-from billwatcher.web.app import legislation_json_ld
+from billwatcher.web.schemas import legislation_json_ld
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
 
