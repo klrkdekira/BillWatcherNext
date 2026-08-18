@@ -16,7 +16,7 @@ from billwatcher.models import (
 from billwatcher.scraper.document_worker import process_one_document
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
 URL = "https://www.parlimen.gov.my/a.pdf"
@@ -79,7 +79,7 @@ def test_worker_preserves_versions_and_extractions(tmp_path) -> None:
             assert process_one_document(
                 session,
                 fetcher=first_fetcher,
-                blob_store=BlobStore(tmp_path),
+                blob_store=FilesystemBlobStore(tmp_path),
                 run_id="run-one",
                 owner="worker",
                 now=NOW,
@@ -94,7 +94,7 @@ def test_worker_preserves_versions_and_extractions(tmp_path) -> None:
             process_one_document(
                 session,
                 fetcher=second_fetcher,
-                blob_store=BlobStore(tmp_path),
+                blob_store=FilesystemBlobStore(tmp_path),
                 run_id="run-two",
                 owner="worker",
                 now=NOW,
@@ -118,7 +118,7 @@ def test_304_does_not_create_version(tmp_path) -> None:
             process_one_document(
                 session,
                 fetcher=initial,
-                blob_store=BlobStore(tmp_path),
+                blob_store=FilesystemBlobStore(tmp_path),
                 run_id="run-one",
                 owner="worker",
                 now=NOW,
@@ -129,7 +129,7 @@ def test_304_does_not_create_version(tmp_path) -> None:
             process_one_document(
                 session,
                 fetcher=unchanged,
-                blob_store=BlobStore(tmp_path),
+                blob_store=FilesystemBlobStore(tmp_path),
                 run_id="run-two",
                 owner="worker",
                 now=NOW,

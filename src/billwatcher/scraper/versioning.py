@@ -60,10 +60,14 @@ def decide_document_version(
     )
     next_number = max((version.version_no for version in known_versions), default=0) + 1
 
-    declared = (observation.media_type_declared or "").split(";", 1)[0].strip().casefold()
-    invalid_pdf = declared != "application/pdf" or not observation.body.startswith(b"%PDF-")
-    if expected_pdf and invalid_pdf:
-        reason = "expected application/pdf with PDF magic bytes"
+    # The bytes are authoritative, not the header. HANDOFF 9.3 quarantines the case where the
+    # response is not the document at all — the classic example being an HTML session-expiry
+    # page served at a .pdf URL. A genuine PDF sent with a lazy or generic Content-Type is a
+    # sloppy header, not corrupt content, and Parliament does exactly that: it serves
+    # application/octet-stream. Quarantining those would archive nothing at all.
+    if expected_pdf and not observation.body.startswith(b"%PDF-"):
+        preview = observation.body[:16].decode("ascii", errors="replace")
+        reason = f"response is not a PDF; it begins {preview!r}"
         return VersionDecision(VersionAction.QUARANTINED, digest, next_number, reason)
 
     if matching is not None:

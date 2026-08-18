@@ -25,7 +25,11 @@ from billwatcher.models import (
     ScrapeRun,
 )
 from billwatcher.operations import diagnose, evaluate_coverage, prune_unreferenced_blobs
-from billwatcher.scraper.document_worker import process_one_document
+from billwatcher.scraper.document_worker import (
+    close_document_run,
+    open_document_run,
+    process_one_document,
+)
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
 from billwatcher.scraper.queue import CrawlBudget
@@ -33,7 +37,7 @@ from billwatcher.scraper.worker import ScrapeOrchestrator
 from billwatcher.search.embeddings import EmbeddingProviderUnavailable, build_provider
 from billwatcher.search.evaluation import evaluate
 from billwatcher.search.rag import AnswerProviderUnavailable, build_answer_provider
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage import build_blob_store
 from billwatcher.version import PARSER_VERSION
 
 app = typer.Typer(no_args_is_help=True, help="BillWatcherNext operator commands.")
@@ -85,7 +89,7 @@ def scrape(
         run = ScrapeOrchestrator(
             session=session,
             fetcher=fetcher,
-            blob_store=BlobStore(settings.blob_storage_root),
+            blob_store=build_blob_store(settings),
             budget=budget,
             count_drop_abort_fraction=settings.count_drop_abort_fraction,
             absence_streak_alert=settings.absence_streak_alert,
@@ -232,7 +236,7 @@ def worker(poll_seconds: int = 60) -> None:
                     ScrapeOrchestrator(
                         session=session,
                         fetcher=fetcher,
-                        blob_store=BlobStore(settings.blob_storage_root),
+                        blob_store=build_blob_store(settings),
                         budget=budget,
                         count_drop_abort_fraction=settings.count_drop_abort_fraction,
                         absence_streak_alert=settings.absence_streak_alert,
@@ -242,13 +246,18 @@ def worker(poll_seconds: int = 60) -> None:
                 interval = settings.scrape_interval_hours * 3600
                 next_scrape_at = time.monotonic() + interval * random.uniform(0.95, 1.05)
             with SessionLocal() as session, Fetcher(policy()) as fetcher:
-                process_one_document(
-                    session,
-                    fetcher=fetcher,
-                    blob_store=BlobStore(settings.blob_storage_root),
-                    run_id="scheduled-document-worker",
-                    owner=f"worker-{datetime.now(UTC).timestamp()}",
+                run = open_document_run(session, trigger="schedule")
+                session.commit()
+                processed = int(
+                    process_one_document(
+                        session,
+                        fetcher=fetcher,
+                        blob_store=build_blob_store(settings),
+                        run_id=run.id,
+                        owner=f"worker-{datetime.now(UTC).timestamp()}",
+                    )
                 )
+                close_document_run(session, run, processed=processed)
                 session.commit()
         except Exception as error:
             typer.echo(f"worker iteration failed: {type(error).__name__}", err=True)
@@ -256,18 +265,28 @@ def worker(poll_seconds: int = 60) -> None:
 
 
 @app.command("document-worker")
-def document_worker(once: bool = True) -> None:
+def document_worker(once: bool = True, limit: int = 1) -> None:
+    """Download queued documents. Every attempt is attributed to a real run row."""
     settings = get_settings()
     with SessionLocal() as session, Fetcher(policy()) as fetcher:
-        processed = process_one_document(
-            session,
-            fetcher=fetcher,
-            blob_store=BlobStore(settings.blob_storage_root),
-            run_id="document-worker",
-            owner=f"cli-{datetime.now(UTC).timestamp()}",
-        )
+        run = open_document_run(session, trigger="manual")
         session.commit()
-    typer.echo("processed" if processed else "queue empty")
+        store = build_blob_store(settings)
+        processed = 0
+        for _ in range(max(1, limit)):
+            if not process_one_document(
+                session,
+                fetcher=fetcher,
+                blob_store=store,
+                run_id=run.id,
+                owner=f"cli-{datetime.now(UTC).timestamp()}",
+            ):
+                break
+            processed += 1
+            session.commit()
+        close_document_run(session, run, processed=processed)
+        session.commit()
+    typer.echo(json.dumps({"run_id": run.id, "processed": processed}))
     if not once:
         typer.echo("continuous scheduling is provided by the container worker loop")
 
@@ -288,7 +307,7 @@ def load_fixtures(
         )
         raise typer.Exit(2)
     with SessionLocal() as session:
-        report = load_fixture_listings(session, blob_store=BlobStore(settings.blob_storage_root))
+        report = load_fixture_listings(session, blob_store=build_blob_store(settings))
         session.commit()
         typer.echo(json.dumps(report.as_counts()))
 
@@ -333,7 +352,7 @@ def runtime_status() -> None:
 def doctor() -> None:
     settings = get_settings()
     with SessionLocal() as session:
-        failures = diagnose(session, blob_store=BlobStore(settings.blob_storage_root))
+        failures = diagnose(session, blob_store=build_blob_store(settings))
     for failure in failures:
         typer.echo(f"FAIL: {failure}", err=True)
     if failures:
@@ -344,7 +363,7 @@ def doctor() -> None:
 @app.command("verify-storage")
 def verify_storage() -> None:
     settings = get_settings()
-    store = BlobStore(settings.blob_storage_root)
+    store = build_blob_store(settings)
     failures = 0
     orphaned = 0
     with SessionLocal() as session:
@@ -364,7 +383,7 @@ def verify_storage() -> None:
 @app.command("prune-blobs")
 def prune_blobs(apply: bool = typer.Option(False, "--apply")) -> None:
     settings = get_settings()
-    store = BlobStore(settings.blob_storage_root)
+    store = build_blob_store(settings)
     with SessionLocal() as session:
         try:
             report = prune_unreferenced_blobs(session, blob_store=store, dry_run=not apply)
@@ -395,7 +414,7 @@ def reparse(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> N
     with SessionLocal() as session:
         job = run_reparse(
             session,
-            blob_store=BlobStore(get_settings().blob_storage_root),
+            blob_store=build_blob_store(get_settings()),
             dry_run=not apply,
             limit=limit,
         )
@@ -408,7 +427,7 @@ def reextract(apply: bool = typer.Option(False, "--apply"), limit: int = 100) ->
     with SessionLocal() as session:
         job = run_reextract(
             session,
-            blob_store=BlobStore(get_settings().blob_storage_root),
+            blob_store=build_blob_store(get_settings()),
             dry_run=not apply,
             limit=limit,
         )

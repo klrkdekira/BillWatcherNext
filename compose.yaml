@@ -19,6 +19,28 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "5"}
 
+  # VersityGW puts an S3 API in front of the archive volume. The bytes stay on the same
+  # POSIX volume with the same content-addressed layout, so the gateway can be added or removed
+  # without migrating anything; it is what standard S3 tooling and off-host backup talk to.
+  # Internal only: it is never published to the host and never reachable from the internet.
+  blobs:
+    image: versity/versitygw:v1.7.0
+    command: ["--port", ":7070", "--iam-dir", "/iam", "posix", "/data"]
+    environment:
+      ROOT_ACCESS_KEY: $S3_ACCESS_KEY_ID
+      ROOT_SECRET_KEY: $S3_SECRET_ACCESS_KEY
+    volumes:
+      - blobs:/data
+      - blob_iam:/iam
+    healthcheck:
+      test: ["CMD-SHELL", "versitygw --version >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [backend]
+    logging: *logging
+
   migrate:
     build: .
     command: ["billwatcher", "migrate"]
@@ -34,7 +56,9 @@ services:
     env_file: .env
     depends_on:
       migrate: {condition: service_completed_successfully}
+      blobs: {condition: service_started}
     volumes:
+      # Still mounted read-only as a fallback when BLOB_STORAGE_BACKEND=filesystem.
       - blobs:/var/lib/billwatcher/blobs:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
@@ -53,6 +77,7 @@ services:
     env_file: .env
     depends_on:
       migrate: {condition: service_completed_successfully}
+      blobs: {condition: service_started}
     volumes:
       - blobs:/var/lib/billwatcher/blobs
     restart: unless-stopped
@@ -85,5 +110,6 @@ networks:
 volumes:
   postgres_data:
   blobs:
+  blob_iam:
   caddy_data:
   caddy_config:

@@ -22,7 +22,7 @@ from billwatcher.models import (
 )
 from billwatcher.scraper.ingest import ingest_listing, replay_snapshot
 from billwatcher.scraper.parse_listing import parse_listing
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 from billwatcher.version import PARSER_VERSION
 
 FIXTURES = Path("tests/fixtures/parliament")
@@ -203,14 +203,14 @@ def test_active_override_survives_and_conflict_is_anomaly() -> None:
 
 def test_snapshot_replay_is_offline_and_same_parser_is_noop(tmp_path) -> None:
     with session() as database:
-        store = BlobStore(tmp_path)
+        store = FilesystemBlobStore(tmp_path)
         stored = store.put((FIXTURES / "current_dr_bm.html").read_bytes(), compress=True)
         database.add(
             Blob(
                 sha256=stored.sha256,
                 byte_size=stored.byte_size,
                 media_type="text/html",
-                storage_path=str(stored.path),
+                storage_path=stored.location,
                 compression=stored.compression,
                 ref_count=1,
             )
@@ -257,14 +257,14 @@ def test_snapshot_replay_is_offline_and_same_parser_is_noop(tmp_path) -> None:
 def test_replay_at_a_bumped_parser_attributes_changes_and_keeps_overrides(tmp_path) -> None:
     """A corrected parser rewrites our record as a replay, and never clobbers an override."""
     with session() as database:
-        store = BlobStore(tmp_path)
+        store = FilesystemBlobStore(tmp_path)
         stored = store.put((FIXTURES / "current_dr_bm.html").read_bytes(), compress=True)
         database.add(
             Blob(
                 sha256=stored.sha256,
                 byte_size=stored.byte_size,
                 media_type="text/html",
-                storage_path=str(stored.path),
+                storage_path=stored.location,
                 compression=stored.compression,
                 ref_count=1,
             )

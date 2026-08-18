@@ -1,6 +1,7 @@
 """Operational gates that substitute for CI: doctor, blob pruning, and retention."""
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -20,7 +21,7 @@ from billwatcher.models import (
     SourceSnapshot,
 )
 from billwatcher.operations import diagnose, prune_unreferenced_blobs
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
 
@@ -42,7 +43,7 @@ def anomaly(kind: str, severity: str) -> Anomaly:
 def test_doctor_fails_on_a_seeded_critical_anomaly_and_clears_when_resolved(
     session: Session, tmp_path
 ) -> None:
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     assert diagnose(session, blob_store=store) == []
 
     session.add(anomaly("structure_drift", "critical"))
@@ -56,7 +57,7 @@ def test_doctor_fails_on_a_seeded_critical_anomaly_and_clears_when_resolved(
 
 
 def test_doctor_ignores_warnings_but_reports_a_missing_blob(session: Session, tmp_path) -> None:
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     session.add(anomaly("unmapped_status", "warn"))
     stored = store.put(b"%PDF-1.7 present", compress=False)
     session.add(
@@ -64,7 +65,7 @@ def test_doctor_ignores_warnings_but_reports_a_missing_blob(session: Session, tm
             sha256=stored.sha256,
             byte_size=stored.byte_size,
             media_type="application/pdf",
-            storage_path=str(stored.path),
+            storage_path=stored.location,
             compression=stored.compression,
             ref_count=1,
         )
@@ -72,12 +73,12 @@ def test_doctor_ignores_warnings_but_reports_a_missing_blob(session: Session, tm
     session.flush()
     assert diagnose(session, blob_store=store) == []
 
-    stored.path.unlink()
+    Path(stored.location).unlink()
     assert diagnose(session, blob_store=store) == [f"blob missing or corrupt: {stored.sha256}"]
 
 
 def test_prune_keeps_a_blob_two_documents_share(session: Session, tmp_path) -> None:
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     shared = store.put(b"%PDF-1.7 shared bytes", compress=False)
     orphan = store.put(b"%PDF-1.7 nothing points here", compress=False)
     session.add_all(
@@ -86,7 +87,7 @@ def test_prune_keeps_a_blob_two_documents_share(session: Session, tmp_path) -> N
                 sha256=shared.sha256,
                 byte_size=shared.byte_size,
                 media_type="application/pdf",
-                storage_path=str(shared.path),
+                storage_path=shared.location,
                 compression=shared.compression,
                 ref_count=2,
             ),
@@ -94,7 +95,7 @@ def test_prune_keeps_a_blob_two_documents_share(session: Session, tmp_path) -> N
                 sha256=orphan.sha256,
                 byte_size=orphan.byte_size,
                 media_type="application/pdf",
-                storage_path=str(orphan.path),
+                storage_path=orphan.location,
                 compression=orphan.compression,
                 ref_count=0,
             ),
@@ -105,13 +106,13 @@ def test_prune_keeps_a_blob_two_documents_share(session: Session, tmp_path) -> N
     dry = prune_unreferenced_blobs(session, blob_store=store, dry_run=True)
     assert dry.database_candidates == 1
     assert dry.deleted == 0
-    assert shared.path.exists() and orphan.path.exists()
+    assert Path(shared.location).exists() and Path(orphan.location).exists()
 
     applied = prune_unreferenced_blobs(session, blob_store=store, dry_run=False)
     session.flush()
     assert applied.deleted == 1
-    assert shared.path.exists()
-    assert not orphan.path.exists()
+    assert Path(shared.location).exists()
+    assert not Path(orphan.location).exists()
     assert session.get(Blob, shared.sha256) is not None
     assert session.get(Blob, orphan.sha256) is None
 
@@ -249,14 +250,14 @@ def _document_version(session: Session) -> str:
 
 def test_retention_releases_only_failed_snapshot_blobs(session: Session, tmp_path) -> None:
     run = _run(session)
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     stored = store.put(b"<html>gateway error</html>", compress=True)
     session.add(
         Blob(
             sha256=stored.sha256,
             byte_size=stored.byte_size,
             media_type="text/html",
-            storage_path=str(stored.path),
+            storage_path=stored.location,
             compression=stored.compression,
             ref_count=1,
         )
@@ -282,4 +283,4 @@ def test_retention_releases_only_failed_snapshot_blobs(session: Session, tmp_pat
     blob = session.get(Blob, stored.sha256)
     assert blob is not None and blob.ref_count == 0
     # Retention never deletes bytes; only the reference-checked pruner may.
-    assert stored.path.exists()
+    assert Path(stored.location).exists()

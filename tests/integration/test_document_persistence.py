@@ -7,7 +7,7 @@ from billwatcher.db import Base
 from billwatcher.models import Anomaly, Blob, Document, DocumentRelation, DocumentVersion
 from billwatcher.scraper.service import persist_document_observation
 from billwatcher.scraper.versioning import DownloadObservation, VersionAction
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 
 PDF_A = b"%PDF-1.7\nA"
 PDF_B = b"%PDF-1.7\nB"
@@ -30,7 +30,7 @@ def document() -> Document:
 def persist(
     session: Session,
     item: Document,
-    store: BlobStore,
+    store: FilesystemBlobStore,
     body: bytes | None,
     when: datetime,
     status: int = 200,
@@ -50,7 +50,7 @@ def persist(
 def test_changed_identical_rollback_and_quarantine_are_preserved(tmp_path) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     with Session(engine) as session:
         item = document()
         session.add(item)
@@ -120,7 +120,7 @@ def test_304_only_advances_check_and_verification_times(tmp_path) -> None:
         item = document()
         session.add(item)
         session.flush()
-        store = BlobStore(tmp_path)
+        store = FilesystemBlobStore(tmp_path)
         persist(session, item, store, PDF_A, NOW)
         session.flush()
         changed_at = item.last_changed_at
@@ -137,7 +137,7 @@ def test_identical_bytes_at_a_new_url_propose_a_relation_and_never_auto_merge(tm
     """HANDOFF 9.2: same bytes at a new URL is a distinct document sharing one blob."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     with Session(engine) as session:
         original = document()
         reissued = document()

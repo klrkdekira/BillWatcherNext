@@ -18,6 +18,8 @@ from billwatcher.search.rag import (
     AnswerProviderUnavailable,
     build_answer_provider,
 )
+from billwatcher.storage import build_blob_store
+from billwatcher.storage.blobs import BlobStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,7 @@ class Retrieval:
     embedding_provider: EmbeddingProvider | None
     answer_provider: AnswerProvider | None
     cache: QueryEmbeddingCache
+    blob_store: BlobStore
 
 
 def build_retrieval(settings: Settings) -> Retrieval:
@@ -43,6 +46,7 @@ def build_retrieval(settings: Settings) -> Retrieval:
         except AnswerProviderUnavailable:
             answer_provider = None
     return Retrieval(
+        blob_store=build_blob_store(settings),
         embedding_provider=embedding_provider,
         answer_provider=answer_provider,
         cache=QueryEmbeddingCache(settings.query_embedding_cache_size),

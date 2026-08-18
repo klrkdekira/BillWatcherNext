@@ -20,7 +20,7 @@ from billwatcher.models import (
     SearchUnit,
     SourceSnapshot,
 )
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ def session() -> Iterator[Session]:
 
 
 def test_loading_fixtures_populates_a_browsable_site(session: Session, tmp_path) -> None:
-    report = load_fixture_listings(session, blob_store=BlobStore(tmp_path))
+    report = load_fixture_listings(session, blob_store=FilesystemBlobStore(tmp_path))
     session.flush()
 
     assert report.targets == len(FIXTURE_TARGETS)
@@ -72,14 +72,14 @@ def test_loading_fixtures_populates_a_browsable_site(session: Session, tmp_path)
 
 def test_a_first_load_records_only_genuine_changes(session: Session, tmp_path) -> None:
     """Inserting a record is not a change to it; only the English reconciliation is."""
-    load_fixture_listings(session, blob_store=BlobStore(tmp_path))
+    load_fixture_listings(session, blob_store=FilesystemBlobStore(tmp_path))
     session.flush()
     changes = session.scalars(select(RecordChange)).all()
     assert [change.field_path for change in changes] == ["title_en"]
 
 
 def test_reloading_adds_an_observation_but_no_duplicates(session: Session, tmp_path) -> None:
-    store = BlobStore(tmp_path)
+    store = FilesystemBlobStore(tmp_path)
     load_fixture_listings(session, blob_store=store)
     session.flush()
     bills = session.scalar(select(func.count()).select_from(Bill))
@@ -107,7 +107,7 @@ def test_reloading_adds_an_observation_but_no_duplicates(session: Session, tmp_p
 
 def test_the_english_listing_never_overwrites_the_malay_record(session: Session, tmp_path) -> None:
     """HANDOFF 11.3 step 8: reconcile English titles by identifier, and nothing else."""
-    load_fixture_listings(session, blob_store=BlobStore(tmp_path))
+    load_fixture_listings(session, blob_store=FilesystemBlobStore(tmp_path))
     session.flush()
     bill = session.scalars(select(Bill).where(Bill.identifier_normalized == "DR-15-2026")).one()
     rakyat = session.scalars(
@@ -127,6 +127,6 @@ def test_a_missing_fixture_fails_loudly(session: Session, tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="fixture is missing"):
         load_fixture_listings(
             session,
-            blob_store=BlobStore(tmp_path),
+            blob_store=FilesystemBlobStore(tmp_path),
             targets=(FixtureTarget("nope.html", "dewan_rakyat", "current", "ms", "https://x/y"),),
         )

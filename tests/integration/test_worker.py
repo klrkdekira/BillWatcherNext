@@ -20,7 +20,7 @@ from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
 from billwatcher.scraper.queue import CrawlBudget
 from billwatcher.scraper.worker import ScrapeOrchestrator
-from billwatcher.storage.blobs import BlobStore
+from billwatcher.storage.blobs import FilesystemBlobStore
 
 FIXTURES = Path("tests/fixtures/parliament")
 POLICY = CrawlPolicy("BillWatcherNext/0.1 (+https://example.org/about)")
@@ -84,7 +84,7 @@ def orchestrator(
     return ScrapeOrchestrator(
         session=database,
         fetcher=fetcher,
-        blob_store=BlobStore(tmp_path),
+        blob_store=FilesystemBlobStore(tmp_path),
         budget=CrawlBudget(20, 1_000_000, 60, 20),
         sleep=lambda _delay: None,
         allow_missing_robots=allow_missing_robots,
@@ -124,7 +124,7 @@ def test_new_document_budget_rolls_back_listing_publication(tmp_path) -> None:
         worker = ScrapeOrchestrator(
             session=database,
             fetcher=fetcher,
-            blob_store=BlobStore(tmp_path),
+            blob_store=FilesystemBlobStore(tmp_path),
             budget=CrawlBudget(20, 1_000_000, 60, 0),
             sleep=lambda _delay: None,
         )

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -174,18 +173,14 @@ def prune_unreferenced_blobs(
     orphans = sorted(blob_store.stored_digests() - referenced)
     deleted = 0
     if not dry_run:
-        root = blob_store.root.resolve()
         for blob in candidates:
-            path = Path(blob.storage_path)
-            try:
-                path.resolve().relative_to(root)
-            except ValueError as error:
-                raise ValueError("recorded blob path escapes storage root") from error
-            path.unlink(missing_ok=True)
+            # Delete through the backend by digest. The recorded storage_path is provenance,
+            # never something we turn back into a filesystem operation.
+            blob_store.delete(blob.sha256)
             session.delete(blob)
             deleted += 1
         for digest in orphans:
-            blob_store.path_for(digest).unlink(missing_ok=True)
+            blob_store.delete(digest)
             deleted += 1
     return PruneReport(
         database_candidates=len(candidates),

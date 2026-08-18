@@ -172,6 +172,32 @@ Design rules the code holds to:
 
 ---
 
+## The archive
+
+Every page snapshot and every document byte is stored content-addressed by SHA-256. That store
+is not a cache: it is what makes versioning, replay, and re-extraction possible, and it is backed
+up alongside the database.
+
+Two backends implement one contract. `filesystem` (the default) writes files directly.
+`s3` talks to any S3-compatible service; the deployment runs
+[VersityGW](https://github.com/versity/versitygw) with its POSIX backend pointed at the same
+volume, so the bytes stay on an ordinary filesystem in the same layout while standard S3 tooling
+and off-host backup get a supported interface. The gateway is internal to the Compose network and
+is never published. Switching backends migrates nothing.
+
+### Serving archived documents
+
+The site can serve its stored copy of a bill PDF at
+`/documents/{document_id}/versions/{version_no}`, always beside a link to Parliament's official
+URL. **It is off by default and returns 404**, because publishing mirrored bytes is gated on the
+rights review in assumption A14 (see `docs/decisions/ADR-004` and `ADR-013`). The official link
+never depends on it.
+
+When enabled, only validated versions are served — a quarantined one is kept for the record and
+withheld — and each response carries the content hash as an `ETag`, an immutable `Cache-Control`,
+a canonical `Link` to the official URL, and `X-Robots-Tag: noindex`, because our copy is a
+preservation artifact rather than the authoritative record.
+
 ## Frontend
 
 Server-rendered HTML with a small amount of progressive enhancement. **Every page is complete

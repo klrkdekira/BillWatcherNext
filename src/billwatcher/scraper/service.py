@@ -67,7 +67,7 @@ def persist_document_observation(
             sha256=stored.sha256,
             byte_size=stored.byte_size,
             media_type=observation.media_type_declared or "application/octet-stream",
-            storage_path=str(stored.path),
+            storage_path=stored.location,
             compression=stored.compression,
             ref_count=0,
         )

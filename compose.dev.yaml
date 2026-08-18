@@ -22,5 +22,22 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # The same S3 gateway the production stack runs, so the archive backend can be exercised
+  # locally. Published on 127.0.0.1 only.
+  blobs:
+    image: versity/versitygw:v1.7.0
+    command: ["--port", ":7070", "--iam-dir", "/iam", "posix", "/data"]
+    environment:
+      ROOT_ACCESS_KEY: billwatcher
+      ROOT_SECRET_KEY: billwatcher-secret
+    ports:
+      - "127.0.0.1:7070:7070"
+    volumes:
+      - dev_blobs:/data
+      - dev_blob_iam:/iam
+    restart: unless-stopped
+
 volumes:
   dev_postgres_data:
+  dev_blobs:
+  dev_blob_iam:

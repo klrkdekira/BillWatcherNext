@@ -4,6 +4,7 @@ COMPOSE ?= docker compose
 DEV_COMPOSE ?= docker compose -f compose.dev.yaml
 # The PostgreSQL-only test suite needs a disposable database; this one is created by `make db-up`.
 TEST_DATABASE_URL ?= postgresql+psycopg://billwatcher:billwatcher@127.0.0.1:55432/billwatcher_test
+TEST_S3_ENDPOINT ?= http://127.0.0.1:7070
 # Upstream serves an incomplete certificate chain; see docs/upstream.md and `make ca-bundle`.
 UPSTREAM_INTERMEDIATE_URL ?= http://crt.sectigo.com/SectigoPublicServerAuthenticationCADVR36.crt
 SYSTEM_CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
@@ -34,7 +35,7 @@ env: ## Create .env from the development defaults if it does not exist
 		echo "created .env from .env.development"; \
 	fi
 
-db-up: ## Start the local development PostgreSQL and wait for it
+db-up: ## Start the local development PostgreSQL and S3 gateway
 	$(DEV_COMPOSE) up -d --wait
 	@$(DEV_COMPOSE) exec -T db psql -q -U billwatcher -d billwatcher \
 		-c "CREATE DATABASE billwatcher_test" 2>/dev/null || true
@@ -62,8 +63,9 @@ ca-bundle: ## Build a trust bundle containing the intermediate the site fails to
 seed: ## Ingest the committed fixtures offline; never contacts Parliament
 	$(UV) run billwatcher load-fixtures
 
-test-pg: ## Run the full suite including the PostgreSQL-only tests
-	BILLWATCHER_TEST_DATABASE_URL=$(TEST_DATABASE_URL) $(UV) run pytest
+test-pg: ## Run the full suite including the PostgreSQL and S3 archive tests
+	BILLWATCHER_TEST_DATABASE_URL=$(TEST_DATABASE_URL) \
+	BILLWATCHER_TEST_S3_ENDPOINT=$(TEST_S3_ENDPOINT) $(UV) run pytest
 
 setup: ## Install the exact locked development environment
 	$(UV) sync --locked --all-groups

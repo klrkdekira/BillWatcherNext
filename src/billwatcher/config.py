@@ -15,6 +15,17 @@ class Settings(BaseSettings):
     contact_email: str = "operator@example.org"
     database_url: str = "postgresql+psycopg://billwatcher:billwatcher@localhost/billwatcher"
     blob_storage_root: Path = Path("var/blobs")
+    # `filesystem` writes files directly; `s3` talks to any S3-compatible service, which in this
+    # deployment is VersityGW over the same archive volume (ADR-013).
+    blob_storage_backend: Literal["filesystem", "s3"] = "filesystem"
+    s3_endpoint_url: str = ""
+    s3_bucket: str = "billwatcher-blobs"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_region: str = "us-east-1"
+    # Serving our archived copy of an official document is gated on the rights review in
+    # assumption A14 and ADR-004. Off until that review concludes and is recorded.
+    serve_archived_documents: bool = False
     scrape_enabled: bool = False
     scrape_interval_hours: int = Field(default=12, ge=1)
     scrape_delay_seconds: float = Field(default=2.0, ge=2.0)
@@ -56,6 +67,17 @@ class Settings(BaseSettings):
             values = (self.site_host, self.public_base_url, self.contact_email, self.database_url)
             if any("example.org" in value or "CHANGE_ME" in value for value in values):
                 raise ValueError("production configuration contains placeholder values")
+        return self
+
+    @model_validator(mode="after")
+    def require_s3_configuration(self) -> "Settings":
+        if self.blob_storage_backend == "s3" and not (
+            self.s3_endpoint_url and self.s3_access_key_id and self.s3_secret_access_key
+        ):
+            raise ValueError(
+                "BLOB_STORAGE_BACKEND=s3 requires S3_ENDPOINT_URL, S3_ACCESS_KEY_ID "
+                "and S3_SECRET_ACCESS_KEY"
+            )
         return self
 
     @model_validator(mode="after")

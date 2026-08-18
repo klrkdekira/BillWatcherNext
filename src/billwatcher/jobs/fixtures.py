@@ -191,7 +191,7 @@ def _snapshot(
             sha256=stored.sha256,
             byte_size=stored.byte_size,
             media_type="text/html",
-            storage_path=str(stored.path),
+            storage_path=stored.location,
             compression=stored.compression,
             ref_count=0,
         )

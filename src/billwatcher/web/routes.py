@@ -36,6 +36,7 @@ from billwatcher.models import (
     BillDocument,
     BillEvent,
     BillSlugAlias,
+    Blob,
     ChamberRecord,
     CoverageTarget,
     Document,
@@ -50,6 +51,7 @@ from billwatcher.operations import evaluate_coverage
 from billwatcher.search.lexical import search_bills
 from billwatcher.search.rag import Answer, RagDisabled, answer_question
 from billwatcher.search.semantic import SemanticSearchDisabled, hybrid_search
+from billwatcher.storage.blobs import BlobNotFound
 from billwatcher.web.feed import CHANGE_KINDS, CHANGES_PAGE_SIZE, recent_changes
 from billwatcher.web.limits import RateLimit, RateLimiter
 from billwatcher.web.retrieval import Retrieval
@@ -182,6 +184,7 @@ def register_routes(
             return render(request, "error.html", {"message": "Bill not found"}, status_code=404)
         context = bill_context(session, bill)
         context["json_ld"] = legislation_json_ld(bill, context["chambers"])
+        context["serve_archived_documents"] = config.serve_archived_documents
         return render(request, "bill_detail.html", context)
 
     @app.get("/status", response_class=HTMLResponse)
@@ -390,6 +393,77 @@ def register_routes(
             message, code = outcome
             return JSONResponse({"error": message}, status_code=code)
         return JSONResponse(answer_payload(outcome))
+
+    @app.get("/documents/{document_id}/versions/{version_no}")
+    def archived_document(
+        document_id: str,
+        version_no: int,
+        request: Request,
+        session: Session = Depends(database),
+    ) -> Response:
+        """Serve our archived copy of an official document.
+
+        Off unless the rights review in assumption A14 has concluded and been recorded
+        (ADR-004). The official link on the bill page never depends on this route.
+
+        The blob is located by digest read from the database, never from anything in the
+        request path (HANDOFF 17), so no request can address a file we did not store.
+        """
+        if not config.serve_archived_documents:
+            return render(
+                request,
+                "error.html",
+                {
+                    "message": (
+                        "This service links to Parliament's official documents rather than "
+                        "serving its own copies."
+                    )
+                },
+                status_code=404,
+            )
+        version = session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.version_no == version_no,
+            )
+        )
+        if version is None or version.validation_status != "accepted":
+            # A quarantined version is stored for the record but never published.
+            return render(
+                request, "error.html", {"message": "Document version not found"}, status_code=404
+            )
+        blob = session.get(Blob, version.blob_sha256)
+        if blob is None:
+            return render(
+                request, "error.html", {"message": "Document version not found"}, status_code=404
+            )
+
+        etag = f'"{version.content_sha256}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        try:
+            chunks = retrieval.blob_store.stream(blob.sha256, compression=blob.compression)
+        except (BlobNotFound, OSError):
+            return render(
+                request,
+                "error.html",
+                {"message": "Our copy of this document is unavailable."},
+                status_code=503,
+            )
+        return StreamingResponse(
+            chunks,
+            media_type=version.media_type_detected or "application/pdf",
+            headers={
+                "ETag": etag,
+                "Content-Length": str(version.byte_size),
+                # Archived bytes are immutable, so they can be cached hard.
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "Content-Disposition": (f'inline; filename="{_archive_filename(version)}"'),
+                # Our copy is not the authority; point crawlers at the official record.
+                "Link": f'<{_official_url(session, version)}>; rel="canonical"',
+                "X-Robots-Tag": "noindex",
+            },
+        )
 
     @app.get("/health/live")
     def live() -> dict[str, str]:
@@ -688,3 +762,13 @@ def run_ask(
         return "Generated answers are not enabled on this deployment.", 404
     except ValueError as error:
         return str(error), 400
+
+
+def _archive_filename(version: DocumentVersion) -> str:
+    """A filename built only from our own identifiers, never from upstream text."""
+    return f"{version.document_id}-v{version.version_no}.pdf"
+
+
+def _official_url(session: Session, version: DocumentVersion) -> str:
+    document = session.get(Document, version.document_id)
+    return document.canonical_source_url if document else ""

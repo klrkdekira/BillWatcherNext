@@ -28,11 +28,11 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | A7 | open | — | No Malay month name or date range was observed in the current listings; the parser still accepts both. Recheck against the archive |
 | A8 | open | — | Archive discovery required |
 | A9 | open | 2026-08-18 | Four published phrases observed and mapped, one of which the handoff had guessed wrongly (`Lulus`, not `Diluluskan`). Still one chamber, one language, current bills only (docs/upstream.md) |
-| A10 | open | 2026-08-18 | 127 PDF paths observed, all carried in onclick rather than href. No document downloaded yet, so native-text versus scanned is unmeasured |
+| A10 | verified | 2026-08-18 | Three documents downloaded: all native-text PDFs (`%PDF-1.4`), 17 to 33 pages, extraction succeeded on each. Served as `application/octet-stream`, so magic bytes decide validity |
 | A11 | open | — | ADR-003 proposed; only the unambiguous same-bytes case is handled (docs/data-model.md) |
 | A12 | open | — | First reviewed full crawl required |
 | A13 | refuted | 2026-08-18 | `https://www.parlimen.gov.my/robots.txt` returns 404: no policy is published. Not "permits crawling" — there is nothing to permit. See docs/upstream.md; crawling now needs a recorded decision via ROBOTS_MISSING_POLICY |
-| A14 | open | — | Rights review required |
+| A14 | open | — | Rights review required. The serving path is built and tested but inert behind SERVE_ARCHIVED_DOCUMENTS (ADR-013); only this review may turn it on |
 
 ## Decision index
 
@@ -50,6 +50,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | ADR-010 | Retention sign-off | accepted | 2026-08-18 |
 | ADR-011 | Archive is a search endpoint; no browser automation | accepted | 2026-08-18 |
 | ADR-012 | Datastar for progressive enhancement, and its CSP cost | accepted | 2026-08-18 |
+| ADR-013 | VersityGW S3 archive gateway; archived-document serving | accepted / proposed | 2026-08-18 |
 
 ## Open questions
 
@@ -64,6 +65,8 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | Which answer provider's data-retention terms permit not storing questions or answers? | ADR-009 | 2026-08-18 | Service owner | H |
 
 ## Manual gate log
+
+- 2026-08-18 — Claude — Archive moved behind a VersityGW S3 gateway (ADR-013) and proved end to end against live data: three real bill PDFs downloaded, stored, hash-verified through the gateway, text-extracted (17 to 33 pages), and served over HTTP with the content hash as an ETag. Public serving remains **off**; enabling it is the A14 rights decision, not a configuration change. Two defects fixed on the way: the document worker used a literal `run_id` that violated a foreign key and had only ever run on SQLite, and validation quarantined every genuine PDF because Parliament serves `application/octet-stream`.
 
 - 2026-08-18 — Claude — **First reviewed live crawl.** Crawl permission decided: the site publishes no robots.txt, so RFC 9309 treats crawling as unrestricted; `ROBOTS_MISSING_POLICY=allow` set and each run records a `robots_absent` warning so the decision stays visible. TLS verified through a bundle carrying the intermediate the site omits. Result: 126 records parsed from the two current listings, 67 bills and 126 chamber records published, 505 events, 127 documents queued, `make doctor` clean. Both archive targets report `failing` because the archive is a search endpoint (ADR-011) and is not implemented; the run ended `partial`. No document was downloaded. This crawl found four parser defects, all fixed and covered by tests against a fixture reduced from the stored bytes.
 

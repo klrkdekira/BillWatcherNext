@@ -10,6 +10,7 @@ from billwatcher.models import (
     DocumentVersion,
     FetchAttempt,
     PresenceObservation,
+    ScrapeRun,
 )
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.queue import fail_item, finish_item, lease_next
@@ -20,6 +21,7 @@ from billwatcher.scraper.service import (
 )
 from billwatcher.scraper.versioning import DownloadObservation, VersionAction
 from billwatcher.storage.blobs import BlobStore
+from billwatcher.version import EXTRACTOR_VERSION
 
 
 def process_one_document(
@@ -149,3 +151,31 @@ def _record_document_absence(
                 last_seen_at=observed_at,
             )
         )
+
+
+def open_document_run(session: Session, *, trigger: str = "schedule") -> ScrapeRun:
+    """Start a run row for a document-download pass.
+
+    `fetch_attempts.run_id` is a foreign key, so document downloads need a real run to be
+    attributable to, exactly like a listing crawl (HANDOFF 8).
+    """
+    run = ScrapeRun(
+        mode="incremental",
+        trigger=trigger,
+        started_at=datetime.now(UTC),
+        state="running",
+        policy_snapshot={"stage": "documents", "extractor_version": EXTRACTOR_VERSION},
+        publish_decision="published",
+        publish_reason="document downloads publish per version, not per run",
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def close_document_run(session: Session, run: ScrapeRun, *, processed: int) -> ScrapeRun:
+    run.fetched = processed
+    run.state = "succeeded"
+    run.ended_at = datetime.now(UTC)
+    session.flush()
+    return run
