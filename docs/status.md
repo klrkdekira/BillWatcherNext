@@ -21,7 +21,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | --- | --- | --- | --- |
 | A1 | verified | 2026-08-18 | The two current entry points return complete listings; the archive URLs return a search form, not rows (docs/upstream.md, ADR-011) |
 | A2 | refuted | 2026-08-18 | Current listings expose only Kod, Tahun, Tajuk, Status. There is no presenter column and no reading-date columns; those live in a hidden per-bill detail table (docs/upstream.md) |
-| A3 | resolved | 2026-08-18 | The archive is a GET /carian.html search form with static parameters; no browser automation needed (ADR-011) |
+| A3 | verified | 2026-08-18 | The archive is a GET /carian.html search form with static parameters; no browser automation needed (ADR-011) |
 | A4 | verified | 2026-08-18 | D.R.15/2026, D.R.15/2025 and D.R.42/2025 each hold two chamber records with independent reading dates |
 | A5 | open | — | ADR-002 proposed; fail-loud parser implemented |
 | A6 | verified | 2026-08-18 | Every observed date is DD/MM/YYYY; tests/fixtures/parliament/live_current_dr_bm.html |
@@ -50,7 +50,9 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | ADR-010 | Retention sign-off | accepted | 2026-08-18 |
 | ADR-011 | Archive is a search endpoint; no browser automation | accepted | 2026-08-18 |
 | ADR-012 | Datastar for progressive enhancement, and its CSP cost | accepted | 2026-08-18 |
-| ADR-013 | VersityGW S3 archive gateway; archived-document serving | accepted / proposed | 2026-08-18 |
+| ADR-013 | VersityGW S3 archive gateway; archived-document serving | accepted | 2026-08-18 |
+
+ADR-013 is accepted for the storage gateway. Its public-serving half remains a proposal: it is inert behind `SERVE_ARCHIVED_DOCUMENTS` and may only be accepted once ADR-004 is superseded by the A14 rights review, with the outcome recorded in the manual gate log.
 
 ## Open questions
 
@@ -63,6 +65,8 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | May stored official PDF bytes be republished? | HANDOFF A14 | 2026-08-16 | Service owner | E |
 | Which embedding model covers Malay and English at an acceptable cost and licence? | ADR-008 | 2026-08-18 | Service owner | G |
 | Which answer provider's data-retention terms permit not storing questions or answers? | ADR-009 | 2026-08-18 | Service owner | H |
+| The `fixtures-refresh` Make target re-runs `reparse` validation instead of regenerating fixtures from stored snapshots as section 16.3 of the handoff specifies; implement regeneration or record a decision changing the target's contract | Integration audit | 2026-08-18 | Integrator | E |
+| Should ADR-002 (identifier rules) be accepted now that a fail-loud normalizer is in place, before any slug correction that would exercise the alias path? | HANDOFF A5 / ADR-002 | 2026-08-18 | Integrator | B |
 
 ## Manual gate log
 

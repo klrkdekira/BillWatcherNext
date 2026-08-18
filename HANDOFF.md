@@ -1,6 +1,6 @@
 # BillWatcherNext implementation handoff
 
-Document version: 1.2 — 2026-08-17 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
+Document version: 1.3 — 2026-08-18 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
 Status: implementation-ready specification  
 Repository state at handoff: no application code and no commits; `HANDOFF.md`, `README.md`, `main.py`, `pyproject.toml`, and `.python-version` exist as an unbuilt `uv init` skeleton.
 
@@ -131,7 +131,7 @@ Version 1.0 presented indexed-search observations as evidence for the data model
 | ID | Assumption | Confidence | Verify by | Blocks |
 | --- | --- | --- | --- | --- |
 | A1 | The four listing URLs in §5 are the correct current/archive entry points for both chambers. | Medium | Fetch and save fixtures; compare against on-page navigation. | Package C |
-| A2 | Current listings expose `Kod`, `Tahun`, `Tajuk`, `Status` plus expanded detail rows (readings, presenter, passage, committee referral). | Medium | Fixture of one current listing per chamber. | Package B schema |
+| A2 | Current listings expose `Kod`, `Tahun`, `Tajuk`, `Status` plus expanded detail rows (readings, presenter, passage, committee referral). **Refuted as stated on 2026-08-18**: the visible table has exactly those four columns; readings, presenter, and passage live in a hidden nested detail table (see §25.4). | Medium | Fixture of one current listing per chamber. | Package B schema |
 | A3 | The archive listing requires a form/AJAX request rather than returning all rows in initial HTML. | Low | Inspect forms and network traffic; record the exact request contract. | Package C, ADR |
 | A4 | `D.R.15/2026` appears in both chambers with distinct per-chamber reading dates, proving the bill/chamber split. | Medium | Fixture from both chambers showing the same code. | §8 model justification |
 | A5 | A bill identifier prefix (`D.R.`) denotes the *originating* chamber, not the chamber whose row is being read. | Medium | Confirm a Dewan Negara-originating bill exists and observe its prefix. | Identifier ADR |
@@ -142,7 +142,7 @@ Version 1.0 presented indexed-search observations as evidence for the data model
 | A10 | Bill documents are PDFs on an allowlisted Parliament host, some native-text and some scanned. | Medium | Download a sample; check text yield and magic bytes. | §9, OCR decision |
 | A11 | A revised bill is republished at a *new* URL rather than replacing bytes at the same URL. | Low | Observe over time; check archive for `pindaan`/reprint naming. | §9.5 identity rules |
 | A12 | Total corpus is on the order of low thousands of bills and low tens of gigabytes of PDFs. | Low | Measure after the first full crawl; record actuals in `docs/operations.md`. | Storage/backup sizing |
-| A13 | `robots.txt` permits crawling these listing paths. | Unknown | Fetch and record it, with its SHA-256, before any crawl. | All crawling |
+| A13 | `robots.txt` permits crawling these listing paths. **Refuted on 2026-08-18**: the site publishes no robots.txt (HTTP 404); crawl permission is now an explicit recorded decision, not a robot directive (see §25.4). | Unknown | Fetch and record it, with its SHA-256, before any crawl. | All crawling |
 | A14 | Republication of PDF bytes is not clearly permitted. | Unknown | Rights review. | Public document serving |
 
 Rules: an assumption may be *used* while unverified only if the code fails loudly when it is wrong (for example, a date parser that raises on an unrecognized format rather than silently producing `NULL`). An assumption marked "blocks" may not be assumed away — it gates the listed work.
@@ -1294,6 +1294,7 @@ These links informed the handoff and should be rechecked because upstream pages 
 | 1.0 | 2026-08-16 | Initial handoff (staged, uncommitted). |
 | 1.1 | 2026-08-16 | Added versioned document downloading (§9), data change tracking (§10), project tracking (§20), a glossary (§3) and assumption register (§4); corrected the defects in §25.2. |
 | 1.2 | 2026-08-17 | Resolved document-version hash uniqueness conflict: rollback observations create monotonic rows sharing an existing blob (ADR-005). |
+| 1.3 | 2026-08-18 | Recorded refuted assumptions A2 (as stated) and A13, and the A9 passage-phrase correction, against dated evidence in `docs/upstream.md` (§25.4). No contract changes. |
 
 ### 25.2 Defects corrected in 1.1
 
@@ -1323,8 +1324,15 @@ These were not omissions of detail; each one would have caused data loss or an u
 
 1. **Rollback versions contradicted content-hash uniqueness.** Section 9.3 requires an A-B-A rollback to create version 3 pointing at the existing A blob, while section 8 prohibited two rows with the same document and hash. ADR-005 removes that uniqueness constraint while preserving no-op behavior for bytes identical to the current version.
 
+### 25.4 Corrections recorded in 1.3
 
-### 25.3 Known gaps deliberately left open
+These record upstream facts observed on 2026-08-18 (dated evidence in `docs/upstream.md`) that contradict this document's reconnaissance. They correct the §4 register and §5 observations; no contract in §8–§14 changes, because the model already covered the observed behaviour.
+
+1. **A13 refuted: no robots.txt is published.** `https://www.parlimen.gov.my/robots.txt` returns HTTP 404. Section 4's assumption that a policy *permits* crawling is not merely unverified — there is no policy to read. Consequences: preflight's `robots_changed` comparison has no baseline hash; a missing policy is itself an observation, so each run records a `robots_absent` warning and crawling proceeds only under an explicit recorded decision (2026-08-18: RFC 9309 treats an absent robots.txt as unrestricted, recorded in the manual gate log). If a robots.txt appears later, the first hash stored becomes the baseline for §11.2 step 2 and any restriction in it must be obeyed immediately.
+2. **A2 refuted as stated: the visible listing has exactly four columns.** The current listings expose only `Kod`, `Tahun`, `Tajuk`, and `Status`; there is no presenter column and no reading-date columns. Readings, presenter, passage, and referral data live in a hidden `<div>` containing a nested `<table>` inside the status cell. Two parser consequences are now normative for any implementation: table nesting must be tracked (a flattening parser marks every row malformed), and the hidden box must not contribute to the cell's visible text. This is a reconnaissance correction, not a contract change — §8's event and chamber-record model is exactly what this shape requires.
+3. **A9 correction: the published passage phrase is `Lulus`, not `Diluluskan`.** Only one of the four observed status phrases matched this document's pre-live mapping, which is precisely why A9 forbids designing the status vocabulary from a handful of assumed rows. The observed set and its mapping are recorded in `docs/upstream.md`; the full vocabulary remains open pending the complete sweep (archive, Dewan Negara, English).
+
+### 25.5 Known gaps deliberately left open
 
 - Whether a revised bill appears at the same URL or a new one (A11) is unresolved; §9.2 handles both, but the archive discovery spike must settle which is common before effort is spent on `document_relations` heuristics.
 - Corpus size and storage growth (A12) are unmeasured; backup sizing in §16.5 is provisional until the first full crawl.
