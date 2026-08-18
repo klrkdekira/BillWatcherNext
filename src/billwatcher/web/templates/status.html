@@ -2,10 +2,14 @@
 {% block title %}Collection status — {{ site_name }}{% endblock %}
 {% block content %}
 <h1>Collection status</h1>
-<p>Queue depth: {{ queue_depth }}. Oldest pending document: {{ oldest_pending or "None" }}. Dead letters: {{ dead }}.</p>
-<h2>Coverage targets</h2>
-{% if targets %}<table><thead><tr><th>Chamber</th><th>Kind</th><th>Language</th><th>State</th><th>Last success</th><th>Records</th></tr></thead><tbody>{% for target in targets %}<tr><td>{{ target.chamber }}</td><td>{{ target.listing_kind }}</td><td>{{ target.language }}</td><td>{{ target.state }}</td><td>{{ target.last_success_at or "Never" }}</td><td>{{ target.last_record_count or 0 }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No coverage targets have run.</p>{% endif %}
-<h2>Open anomalies</h2><ul><li>Critical: {{ anomaly_counts.get("critical", 0) }}</li><li>Warnings: {{ anomaly_counts.get("warn", 0) }}</li><li>Information: {{ anomaly_counts.get("info", 0) }}</li></ul>
-<h2>Pipeline versions</h2><dl>{% for name, version in versions.items() %}<dt>{{ name }}</dt><dd>{{ version }}</dd>{% endfor %}</dl>
-<h2>Recent runs</h2>{% if runs %}<table><thead><tr><th>Started</th><th>Mode</th><th>State</th><th>Published</th></tr></thead><tbody>{% for run in runs %}<tr><td>{{ run.started_at }}</td><td>{{ run.mode }}</td><td>{{ run.state }}</td><td>{{ run.publish_decision }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No runs recorded.</p>{% endif %}
+<p class="notice">Operational counters only: no credentials, internal hostnames, or error bodies appear here.</p>
+{#
+  Without JavaScript this is a normal page that reflects the moment it was requested.
+  With Datastar it subscribes to a stream and refreshes in place, which is what an operator
+  watching a crawl actually wants.
+#}
+{# data-init runs once when Datastar binds the element; a div never fires a load event. #}
+<div data-init="@get('/fragments/status')">
+{% include "_status_panel.html" %}
+</div>
 {% endblock %}

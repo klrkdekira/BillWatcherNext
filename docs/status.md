@@ -9,7 +9,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | A scaffold/runtime | done | Codex | worktree | 2026-08-16 | 2026-08-17 | make check; locked image build; fresh Compose health; UID 10001; read-only app blob mount | — |
 | B discovery/model | in_review | Claude | main | 2026-08-16 | 2026-08-18 | schema invariants; twelve parser fixtures including dated columns, mixed good/bad rows, and two soft-404 shapes; empty-database migration to head proven on PostgreSQL; live discovery completed for the current listings, with a fixture reduced from stored bytes and A1/A2/A3/A4/A6 settled | Archive contract, Dewan Negara detail labels, and the English listing structure still unobserved |
 | C scraper/versioning | in_review | Claude | main | 2026-08-16 | 2026-08-18 | offline `make seed` fixture ingestion satisfying the section 18 walkthrough step 5, idempotent on reload; `make reparse` reports zero changes at the current parser version (step 9); document worker, extraction history, orchestration, robots, replay, queue, versioning; dated columns now produce reading events with ranges and sequences and project onto chamber records; all seventeen HANDOFF 10.5 anomaly kinds raised and provoked by tests; anomalies deduplicate by kind plus entity | Reviewed live full crawl pending |
-| D web/search | in_review | Claude | main | 2026-08-17 | 2026-08-18 | routes, schemas, retrieval wiring, and templating split out of app.py per the HANDOFF 7 contract; | 12 PostgreSQL search tests (weighted tsvector, ts_rank_cd ordering, escaped ts_headline, exact/prefix identifier paths, filters, keyset pagination, multi-megabyte index guard); `/changes` filters and pagination; bill-page excerpts and supersession notices | Deep-ranked pagination cap documented in ADR-007; awaits acceptance walkthrough |
+| D web/search | in_review | Claude | main | 2026-08-17 | 2026-08-18 | routes, schemas, retrieval wiring, and templating split out of app.py per the HANDOFF 7 contract; vendored Datastar adds live search and a streaming /status, with the no-JavaScript baseline asserted by tests (ADR-012); | 12 PostgreSQL search tests (weighted tsvector, ts_rank_cd ordering, escaped ts_headline, exact/prefix identifier paths, filters, keyset pagination, multi-megabyte index guard); `/changes` filters and pagination; bill-page excerpts and supersession notices | Deep-ranked pagination cap documented in ADR-007; awaits acceptance walkthrough |
 | E operations/deploy | in_review | Claude | main | 2026-08-17 | 2026-08-18 | image/Compose health, PostgreSQL search, database+blob restore drill, UID/mount checks, `make check`, retention job with rollup and pruning tests | external HTTPS and vulnerability review pending |
 | F JSON-LD/discovery | done | Codex | worktree | 2026-08-17 | 2026-08-17 | current, passed, bilingual and malicious JSON-LD tests; canonical, Open Graph, and sitemap | — |
 | G semantic search | in_review | Claude | main | 2026-08-18 | 2026-08-18 | chunker, provider interface, migration 0003, `rechunk`/`reembed` backfills, hybrid RRF retrieval, pgvector cosine retrieval and HNSW index proven on PostgreSQL, versioned evaluation set | No production embedding model chosen (ADR-008); evaluation gate not run against a real model |
@@ -49,6 +49,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | ADR-009 | Answer provider, prompt isolation, and answer data retention | proposed | 2026-08-18 |
 | ADR-010 | Retention sign-off | accepted | 2026-08-18 |
 | ADR-011 | Archive is a search endpoint; no browser automation | accepted | 2026-08-18 |
+| ADR-012 | Datastar for progressive enhancement, and its CSP cost | accepted | 2026-08-18 |
 
 ## Open questions
 
@@ -75,7 +76,8 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 - 2026-08-18 — Claude — Full suite green at 183 tests against PostgreSQL 16 with pgvector after wiring dated listing columns into events, adding the five missing anomaly kinds, and splitting the web layer. No live crawl, external TLS, or vulnerability review is covered.
 - 2026-08-18 — Claude — `make evaluate` run against the development `deterministic` embedding provider. It fails the `no_answer_correct` threshold, as documented: the hashed projection has no semantics and is rejected in production. This is a harness check, **not** the Package G release gate. The gate requires a rerun against the chosen production model with the result recorded here.
 
-Still required before release: dependency review, container vulnerability review, external HTTPS
+Still required before release: a Content-Security-Policy review covering the `'unsafe-eval'`
+grant that Datastar requires (ADR-012), dependency review, container vulnerability review, external HTTPS
 validation, a crawl-permission decision now that no robots.txt exists (A13), live crawl approval, rights review, and — only if Release 3 is to ship — an embedding
 model decision, an answer provider decision, and an evaluation run that meets the thresholds in
 `docs/evals/README.md`.

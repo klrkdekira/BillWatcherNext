@@ -1,10 +1,17 @@
 {$SITE_HOST} {
 	encode zstd gzip
-	reverse_proxy app:8000
+	reverse_proxy app:8000 {
+		# The status page streams server-sent events; buffering them defeats the point.
+		flush_interval -1
+	}
 	header {
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+		# 'unsafe-eval' is required by Datastar, which compiles data-* expressions with the
+		# Function constructor. See docs/decisions/ADR-012. Everything else stays closed:
+		# no third-party origin can supply a script, style, image, font, or connection, and
+		# the page cannot be framed or post a form off-site.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
 	}
 	log {
 		output stdout

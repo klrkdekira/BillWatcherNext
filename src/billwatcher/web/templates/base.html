@@ -6,6 +6,12 @@
   <title>{% block title %}{{ site_name }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='/site.css') }}">
   {% block head %}{% endblock %}
+  {#
+    Datastar is vendored (see static/vendor/README.md), never loaded from a CDN: the site
+    makes no third-party requests. It is pure progressive enhancement — every page here
+    is complete and usable with this script blocked or disabled.
+  #}
+  <script type="module" src="{{ url_for('static', path='/vendor/datastar-1.0.2.js') }}" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>

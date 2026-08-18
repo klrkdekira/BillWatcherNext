@@ -172,6 +172,33 @@ Design rules the code holds to:
 
 ---
 
+## Frontend
+
+Server-rendered HTML with a small amount of progressive enhancement. **Every page is complete
+and usable with JavaScript disabled** — that is a tested property, not an aspiration: the suite
+asserts the content is server-rendered, the filter form is a plain `GET`, and no script appears
+outside `<head>`.
+
+[Datastar](https://data-star.dev) v1.0.2 adds exactly two things, both additive:
+
+- **Search as you type** on `/bills`, debounced, patching only the results region.
+- **A live `/status`** that subscribes to a bounded server-sent event stream, so an operator
+  watching a crawl sees it change.
+
+Each fragment endpoint renders the same Jinja partial the full page includes, so the enhanced
+and unenhanced views cannot drift. Anything HTML can already do — disclosure, navigation, form
+submission — uses HTML, not script.
+
+Datastar is **vendored** into `static/vendor/` with its version and SHA-256 recorded beside it;
+nothing is fetched from a CDN and the site makes no third-party requests. It does require
+`script-src 'unsafe-eval'`, because it compiles `data-*` expressions with the `Function`
+constructor. That trade-off, and why the CSP-safe fork was rejected, is recorded in
+`docs/decisions/ADR-012`. `unsafe-inline` is **not** granted.
+
+The stylesheet has no web fonts, supports light and dark via `prefers-color-scheme`, honours
+`prefers-reduced-motion`, and never signals state by colour alone — every badge carries a text
+label and a shape cue.
+
 ## Optional Release 3 features
 
 Semantic search and generated answers sit behind `SEMANTIC_SEARCH_ENABLED` and `RAG_ENABLED`,

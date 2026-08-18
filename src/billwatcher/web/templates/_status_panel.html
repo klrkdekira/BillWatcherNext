@@ -1,0 +1,53 @@
+{# Streamed to /status by Datastar, and rendered inline on first load. One source of truth. #}
+<div id="status-panel">
+  <p class="updated">Updated {{ generated_at }}{% if streaming %} · refreshing automatically{% endif %}</p>
+
+  <h2>Coverage targets</h2>
+  {% if targets %}
+  <table>
+    <caption>Freshness is per target, so a healthy current listing cannot hide a broken archive.</caption>
+    <thead><tr><th>Chamber</th><th>Kind</th><th>Language</th><th>State</th><th>Last success</th><th>Records</th></tr></thead>
+    <tbody>
+      {% for target in targets %}
+      <tr>
+        <td>{{ "Dewan Rakyat" if target.chamber == "dewan_rakyat" else "Dewan Negara" }}</td>
+        <td>{{ target.listing_kind }}</td>
+        <td>{{ target.language }}</td>
+        <td><span class="badge state-{{ target.state }}">{{ target.state.replace("_", " ") }}</span></td>
+        <td>{{ target.last_success_at or "Never" }}</td>
+        <td>{{ target.last_record_count or 0 }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No coverage targets have run.</p>{% endif %}
+
+  <h2>Queue and anomalies</h2>
+  <dl class="metrics">
+    <div><dt>Queue depth</dt><dd>{{ queue_depth }}</dd></div>
+    <div><dt>Dead letters</dt><dd>{{ dead }}</dd></div>
+    <div><dt>Oldest pending</dt><dd>{{ oldest_pending or "None" }}</dd></div>
+    <div><dt>Critical anomalies</dt><dd class="{{ 'bad' if anomaly_counts.get('critical', 0) else '' }}">{{ anomaly_counts.get("critical", 0) }}</dd></div>
+    <div><dt>Warnings</dt><dd>{{ anomaly_counts.get("warn", 0) }}</dd></div>
+    <div><dt>Information</dt><dd>{{ anomaly_counts.get("info", 0) }}</dd></div>
+  </dl>
+
+  <h2>Recent runs</h2>
+  {% if runs %}
+  <table>
+    <thead><tr><th>Started</th><th>Mode</th><th>State</th><th>Published</th><th>Parsed</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.started_at }}</td><td>{{ run.mode }}</td>
+        <td><span class="badge run-{{ run.state }}">{{ run.state }}</span></td>
+        <td>{{ run.publish_decision }}</td><td>{{ run.parsed }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No runs recorded.</p>{% endif %}
+
+  <h2>Pipeline versions</h2>
+  <dl class="metrics">{% for name, version in versions.items() %}<div><dt>{{ name }}</dt><dd>{{ version }}</dd></div>{% endfor %}</dl>
+</div>

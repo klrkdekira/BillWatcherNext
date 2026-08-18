@@ -9,5 +9,5 @@
 </form>
 {% if oldest_success %}<p class="freshness">All healthy coverage targets checked since {{ oldest_success }}.</p>{% else %}<p class="notice">No successful crawl has been recorded yet.</p>{% endif %}
 <h2>Newest bills</h2>
-{% if bills %}<ul class="bill-list">{% for bill in bills %}<li><a href="/bills/{{ bill.slug }}"><strong>{{ bill.identifier_raw }}</strong> <span lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></a></li>{% endfor %}</ul>{% else %}<p>No bills have been ingested.</p>{% endif %}
+{% if bills %}<ul class="bill-list">{% for bill in bills %}<li class="bill-card"><a class="bill-link" href="/bills/{{ bill.slug }}"><span class="bill-code">{{ bill.identifier_raw }}</span> <span class="bill-title" lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></a></li>{% endfor %}</ul>{% else %}<p class="empty">No bills have been ingested.</p>{% endif %}
 {% endblock %}

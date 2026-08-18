@@ -1,0 +1,32 @@
+{# Rendered both inside /bills and on its own for a Datastar patch, so the two can never drift. #}
+<div id="search-results">
+  <p class="result-count" role="status" aria-live="polite">{{ results.total }} result{% if results.total != 1 %}s{% endif %}{% if q %} for “{{ q }}”{% endif %}.</p>
+  {% if results.hits %}
+  <ol class="bill-list" start="{{ (results.page - 1) * results.page_size + 1 }}">
+    {% for hit in results.hits %}
+    <li class="bill-card">
+      <a class="bill-link" href="/bills/{{ hit.bill.slug }}"><span class="bill-code">{{ hit.bill.identifier_raw }}</span> <span class="bill-title" lang="ms">{{ hit.bill.title_bm or hit.bill.title_en or "Title unavailable" }}</span></a>
+      {% if hit.passage %}<p class="passage" lang="ms">{{ hit.passage.html | safe }}</p>
+      <p class="passage-source">{% if hit.passage.kind == "document" %}From our stored document text{% if hit.passage.page_from %}, page {{ hit.passage.page_from }}{% endif %}.{% else %}From this bill’s listing metadata.{% endif %}</p>{% endif %}
+      <p class="bill-meta">Last checked {{ hit.bill.last_checked_at }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  {% elif results.items %}
+  <ol class="bill-list" start="{{ (results.page - 1) * results.page_size + 1 }}">
+    {% for bill in results.items %}
+    <li class="bill-card">
+      <a class="bill-link" href="/bills/{{ bill.slug }}"><span class="bill-code">{{ bill.identifier_raw }}</span> <span class="bill-title" lang="ms">{{ bill.title_bm or bill.title_en or "Title unavailable" }}</span></a>
+      <p class="bill-meta">Last checked {{ bill.last_checked_at }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty">No bills match these filters. Try fewer terms, or <a href="/bills">browse every bill</a>.</p>
+  {% endif %}
+  <nav class="pagination" aria-label="Pagination">
+    {% if results.page > 1 %}<a rel="prev" href="?{{ query_string }}&amp;page={{ results.page - 1 }}">Previous</a>{% endif %}
+    {% if results.next_cursor %}<a rel="next" href="?{{ query_string }}&amp;page={{ results.page + 1 }}&amp;cursor={{ results.next_cursor }}">Next</a>
+    {% elif results.page * results.page_size < results.total %}<a rel="next" href="?{{ query_string }}&amp;page={{ results.page + 1 }}">Next</a>{% endif %}
+  </nav>
+</div>

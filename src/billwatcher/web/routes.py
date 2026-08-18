@@ -5,11 +5,12 @@ in `schemas.py` and provider wiring in `app.py`, so no route handler ever constr
 client or an embedding provider (HANDOFF 12.3).
 """
 
+import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Generator
-from datetime import datetime
+from collections.abc import AsyncIterator, Callable, Generator
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -20,9 +21,11 @@ from fastapi.responses import (
     PlainTextResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import RequestResponseEndpoint
 
 from billwatcher.config import Settings, get_settings
@@ -57,9 +60,15 @@ from billwatcher.web.schemas import (
     pipeline_versions,
     serialize_bill,
 )
-from billwatcher.web.templating import render
+from billwatcher.web.sse import SSE_HEADERS, comment, patch_elements
+from billwatcher.web.templating import render, templates
 
 STATUSES = NORMALIZED_STATUSES
+# A status stream is bounded rather than endless: roughly ten minutes, then the client
+# reconnects. That keeps a forgotten tab from pinning a connection and a database session.
+STATUS_STREAM_INTERVAL_SECONDS = 5.0
+STATUS_STREAM_TICKS = 120
+
 TOO_MANY = "Too many requests. Please slow down; ordinary browsing and search are unaffected."
 
 
@@ -147,6 +156,16 @@ def register_routes(
                 "year": year or "",
                 "lang": lang or "",
                 "include_superseded": include_superseded,
+                "statuses": sorted(STATUSES),
+                # Serialized as JSON so a quote in a filter value cannot break the
+                # attribute or the expression it holds.
+                "signals": {
+                    "q": q,
+                    "chamber": chamber or "",
+                    "status": status or "",
+                    "year": year or "",
+                    "lang": lang or "",
+                },
                 "query_string": preserved_query(q, chamber, status, year, lang, include_superseded),
             },
         )
@@ -167,56 +186,77 @@ def register_routes(
 
     @app.get("/status", response_class=HTMLResponse)
     def status_page(request: Request, session: Session = Depends(database)) -> Response:
-        targets = sorted(
-            evaluate_coverage(session),
-            key=lambda target: (target.chamber, target.listing_kind, target.language),
-        )
+        context = status_context(session)
         session.commit()
-        anomaly_counts: dict[str, int] = {
-            severity: int(count)
-            for severity, count in session.execute(
-                select(Anomaly.severity, func.count())
-                .where(Anomaly.resolved_at.is_(None))
-                .group_by(Anomaly.severity)
-            ).tuples()
-        }
-        queue_depth = (
-            session.scalar(
-                select(func.count())
-                .select_from(FetchQueueItem)
-                .where(FetchQueueItem.state.in_(("pending", "failed", "leased")))
+        return render(request, "status.html", {**context, "streaming": False})
+
+    @app.get("/fragments/status")
+    async def status_stream(request: Request) -> Response:
+        """Stream the status panel so an operator watching a crawl sees it change.
+
+        The page already rendered a correct panel server-side; this only keeps it current.
+        """
+        if not search_limiter.allow(client_key(request)):
+            return PlainTextResponse(TOO_MANY, status_code=429)
+
+        def snapshot() -> str:
+            with session_factory() as stream_session:
+                context = status_context(stream_session)
+                stream_session.commit()
+            return templates.get_template("_status_panel.html").render(context)
+
+        async def events() -> AsyncIterator[str]:
+            # Bounded so a forgotten tab cannot hold a connection open indefinitely; Datastar
+            # reconnects on close.
+            for tick in range(STATUS_STREAM_TICKS):
+                if await request.is_disconnected():
+                    return
+                if tick:
+                    await asyncio.sleep(STATUS_STREAM_INTERVAL_SECONDS)
+                yield patch_elements(await run_in_threadpool(snapshot))
+            yield comment("stream complete; reconnect for more")
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+    @app.get("/fragments/search")
+    def search_fragment(
+        request: Request,
+        q: str = "",
+        chamber: str | None = None,
+        status: str | None = None,
+        year: str | None = None,
+        lang: str | None = None,
+        include_superseded: bool = False,
+        page: int = 1,
+        cursor: str | None = None,
+        session: Session = Depends(database),
+    ) -> Response:
+        """The results region of /bills, as a Datastar patch. The page works without it."""
+        if not search_limiter.allow(client_key(request)):
+            return PlainTextResponse(TOO_MANY, status_code=429)
+        error, parsed_year = validate_filters(q, chamber, status, year, lang, page)
+        if error:
+            return _fragment(templates.get_template("_search_error.html").render(message=error))
+        try:
+            results = search_bills(
+                session,
+                query=q,
+                chamber=chamber,
+                status=status,
+                year=parsed_year,
+                lang=lang,
+                page=page,
+                include_superseded=include_superseded,
+                cursor=cursor,
             )
-            or 0
+        except ValueError as exc:
+            return _fragment(templates.get_template("_search_error.html").render(message=str(exc)))
+        markup = templates.get_template("_search_results.html").render(
+            results=results,
+            q=q,
+            query_string=preserved_query(q, chamber, status, year, lang, include_superseded),
         )
-        oldest_pending = session.scalar(
-            select(func.min(FetchQueueItem.created_at)).where(
-                FetchQueueItem.state.in_(("pending", "failed", "leased"))
-            )
-        )
-        dead = (
-            session.scalar(
-                select(func.count())
-                .select_from(FetchQueueItem)
-                .where(FetchQueueItem.state == "dead")
-            )
-            or 0
-        )
-        runs = session.scalars(
-            select(ScrapeRun).order_by(ScrapeRun.started_at.desc()).limit(10)
-        ).all()
-        return render(
-            request,
-            "status.html",
-            {
-                "targets": targets,
-                "anomaly_counts": anomaly_counts,
-                "queue_depth": queue_depth,
-                "oldest_pending": oldest_pending,
-                "dead": dead,
-                "runs": runs,
-                "versions": pipeline_versions(),
-            },
-        )
+        return _fragment(markup)
 
     @app.get("/about", response_class=HTMLResponse)
     def about(request: Request) -> Response:
@@ -573,6 +613,50 @@ def document_excerpt(
     if len(text_value) > EXCERPT_CHARS:
         note = "This is a short excerpt of our stored text. The official document is linked above."
     return excerpt, note
+
+
+def _fragment(markup: str) -> Response:
+    """One Datastar element patch, then close."""
+    return Response(patch_elements(markup), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+def status_context(session: Session) -> dict[str, Any]:
+    """Everything /status shows, built once so the page and the stream cannot diverge."""
+    targets = sorted(
+        evaluate_coverage(session),
+        key=lambda target: (target.chamber, target.listing_kind, target.language),
+    )
+    anomaly_counts: dict[str, int] = {
+        severity: int(count)
+        for severity, count in session.execute(
+            select(Anomaly.severity, func.count())
+            .where(Anomaly.resolved_at.is_(None))
+            .group_by(Anomaly.severity)
+        ).tuples()
+    }
+    pending = FetchQueueItem.state.in_(("pending", "failed", "leased"))
+    return {
+        "targets": targets,
+        "anomaly_counts": anomaly_counts,
+        "queue_depth": session.scalar(
+            select(func.count()).select_from(FetchQueueItem).where(pending)
+        )
+        or 0,
+        "oldest_pending": session.scalar(
+            select(func.min(FetchQueueItem.created_at)).where(pending)
+        ),
+        "dead": session.scalar(
+            select(func.count()).select_from(FetchQueueItem).where(FetchQueueItem.state == "dead")
+        )
+        or 0,
+        "runs": session.scalars(
+            select(ScrapeRun).order_by(ScrapeRun.started_at.desc()).limit(10)
+        ).all(),
+        "versions": pipeline_versions(),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        # Overridden to False by the first server-rendered page, which is not streaming yet.
+        "streaming": True,
+    }
 
 
 def client_key(request: Request) -> str:
