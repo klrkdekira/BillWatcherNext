@@ -7,7 +7,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | Package | State | Owner/agent | Branch | Started | Last update | Evidence | Blockers |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | A scaffold/runtime | done | Codex | worktree | 2026-08-16 | 2026-08-17 | make check; locked image build; fresh Compose health; UID 10001; read-only app blob mount | — |
-| B discovery/model | in_progress | Claude | main | 2026-08-16 | 2026-08-18 | schema invariants; twelve parser fixtures including dated columns, mixed good/bad rows, and two soft-404 shapes; empty-database migration to head proven on PostgreSQL | Reviewed live discovery pending |
+| B discovery/model | in_review | Claude | main | 2026-08-16 | 2026-08-18 | schema invariants; twelve parser fixtures including dated columns, mixed good/bad rows, and two soft-404 shapes; empty-database migration to head proven on PostgreSQL; live discovery completed for the current listings, with a fixture reduced from stored bytes and A1/A2/A3/A4/A6 settled | Archive contract, Dewan Negara detail labels, and the English listing structure still unobserved |
 | C scraper/versioning | in_review | Claude | main | 2026-08-16 | 2026-08-18 | offline `make seed` fixture ingestion satisfying the section 18 walkthrough step 5, idempotent on reload; `make reparse` reports zero changes at the current parser version (step 9); document worker, extraction history, orchestration, robots, replay, queue, versioning; dated columns now produce reading events with ranges and sequences and project onto chamber records; all seventeen HANDOFF 10.5 anomaly kinds raised and provoked by tests; anomalies deduplicate by kind plus entity | Reviewed live full crawl pending |
 | D web/search | in_review | Claude | main | 2026-08-17 | 2026-08-18 | routes, schemas, retrieval wiring, and templating split out of app.py per the HANDOFF 7 contract; | 12 PostgreSQL search tests (weighted tsvector, ts_rank_cd ordering, escaped ts_headline, exact/prefix identifier paths, filters, keyset pagination, multi-megabyte index guard); `/changes` filters and pagination; bill-page excerpts and supersession notices | Deep-ranked pagination cap documented in ADR-007; awaits acceptance walkthrough |
 | E operations/deploy | in_review | Claude | main | 2026-08-17 | 2026-08-18 | image/Compose health, PostgreSQL search, database+blob restore drill, UID/mount checks, `make check`, retention job with rollup and pruning tests | external HTTPS and vulnerability review pending |
@@ -19,16 +19,16 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 
 | ID | Status | Verified on | Evidence |
 | --- | --- | --- | --- |
-| A1 | open | — | Live discovery not yet approved/run |
-| A2 | open | — | Fixture required |
-| A3 | open | — | Archive discovery ADR proposed |
-| A4 | open | — | Cross-chamber fixture required |
+| A1 | verified | 2026-08-18 | The two current entry points return complete listings; the archive URLs return a search form, not rows (docs/upstream.md, ADR-011) |
+| A2 | refuted | 2026-08-18 | Current listings expose only Kod, Tahun, Tajuk, Status. There is no presenter column and no reading-date columns; those live in a hidden per-bill detail table (docs/upstream.md) |
+| A3 | resolved | 2026-08-18 | The archive is a GET /carian.html search form with static parameters; no browser automation needed (ADR-011) |
+| A4 | verified | 2026-08-18 | D.R.15/2026, D.R.15/2025 and D.R.42/2025 each hold two chamber records with independent reading dates |
 | A5 | open | — | ADR-002 proposed; fail-loud parser implemented |
-| A6 | open | — | Parser supports claim; upstream fixture required |
-| A7 | open | — | Parser/tests cover formats; upstream fixture required |
+| A6 | verified | 2026-08-18 | Every observed date is DD/MM/YYYY; tests/fixtures/parliament/live_current_dr_bm.html |
+| A7 | open | — | No Malay month name or date range was observed in the current listings; the parser still accepts both. Recheck against the archive |
 | A8 | open | — | Archive discovery required |
-| A9 | open | — | Status map remains provisional pending full sweep |
-| A10 | open | — | Document sample required |
+| A9 | open | 2026-08-18 | Four published phrases observed and mapped, one of which the handoff had guessed wrongly (`Lulus`, not `Diluluskan`). Still one chamber, one language, current bills only (docs/upstream.md) |
+| A10 | open | 2026-08-18 | 127 PDF paths observed, all carried in onclick rather than href. No document downloaded yet, so native-text versus scanned is unmeasured |
 | A11 | open | — | ADR-003 proposed; only the unambiguous same-bytes case is handled (docs/data-model.md) |
 | A12 | open | — | First reviewed full crawl required |
 | A13 | refuted | 2026-08-18 | `https://www.parlimen.gov.my/robots.txt` returns 404: no policy is published. Not "permits crawling" — there is nothing to permit. See docs/upstream.md; crawling now needs a recorded decision via ROBOTS_MISSING_POLICY |
@@ -48,13 +48,14 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | ADR-008 | Embedding model selection deferred; vector width is schema | proposed | 2026-08-18 |
 | ADR-009 | Answer provider, prompt isolation, and answer data retention | proposed | 2026-08-18 |
 | ADR-010 | Retention sign-off | accepted | 2026-08-18 |
+| ADR-011 | Archive is a search endpoint; no browser automation | accepted | 2026-08-18 |
 
 ## Open questions
 
 | Question | Raised by | Raised on | Owner | Needed by |
 | --- | --- | --- | --- | --- |
 | The site publishes no robots.txt; do its terms of use permit crawling? | A13 | 2026-08-18 | Service owner | C |
-| What exact request contract serves archived listings? | HANDOFF A3 | 2026-08-16 | Discovery owner | B/C |
+| What response shape, pagination, and date partitioning does `carian.html` use? | ADR-011 | 2026-08-18 | Discovery owner | C |
 | What is the complete bilingual status vocabulary? | HANDOFF A9 | 2026-08-16 | Discovery owner | B/C |
 | Does a revised document normally retain its URL? | HANDOFF A11 | 2026-08-16 | Discovery owner | C |
 | May stored official PDF bytes be republished? | HANDOFF A14 | 2026-08-16 | Service owner | E |
@@ -62,6 +63,8 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | Which answer provider's data-retention terms permit not storing questions or answers? | ADR-009 | 2026-08-18 | Service owner | H |
 
 ## Manual gate log
+
+- 2026-08-18 — Claude — **First reviewed live crawl.** Crawl permission decided: the site publishes no robots.txt, so RFC 9309 treats crawling as unrestricted; `ROBOTS_MISSING_POLICY=allow` set and each run records a `robots_absent` warning so the decision stays visible. TLS verified through a bundle carrying the intermediate the site omits. Result: 126 records parsed from the two current listings, 67 bills and 126 chamber records published, 505 events, 127 documents queued, `make doctor` clean. Both archive targets report `failing` because the archive is a search endpoint (ADR-011) and is not implemented; the run ended `partial`. No document was downloaded. This crawl found four parser defects, all fixed and covered by tests against a fixture reduced from the stored bytes.
 
 - 2026-08-18 — Claude — First live probe of `www.parlimen.gov.my`, limited to `robots.txt`. Two upstream facts recorded in `docs/upstream.md`: the site serves an incomplete TLS chain (leaf only, missing the Sectigo intermediate), and it publishes no robots.txt (404). Verification succeeds once the intermediate is supplied through `UPSTREAM_CA_BUNDLE`; TLS verification was never disabled. No listing page was fetched, and crawl approval remains outstanding.
 
@@ -79,7 +82,9 @@ model decision, an answer provider decision, and an evaluation run that meets th
 
 ## Requirement evidence
 
-Release 1 and Release 2 requirements have automated evidence in the offline and PostgreSQL
-suites. No release requirement is marked complete until the HANDOFF section 18 acceptance
+Release 1's "current **and archived** listings for both chambers" criterion is **not** met: the
+archive is a search endpoint that is not yet crawled (ADR-011). The current listings are ingested
+from live data. Everything else in Release 1 and Release 2 has automated evidence in the offline
+and PostgreSQL suites. No release requirement is marked complete until the HANDOFF section 18 acceptance
 walkthrough and section 22 evidence matrix are satisfied against real upstream data; every
 current gate that depends on a live crawl, external TLS, or a rights determination remains open.

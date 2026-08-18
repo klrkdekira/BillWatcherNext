@@ -1,7 +1,8 @@
 import hashlib
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 from billwatcher.scraper.normalize import (
     DateRange,
@@ -11,6 +12,18 @@ from billwatcher.scraper.normalize import (
     normalize_text,
     parse_dates,
 )
+
+# Document links are carried in an inline script call, not an href.
+_LOAD_RESULT = re.compile(r"loadResult\(\s*'([^']+)'")
+
+
+@dataclass(frozen=True, slots=True)
+class Cell:
+    """One table cell: its text, any links it carries, and any nested detail pairs."""
+
+    text: str
+    links: tuple[str, ...] = ()
+    detail: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,17 +77,49 @@ class ListingParseError(ValueError):
 
 
 class _TableParser(HTMLParser):
+    """Collect the outer listing rows, and the detail table nested inside each status cell.
+
+    The live listing puts an expanded per-bill detail table inside a hidden div in the status
+    cell. Without nesting awareness those inner rows flatten into the outer table and every row
+    looks malformed, so table depth is tracked explicitly and only depth 1 builds listing rows.
+    """
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
+        self.depth = 0
         self.in_cell = False
         self.in_row = False
         self.cell_parts: list[str] = []
-        self.row: list[tuple[str, list[str]]] = []
-        self.rows: list[list[tuple[str, list[str]]]] = []
+        self.row: list[Cell] = []
+        self.rows: list[list[Cell]] = []
         self.cell_links: list[str] = []
         self.current_tag = ""
+        # Detail state, accumulated while inside a nested table within the current outer cell.
+        self.detail_rows: list[list[str]] = []
+        self.detail_row: list[str] = []
+        self.detail_parts: list[str] = []
+        self.in_detail_cell = False
+        # Depth of nested elements inside a hidden detail box. Its text is the expanded detail,
+        # not the cell's visible value, so it must not leak into the status or title.
+        self.hidden_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if self.hidden_depth:
+            if tag == "div":
+                self.hidden_depth += 1
+        elif tag == "div" and _is_hidden(attributes):
+            self.hidden_depth = 1
+        if tag == "table":
+            self.depth += 1
+            return
+        if self.depth > 1:
+            if tag == "tr":
+                self.detail_row = []
+            elif tag in {"td", "th"}:
+                self.in_detail_cell = True
+                self.detail_parts = []
+            return
         if tag == "tr":
             self.in_row = True
             self.row = []
@@ -83,23 +128,71 @@ class _TableParser(HTMLParser):
             self.current_tag = tag
             self.cell_parts = []
             self.cell_links = []
+            self.detail_rows = []
         elif self.in_cell and tag == "a":
-            href = dict(attrs).get("href")
-            if href:
+            href = attributes.get("href")
+            if href and href not in {"#"}:
                 self.cell_links.append(href)
+            # Documents are opened through a script call rather than a plain link.
+            for target in _LOAD_RESULT.findall(attributes.get("onclick") or ""):
+                self.cell_links.append(target)
 
     def handle_data(self, data: str) -> None:
-        if self.in_cell:
+        if self.depth > 1:
+            if self.in_detail_cell:
+                self.detail_parts.append(data)
+            return
+        if self.in_cell and not self.hidden_depth:
             self.cell_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "div" and self.hidden_depth:
+            self.hidden_depth -= 1
+            return
+        if tag == "table":
+            self.depth = max(0, self.depth - 1)
+            return
+        if self.depth > 1:
+            if tag in {"td", "th"} and self.in_detail_cell:
+                self.detail_row.append(normalize_text("".join(self.detail_parts)))
+                self.in_detail_cell = False
+            elif tag == "tr" and self.detail_row:
+                self.detail_rows.append(self.detail_row)
+                self.detail_row = []
+            return
         if self.in_cell and tag == self.current_tag:
-            self.row.append((normalize_text("".join(self.cell_parts)), self.cell_links.copy()))
+            self.row.append(
+                Cell(
+                    text=normalize_text("".join(self.cell_parts)),
+                    links=tuple(self.cell_links),
+                    detail=tuple(_detail_pairs(self.detail_rows)),
+                )
+            )
             self.in_cell = False
+            self.detail_rows = []
         elif tag == "tr" and self.in_row:
             if self.row:
                 self.rows.append(self.row)
             self.in_row = False
+
+
+def _is_hidden(attributes: dict[str, str | None]) -> bool:
+    """A detail box the page only reveals on demand; its text is not the cell's value."""
+    classes = (attributes.get("class") or "").casefold().split()
+    if "alertbox" in classes:
+        return True
+    style = (attributes.get("style") or "").casefold().replace(" ", "")
+    return "display:none" in style
+
+
+def _detail_pairs(rows: list[list[str]]) -> list[tuple[str, str]]:
+    """Reduce `Label : Value` detail rows to pairs, dropping the separator cell."""
+    pairs: list[tuple[str, str]] = []
+    for row in rows:
+        cells = [cell for cell in row if cell and cell != ":"]
+        if len(cells) >= 2:
+            pairs.append((cells[0], " ".join(cells[1:])))
+    return pairs
 
 
 _LABELS = {
@@ -153,7 +246,7 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
         raise ListingParseError("no table rows found")
 
     header_row = parser.rows[0]
-    headers = tuple(cell[0] for cell in header_row)
+    headers = tuple(cell.text for cell in header_row)
     normalized_headers = tuple(_semantic(value) for value in headers)
     required = {"identifier", "title", "status"}
     if not required <= set(normalized_headers):
@@ -165,15 +258,15 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
     issues: list[ParseIssue] = []
     by_identifier: dict[str, ParsedListingBill] = {}
     for row_no, row in enumerate(parser.rows[1:], start=2):
-        if not any(cell[0] for cell in row):
+        if not any(cell.text for cell in row):
             continue
         if len(row) != len(headers):
             raise ListingParseError(f"row {row_no} has {len(row)} cells; expected {len(headers)}")
         values = {
             semantic: row[index] for index, semantic in enumerate(normalized_headers) if semantic
         }
-        raw_values = tuple(cell[0] for cell in row)
-        raw_identifier = values["identifier"][0]
+        raw_values = tuple(cell.text for cell in row)
+        raw_identifier = values["identifier"].text
         try:
             identifier = normalize_identifier(raw_identifier)
         except ValueError as error:
@@ -188,8 +281,8 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
                 )
             )
             continue
-        title = values["title"][0]
-        status_raw = values["status"][0]
+        title = values["title"].text
+        status_raw = values["status"].text
         if not title or not status_raw:
             issues.append(
                 ParseIssue(
@@ -200,7 +293,7 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
                 )
             )
             continue
-        year_text = values.get("year", ("", []))[0]
+        year_text = _text_of(values.get("year"))
         if year_text and (not year_text.isdigit() or len(year_text) != 4):
             issues.append(
                 ParseIssue(
@@ -212,20 +305,23 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
             )
             continue
         links = tuple(
-            urljoin(source_url, link)
-            for _value, cell_links in row
-            for link in cell_links
+            _absolute(source_url, link)
+            for cell in row
+            for link in cell.links
             if link.lower().split("?", 1)[0].endswith(".pdf")
         )
+        # The expanded detail carries the dates and the presenter on the live listing.
+        detail = tuple(pair for cell in row for pair in cell.detail)
+        presenter = _presenter_from(detail) or _text_of(values.get("presenter")) or None
         record = ParsedListingBill(
             identifier=identifier,
             title=title,
             status_raw=status_raw,
             status_normalized=normalize_status(status_raw),
             year=int(year_text) if year_text else None,
-            presenter=values.get("presenter", ("", []))[0] or None,
+            presenter=presenter,
             document_urls=links,
-            dates=_date_cells(headers, normalized_headers, row),
+            dates=_date_cells(headers, normalized_headers, row) + _detail_dates(detail),
         )
 
         existing = by_identifier.get(identifier.normalized)
@@ -256,14 +352,14 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
 def _date_cells(
     headers: tuple[str, ...],
     normalized_headers: tuple[str, ...],
-    row: list[tuple[str, list[str]]],
+    row: list[Cell],
 ) -> tuple[ParsedDateCell, ...]:
     """Parse every dated column, keeping ranges, multiple dates, and unparseable raw text."""
     cells: list[ParsedDateCell] = []
     for index, semantic in enumerate(normalized_headers):
         if not semantic.startswith("date:"):
             continue
-        raw = row[index][0]
+        raw = row[index].text
         if not raw:
             continue
         event_type = semantic.removeprefix("date:")
@@ -279,4 +375,53 @@ def _date_cells(
         cells.append(
             ParsedDateCell(event_type=event_type, label=headers[index], raw=raw, ranges=ranges)
         )
+    return tuple(cells)
+
+
+# Labels observed inside the expanded per-bill detail on the live listing (docs/upstream.md).
+_DETAIL_DATE_LABELS = {
+    "bacaan pertama pada": "first_reading",
+    "bacaan kedua pada": "second_reading",
+    "bacaan ketiga pada": "third_reading",
+    "diluluskan pada": "passed",
+    "dirujuk jkpk pada": "committee_referral",
+    "dirujuk ke jkpk pada": "committee_referral",
+}
+_PRESENTER_LABELS = {"dibentang oleh", "presented by"}
+
+
+def _text_of(cell: Cell | None) -> str:
+    return cell.text if cell is not None else ""
+
+
+def _absolute(source_url: str, link: str) -> str:
+    """Resolve a listing link, percent-encoding the spaces real document paths contain."""
+    return urljoin(source_url, quote(link, safe="/:?=&%#"))
+
+
+def _presenter_from(detail: tuple[tuple[str, str], ...]) -> str | None:
+    for label, value in detail:
+        if label.casefold().rstrip(":") in _PRESENTER_LABELS and value:
+            return value
+    return None
+
+
+def _detail_dates(detail: tuple[tuple[str, str], ...]) -> tuple[ParsedDateCell, ...]:
+    """Read the dated rows out of the expanded detail table."""
+    cells: list[ParsedDateCell] = []
+    for label, value in detail:
+        event_type = _DETAIL_DATE_LABELS.get(label.casefold().rstrip(":"))
+        if event_type is None or not value:
+            continue
+        try:
+            ranges = tuple(parse_dates(value))
+        except ValueError as error:
+            cells.append(
+                ParsedDateCell(event_type=event_type, label=label, raw=value, error=str(error))
+            )
+            continue
+        if ranges:
+            cells.append(
+                ParsedDateCell(event_type=event_type, label=label, raw=value, ranges=ranges)
+            )
     return tuple(cells)

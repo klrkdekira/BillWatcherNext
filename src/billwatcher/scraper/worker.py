@@ -81,6 +81,10 @@ TARGETS: Final = (
 )
 
 
+class TargetUnreachable(RuntimeError):
+    """A listing could not be read at all. The state is unknown, so the run does not publish."""
+
+
 class ScrapeRefused(RuntimeError):
     pass
 
@@ -152,7 +156,7 @@ class ScrapeOrchestrator:
         try:
             with advisory_lock(self.session, SCRAPE_LOCK_KEY):
                 self._preflight(run)
-                prepared = [self._prepare_target(run, target) for target in TARGETS]
+                prepared, failures = self._prepare_targets(run)
                 publication = self.session.begin_nested()
                 applied: list[IngestCounts] = []
                 budget_target: str | None = None
@@ -166,7 +170,9 @@ class ScrapeOrchestrator:
                             budget_target = item.target.url
                             break
                         applied.append(counts)
-                    if budget_target is None and mode == "full":
+                    # Absence is only evidence when every expected listing was read and
+                    # published (HANDOFF 10.3), so a failed target suppresses it.
+                    if budget_target is None and mode == "full" and not failures:
                         self._record_presence(run, prepared)
                     self.session.flush()
                 except Exception:
@@ -188,8 +194,16 @@ class ScrapeOrchestrator:
                     publication.commit()
                     for counts in applied:
                         self._apply_counts(run, counts)
-                    run.state = "succeeded"
                     run.publish_decision = "published"
+                    if failures:
+                        run.state = "partial"
+                        run.failed += len(failures)
+                        run.publish_reason = "; ".join(
+                            f"{target.listing_kind} {target.chamber}: {error}"
+                            for target, error in failures
+                        )[:1000]
+                    else:
+                        run.state = "succeeded"
         except BudgetExhausted as error:
             run.state = "partial"
             run.publish_decision = "withheld"
@@ -211,6 +225,44 @@ class ScrapeOrchestrator:
         self.session.flush()
         return run
 
+    def _prepare_targets(
+        self, run: ScrapeRun
+    ) -> tuple[list[PreparedListing], list[tuple[ListingTarget, Exception]]]:
+        """Fetch and validate each listing independently.
+
+        A `current` listing is the core product: if it will not parse, the run fails and prior
+        data stays live. A target that could not be read at all also fails the run, because its
+        state is unknown. Any other target that was read but is not a listing we understand
+        degrades instead — it is marked failing on its own
+        coverage row so `/status` shows exactly which one is broken, and the targets that did
+        validate still publish. That separation is the point of per-target coverage
+        (HANDOFF 10.4).
+        """
+        prepared: list[PreparedListing] = []
+        failures: list[tuple[ListingTarget, Exception]] = []
+        for target in TARGETS:
+            try:
+                prepared.append(self._prepare_target(run, target))
+            except BudgetExhausted:
+                # A spent budget is a run-level signal, not one target being unparseable.
+                raise
+            except (ListingParseError, UnicodeDecodeError, ScrapeRefused) as error:
+                if target.listing_kind == "current":
+                    raise
+                coverage = self._coverage(target)
+                coverage.state = "failing"
+                self._anomaly(
+                    "listing_unavailable",
+                    "warn",
+                    "coverage_target",
+                    coverage.id,
+                    {"target": target.url, "reason": str(error)[:500]},
+                    datetime.now(UTC),
+                    url=target.url,
+                )
+                failures.append((target, error))
+        return prepared, failures
+
     def _preflight(self, run: ScrapeRun) -> None:
         url = "https://www.parlimen.gov.my/robots.txt"
         result = self._fetch(run, "robots", url)
@@ -230,12 +282,17 @@ class ScrapeOrchestrator:
                 f"robots.txt returned {result.status_code}; crawl policy could not be read"
             )
         if result.status_code != 200:
+            # A standing condition, not an incident: nothing changed, there is simply no policy
+            # to read. It stays visible on /status without permanently failing `make doctor`.
             self._anomaly(
-                "robots_changed",
-                "critical",
+                "robots_absent",
+                "warn",
                 None,
                 None,
-                {"status_code": result.status_code, "decision": "allowed by configuration"},
+                {
+                    "status_code": result.status_code,
+                    "decision": "crawling without a published policy, per configuration",
+                },
                 result.requested_at,
                 url=url,
             )
@@ -243,9 +300,11 @@ class ScrapeOrchestrator:
         policy = parse_robots(result.body, fetched_url=result.final_url)
         previous = self.session.scalar(
             select(SourceSnapshot)
+            .join(ScrapeRun, ScrapeRun.id == SourceSnapshot.run_id)
             .where(
                 SourceSnapshot.url == url,
                 SourceSnapshot.id != self._latest_snapshot_id(run.id, url),
+                ScrapeRun.mode != "fixture",
             )
             .order_by(SourceSnapshot.requested_at.desc())
             .limit(1)
@@ -274,6 +333,12 @@ class ScrapeOrchestrator:
         result = self._fetch(run, target.listing_kind, target.url)
         coverage = self._coverage(target)
         coverage.last_attempt_at = result.requested_at
+        if result.status_code != 200:
+            # Do not hand an error body to the parser; we did not read a listing at all.
+            self.breaker.record(failed=True)
+            raise TargetUnreachable(
+                f"{target.url} returned {result.status_code}; the listing was not read"
+            )
         snapshot = self._snapshot_for(run.id, target.url)
         if snapshot is None:
             raise RuntimeError("fetch did not create a source snapshot")
@@ -314,12 +379,17 @@ class ScrapeOrchestrator:
                 url=target.url,
             )
             raise ScrapeRefused("record count dropped beyond publication threshold")
+        # Drift is only meaningful between comparable observations. Fixture-mode snapshots are
+        # synthetic and share the live URLs, so comparing a real page against one would report
+        # drift on the first crawl after seeding.
         previous_shape = self.session.scalar(
             select(SourceSnapshot.structure_fingerprint)
+            .join(ScrapeRun, ScrapeRun.id == SourceSnapshot.run_id)
             .where(
                 SourceSnapshot.url == target.url,
                 SourceSnapshot.id != snapshot.id,
                 SourceSnapshot.parse_status == "succeeded",
+                ScrapeRun.mode != "fixture",
             )
             .order_by(SourceSnapshot.requested_at.desc())
             .limit(1)

@@ -10,6 +10,13 @@ from billwatcher.models import Anomaly, Blob, CoverageTarget, DocumentVersion
 from billwatcher.storage.blobs import BlobStore
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    """SQLite drops timezone information on round trip; treat stored timestamps as UTC."""
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def record_anomaly(
     session: Session,
     *,
@@ -63,12 +70,18 @@ def evaluate_coverage(session: Session, *, now: datetime | None = None) -> list[
     now = now or datetime.now(UTC)
     targets = list(session.scalars(select(CoverageTarget)))
     for target in targets:
-        if target.last_success_at is None:
-            target.state = "never_run"
+        attempt = _aware(target.last_attempt_at)
+        success = _aware(target.last_success_at)
+        if success is None:
+            # A target that has been tried and never succeeded is failing, which says more than
+            # "never run" — that state is for a target nothing has attempted yet.
+            target.state = "failing" if attempt is not None else "never_run"
             continue
-        success = target.last_success_at
-        if success.tzinfo is None:
-            success = success.replace(tzinfo=UTC)
+        if attempt is not None and attempt > success:
+            # The most recent attempt did not succeed, so the target is broken right now even
+            # though it has succeeded before.
+            target.state = "failing"
+            continue
         stale = now - success > timedelta(hours=target.expected_interval_hours)
         target.state = "stale" if stale else "healthy"
         existing = session.scalar(

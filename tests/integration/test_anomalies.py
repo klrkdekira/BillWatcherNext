@@ -35,6 +35,9 @@ REQUIRED_KINDS = {
     "budget_exhausted",
 }
 
+# Kinds added beyond the minimum set as real upstream behaviour was observed.
+ADDITIONAL_KINDS = {"robots_absent", "listing_unavailable", "document_relation_proposed"}
+
 
 @pytest.fixture
 def session() -> Session:
@@ -48,7 +51,7 @@ def test_every_kind_in_the_minimum_set_is_raised_somewhere() -> None:
     from pathlib import Path
 
     sources = "\n".join(path.read_text() for path in Path("src/billwatcher").rglob("*.py"))
-    missing = {kind for kind in REQUIRED_KINDS if f'"{kind}"' not in sources}
+    missing = {kind for kind in REQUIRED_KINDS | ADDITIONAL_KINDS if f'"{kind}"' not in sources}
     assert missing == set()
 
 

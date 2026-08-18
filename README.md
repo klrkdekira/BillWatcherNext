@@ -106,7 +106,7 @@ explicit `--approve-live` flag that `make scrape` passes.
 The crawler defaults to one request at a time with a two-second delay, refuses to be less
 polite, verifies TLS strictly, allowlists only Parliament hosts, and revalidates every redirect.
 
-Two upstream conditions currently stop a crawl before it starts, both recorded in
+Two upstream conditions must be settled before a crawl runs, both recorded in
 `docs/upstream.md`:
 
 1. **The site serves an incomplete TLS certificate chain.** It sends its leaf certificate without
@@ -128,8 +128,19 @@ FAIL: robots.txt returned 404; no crawl policy is published. ...
 Inspect the run with: uv run billwatcher run-report <run-id>
 ```
 
-The remaining discovery gates in `docs/upstream.md` — the archive request contract, the bilingual
-column and status sweep, and a real contact address — are still open.
+### What a crawl currently collects
+
+The two current listings ingest fully: 126 bills across both chambers, with reading dates,
+presenters, and document links read out of the hidden per-bill detail table each row carries.
+
+**The archive does not.** `?arkib=yes` returns a search form, not archived rows — it is a
+`GET /carian.html` endpoint whose response shape has not been observed yet (ADR-011). Both archive
+coverage targets therefore report `failing` on `/status`, each raises a warning, and a run ends
+`partial` while the current listings publish normally. Release 1's archived-listings criterion is
+not met until that endpoint is implemented.
+
+The remaining discovery gates in `docs/upstream.md` are the `carian.html` contract, the Dewan
+Negara detail labels, the English listing structure, and a real contact address.
 
 ---
 

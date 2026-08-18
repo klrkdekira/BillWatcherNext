@@ -1,11 +1,120 @@
 # Upstream observations
 
-No live reconnaissance has been accepted yet. The URLs and behavior in HANDOFF section 5 remain
-assumptions. A production or scheduled crawl must not run until strict-TLS discovery has saved
-robots.txt and the required listing fixtures, recorded response metadata, completed the bilingual
-label/status sweep, and resolved the archive request contract.
+First reviewed reconnaissance: **2026-08-18**, from a crawl that stored every response, so
+everything below was read out of saved bytes rather than a browser. Earlier sections of this file
+that describe the parser's provisional vocabulary are kept for history; the observed sections take
+precedence over them.
 
-This file intentionally does not present search-index observations from the handoff as verification.
+Still not verified: the archive request contract's response shape, the Dewan Negara detail labels,
+the bilingual (English) listing structure, and the parliamentary term/session navigation (A8).
+
+This file intentionally does not present search-index observations from the handoff as
+verification.
+
+## 2026-08-18 — the current listing structure, verified
+
+`GET /bills-dewan-rakyat.html?lang=bm&uweb=dr` (and the `uweb=dn` equivalent) return the complete
+current listing in the initial HTML. No AJAX request is needed and no pagination request is
+issued; the table carries a `paginated` class and is paged client-side, so one fetch yields every
+row. Observed counts: 67 rows for Dewan Rakyat, 59 for Dewan Negara.
+
+The bill table is `<table id="ruulist" class="table-style-two dr paginated">` with exactly four
+columns:
+
+| Header | Contents |
+| --- | --- |
+| `Kod` | The identifier, inside an `<a>` whose `onclick` carries the document path |
+| `Tahun` | Four-digit year |
+| `Tajuk` | Title |
+| `Status` | The visible status, plus a hidden detail box |
+
+**There is no presenter column, and there are no reading-date columns.** That corrects the
+reconnaissance in HANDOFF section 5, which expected `Pembentang` and expanded date columns.
+Everything beyond the four columns above lives in a hidden `<div class="alertBox">` inside the
+status cell, containing a nested `<table>` of `Label : Value` rows:
+
+| Detail label | Meaning | Observed count (DR) |
+| --- | --- | --- |
+| `Bacaan Pertama Pada` | First reading date | 67 |
+| `Bacaan Kedua Pada` | Second reading date | 67 |
+| `Diluluskan Pada` | Passage date | 59 |
+| `Dirujuk JKPK Pada` | Referral to select committee | 4 |
+| `Tidak Mendapat Undi 2/3 Pada` | Failed to reach a two-thirds majority | 1 |
+| `Dibentang Oleh` | Presenter; repeated once per stage | 126 |
+
+Two consequences for any parser:
+
+1. **Table nesting must be tracked.** The detail table's rows are inside a `<td>` of the outer
+   table. A parser that ignores nesting flattens them into the listing and every row appears
+   malformed. This is what the first live crawl hit.
+2. **The hidden box must not contribute to the cell's visible text.** The status cell's raw text
+   otherwise becomes `Lulus D.R.22/2026 Tutup`, absorbing the popup heading and its close link.
+
+## 2026-08-18 — the published status vocabulary (A9, partial)
+
+The complete distinct set observed on the Dewan Rakyat current listing:
+
+| Published status | Count | Normalized |
+| --- | --- | --- |
+| `Lulus` | 59 | `passed` |
+| `Dirujuk ke JKPK` | 4 | `referred` |
+| `Bacaan Kali Pertama` | 3 | `first_read` |
+| `Tidak Mendapat Undi 2/3 Peringkat Bacaan Ke-2` | 1 | `defeated` |
+
+The handoff guessed `Diluluskan` for passage; the site publishes `Lulus`. Only one of the four
+phrases matched the pre-live mapping, which is exactly why A9 forbids designing the status map
+from a handful of assumed rows. The status also carries a CSS class (`ruustatus1`, `3`, `6`, `7`)
+that correlates with the phrase; the phrase is parsed, not the class, because a class is
+presentation.
+
+This is still partial: it covers one chamber, one language, and current bills only. The archive
+and the Dewan Negara set may add phrases.
+
+## 2026-08-18 — document links (A10, partial)
+
+Every document is reached through an inline script call, not a link:
+
+```html
+<a href="#" onclick="loadResult('/files/billindex/pdf/2026/DR/RUU Statistik 2026.pdf','...');">
+```
+
+There are **zero** `href` attributes ending in `.pdf` on the page. A parser that only collects
+hrefs finds no documents at all. Paths contain spaces and must be percent-encoded to form a
+usable URL. Whether the bytes are native-text or scanned PDFs is not yet measured; 127 documents
+were queued and none downloaded during this run.
+
+## 2026-08-18 — the archive is a search form, not a listing (A3, resolved)
+
+`?arkib=yes` does **not** return archived rows. It returns a search page whose only table header
+is `Kembali Ke Senarai` ("back to list"), wrapping a form:
+
+```html
+<form method="GET" action="carian.html" class="formcarian">
+  <input type="text"   name="str">            <!-- free-text query -->
+  <input type="hidden" name="DATETYPE" value="dr">
+  <input type="radio"  name="DATETYPE" value="2|5|0|1">   <!-- date-range mode -->
+  <input type="text"   name="daterangeraw">
+  <input type="text"   name="str2">
+  <input type="hidden" name="doctype[]"  value="DR-bill">
+  <input type="hidden" name="dokumen[]"  value="ruu">
+  <input type="hidden" name="searchref"     value="bills-dewan-rakyat">
+  <input type="hidden" name="searchrefcode" value="dr">
+  <input type="submit" name="submit" value="CARI">
+</form>
+```
+
+So the archive is a documented `GET /carian.html` endpoint with static parameters. **No browser
+automation is required** — see ADR-011. The response shape of `carian.html`, its pagination, and
+whether results must be partitioned by date range are not yet observed, so the archive crawl is
+not implemented. Until it is, both archive coverage targets report `failing` on `/status` and the
+run ends `partial` while the current listings publish normally.
+
+## 2026-08-18 — a bill really does appear in both chambers (A4, verified)
+
+`D.R.15/2026`, `D.R.15/2025`, and `D.R.42/2025` each hold two chamber records from one bill row
+in each chamber's listing, with independent reading dates. The bill/chamber split in HANDOFF
+section 8 is confirmed against real data: a single flat table would have overwritten one
+chamber's history with the other's.
 
 
 ## Provisional label vocabulary in the parser

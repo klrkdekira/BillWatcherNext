@@ -4,12 +4,15 @@ COMPOSE ?= docker compose
 DEV_COMPOSE ?= docker compose -f compose.dev.yaml
 # The PostgreSQL-only test suite needs a disposable database; this one is created by `make db-up`.
 TEST_DATABASE_URL ?= postgresql+psycopg://billwatcher:billwatcher@127.0.0.1:55432/billwatcher_test
+# Upstream serves an incomplete certificate chain; see docs/upstream.md and `make ca-bundle`.
+UPSTREAM_INTERMEDIATE_URL ?= http://crt.sectigo.com/SectigoPublicServerAuthenticationCADVR36.crt
+SYSTEM_CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
 BACKUP_DIR ?=
 BLOB_BACKUP_DEST ?=
 RESTORE_PATH ?=
 BLOB_RESTORE_PATH ?=
 
-.PHONY: help quickstart env db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
 
 help: ## Show available targets
 	@echo "Start here:  make quickstart   (env + database + migrations + fixture data + server)"
@@ -42,6 +45,19 @@ db-down: ## Stop the local development database, keeping its volume
 db-reset: ## Delete the local development database and its data
 	@test "$$CONFIRM_RESET" = "yes" || { echo "Set CONFIRM_RESET=yes to delete dev data"; exit 2; }
 	$(DEV_COMPOSE) down -v
+
+ca-bundle: ## Build a trust bundle containing the intermediate the site fails to send
+	@mkdir -p var
+	@echo "Fetching the intermediate named by the leaf certificate's AIA extension..."
+	curl -fsS $(UPSTREAM_INTERMEDIATE_URL) -o var/upstream-intermediate.crt
+	@openssl x509 -inform DER -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem 2>/dev/null \
+		|| openssl x509 -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem
+	@openssl x509 -in var/upstream-intermediate.pem -noout -subject -enddate
+	cat $(SYSTEM_CA_BUNDLE) var/upstream-intermediate.pem > var/upstream-ca.pem
+	@echo ""
+	@echo "Wrote var/upstream-ca.pem. Set this in .env:"
+	@echo "  UPSTREAM_CA_BUNDLE=$(CURDIR)/var/upstream-ca.pem"
+	@echo "Re-run this if the intermediate expires, and drop it once upstream fixes its chain."
 
 seed: ## Ingest the committed fixtures offline; never contacts Parliament
 	$(UV) run billwatcher load-fixtures

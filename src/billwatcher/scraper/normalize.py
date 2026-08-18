@@ -193,6 +193,12 @@ _STATUS_MAP = {
     "defeated": "defeated",
     "dibentangkan": "tabled",
     "tabled": "tabled",
+    # Observed on the live Dewan Rakyat listing, 2026-08-18 (docs/upstream.md). These are the
+    # phrases the site actually publishes; the entries above remain provisional guesses until
+    # the full bilingual sweep required by assumption A9 confirms or removes them.
+    "lulus": "passed",
+    "dirujuk ke jkpk": "referred",
+    "tidak mendapat undi 2/3 peringkat bacaan ke-2": "defeated",
 }
 
 

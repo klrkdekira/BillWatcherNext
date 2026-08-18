@@ -15,6 +15,7 @@ from billwatcher.models import (
     ScrapeRun,
     SourceSnapshot,
 )
+from billwatcher.operations import evaluate_coverage
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
 from billwatcher.scraper.queue import CrawlBudget
@@ -221,8 +222,115 @@ def test_a_recorded_decision_permits_crawling_a_site_with_no_robots(tmp_path) ->
         run = orchestrator(database, tmp_path, missing_robots(), allow_missing_robots=True).run()
         assert run.state == "succeeded"
         assert database.scalar(select(func.count()).select_from(Bill)) > 0
-        # The decision is visible rather than silent.
-        anomaly = database.scalar(select(Anomaly).where(Anomaly.kind == "robots_changed"))
+        # The decision is visible rather than silent, but it is a standing condition and must
+        # not permanently fail the release gate.
+        anomaly = database.scalar(select(Anomaly).where(Anomaly.kind == "robots_absent"))
         assert anomaly is not None
-        assert anomaly.severity == "critical"
+        assert anomaly.severity == "warn"
         assert anomaly.detail_json["status_code"] == 404
+        assert not database.scalars(select(Anomaly).where(Anomaly.kind == "robots_changed")).all()
+
+
+def broken_archive() -> httpx.MockTransport:
+    """Current listings work; the archive answers with something that is not a listing.
+
+    This is the real upstream shape: `?arkib=yes` returns a search form, not a table of bills.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, content=b"User-agent: *\nAllow: /\n", request=request)
+        if request.url.params.get("arkib") == "yes":
+            return httpx.Response(
+                200,
+                content=b'<html><body><form action="carian.html" method="get">'
+                b'<table width="100%"><tr><th>Kembali Ke Senarai</th></tr></table>'
+                b"</form></body></html>",
+                headers={"Content-Type": "text/html"},
+                request=request,
+            )
+        chamber = "dn" if request.url.params.get("uweb") == "dn" else "dr"
+        return httpx.Response(
+            200,
+            content=(FIXTURES / f"current_{chamber}_bm.html").read_bytes(),
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            request=request,
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def test_an_unreadable_archive_does_not_block_the_current_listings(tmp_path) -> None:
+    """HANDOFF 10.4: per-target state exists so one broken target is visible, not blocking."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, broken_archive()).run(mode="full")
+        database.flush()
+
+        assert run.state == "partial"
+        assert run.publish_decision == "published"
+        assert "archive" in (run.publish_reason or "")
+        assert run.failed == 2
+        # The current listings published.
+        assert database.scalar(select(func.count()).select_from(Bill)) > 0
+
+        targets = {
+            (target.chamber, target.listing_kind): target
+            for target in database.scalars(select(CoverageTarget))
+        }
+        evaluate_coverage(database)
+        database.flush()
+        assert targets[("dewan_rakyat", "current")].state == "healthy"
+        assert targets[("dewan_rakyat", "archive")].state == "failing"
+        assert targets[("dewan_negara", "archive")].state == "failing"
+
+        anomalies = database.scalars(
+            select(Anomaly).where(Anomaly.kind == "listing_unavailable")
+        ).all()
+        assert len(anomalies) == 2
+        assert all(anomaly.severity == "warn" for anomaly in anomalies)
+        # Absence evidence needs a complete run, so an incomplete one records none.
+        assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 0
+
+
+def test_a_broken_current_listing_still_fails_the_whole_run(tmp_path) -> None:
+    """The current listings are the product; a parse failure there withholds everything."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, content=b"User-agent: *\nAllow: /\n", request=request)
+        return httpx.Response(
+            200,
+            content=b"<html><body><h1>Ralat</h1></body></html>",
+            headers={"Content-Type": "text/html"},
+            request=request,
+        )
+
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, httpx.MockTransport(handler)).run()
+        database.flush()
+        assert run.state == "failed"
+        assert run.publish_decision == "withheld"
+        assert database.scalar(select(func.count()).select_from(Bill)) == 0
+
+
+def test_an_error_status_is_never_handed_to_the_parser(tmp_path) -> None:
+    """A 5xx body is not a listing; the state is unknown, so nothing publishes."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    normal = transport()
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("arkib") == "yes":
+            return httpx.Response(503, content=b"<html>busy</html>", request=request)
+        return normal.handle_request(request)
+
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, httpx.MockTransport(flaky)).run(mode="full")
+        database.flush()
+        assert run.state == "failed"
+        assert "returned 503" in (run.publish_reason or "")
+        assert database.scalar(select(func.count()).select_from(Bill)) == 0
