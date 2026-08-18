@@ -1,0 +1,26 @@
+# Local development database only.
+#
+# This is NOT the production stack — see compose.yaml for that. This file deliberately
+# publishes PostgreSQL to 127.0.0.1 so `make serve` and the PostgreSQL test suite can reach it
+# from the host. Never use it on a public host.
+name: billwatchernext-dev
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_DB: billwatcher
+      POSTGRES_USER: billwatcher
+      POSTGRES_PASSWORD: billwatcher
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - dev_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billwatcher -d billwatcher"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  dev_postgres_data:

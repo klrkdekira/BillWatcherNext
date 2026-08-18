@@ -108,12 +108,20 @@ def ingest_listing(
                 updated += 1
                 changes += 1
 
+        # HANDOFF 11.3 step 8: an English listing reconciles the title by normalized
+        # identifier and nothing else. Its status and presenter are the same facts rendered in
+        # another language, and letting them through would overwrite the published Malay text.
+        authoritative = language == "ms"
+
         chamber_record = session.scalar(
             select(ChamberRecord).where(
                 ChamberRecord.bill_id == bill.id,
                 ChamberRecord.chamber == chamber,
             )
         )
+        if chamber_record is None and not authoritative:
+            rebuild_bill_metadata_unit(session, bill)
+            continue
         if chamber_record is None:
             chamber_record = ChamberRecord(
                 bill_id=bill.id,
@@ -131,7 +139,13 @@ def ingest_listing(
             session.add(chamber_record)
             session.flush()
             chamber_inserted += 1
+            newly_inserted = True
+        elif not authoritative:
+            newly_inserted = False
+            chamber_record.last_seen_at = checked_at
+            chamber_record.last_checked_at = checked_at
         else:
+            newly_inserted = False
             chamber_record.last_seen_at = checked_at
             chamber_record.last_checked_at = checked_at
             chamber_record.source_snapshot_id = snapshot_id
@@ -154,6 +168,20 @@ def ingest_listing(
                 ):
                     chamber_record.last_changed_at = checked_at
                     changes += 1
+
+        if not authoritative:
+            rebuild_bill_metadata_unit(session, bill)
+            for raw_url in parsed.document_urls:
+                if _link_and_queue_document(
+                    session,
+                    bill=bill,
+                    chamber=chamber,
+                    raw_url=raw_url,
+                    listing_url=source_url,
+                    observed_at=checked_at,
+                ):
+                    queued += 1
+            continue
 
         if parsed.status_normalized == "unknown":
             _upsert_anomaly(
@@ -188,6 +216,7 @@ def ingest_listing(
             run_id=run_id,
             checked_at=checked_at,
             change_source=change_source,
+            newly_inserted=newly_inserted,
         )
         changes += dated_changes
         events += dated_events
@@ -351,6 +380,7 @@ def _apply_dated_columns(
     run_id: str,
     checked_at: datetime,
     change_source: str,
+    newly_inserted: bool = False,
 ) -> tuple[int, int]:
     """Project dated listing columns onto events and the chamber-record shortcut columns.
 
@@ -390,6 +420,11 @@ def _apply_dated_columns(
                 events += 1
         field = EVENT_TYPE_TO_CHAMBER_FIELD.get(cell.event_type)
         if field is None or not cell.ranges:
+            continue
+        if newly_inserted:
+            # First observation of this chamber record: the dates are part of the insert, not a
+            # change to something we previously held.
+            setattr(chamber_record, field, cell.ranges[0].start)
             continue
         if update_tracked_field(
             session,

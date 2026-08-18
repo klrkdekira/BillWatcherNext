@@ -1,56 +1,180 @@
 # BillWatcherNext
 
-BillWatcherNext is a provenance-first, read-only index of Malaysian Parliament bills. It preserves
-timestamped listing snapshots and private document bytes, exposes server-rendered browse/search
-pages, and records every accepted document content state instead of overwriting it.
+A provenance-first, read-only index of Malaysian Parliament bills.
 
-Parliament of Malaysia remains the authority. A normalized status is an index classification, and a
-bill marked passed by a chamber is not represented as enacted or currently in force.
+It preserves timestamped snapshots of every page it reads and every document it downloads,
+records each new content state instead of overwriting the last one, and serves the result as a
+fast, server-rendered site that works without JavaScript.
 
-## Local development
+**Parliament of Malaysia is the authority.** A normalized status here is this index's
+classification, not a legal conclusion, and a bill passed by a chamber is not law.
 
-Requirements: Python 3.12.5+, uv, and PostgreSQL 16 for full integration.
+---
 
-Copy .env.example to .env, replace placeholders, and set ENVIRONMENT=development for local HTTP.
-Then run make setup, make migrate, make check, and make serve.
+## Quickstart
 
-The public application is at http://127.0.0.1:8000. JavaScript is not required. Offline tests use
-saved fixtures and SQLite and never contact Parliament. Behaviour that only exists on PostgreSQL
-(the weighted tsvector, ranking, snippets, and pgvector retrieval) runs when
-BILLWATCHER_TEST_DATABASE_URL names a disposable database, and skips otherwise. Live tests require
-BILLWATCHER_LIVE_TEST=1 make test-live. A live crawl requires the explicit make scrape target.
+Requirements: Python 3.12.5+, [uv](https://docs.astral.sh/uv/), Docker, and GNU Make.
 
-Before crawling, complete the discovery gates in docs/upstream.md: review robots.txt, archive
-request behavior, bilingual labels/statuses, TLS, and the configured contact identity. Live
-crawling is disabled by default.
+```bash
+make quickstart
+```
 
-## Operations
+That runs, in order: `setup` (locked dependencies) → `env` (writes `.env` from
+`.env.development`) → `db-up` (PostgreSQL 16 with pgvector on `127.0.0.1:55432`) → `migrate` →
+`seed` (loads the committed fixtures) → `serve`.
 
-make help lists the stable interface. Important targets include make check, make docker-build,
-make compose-up, make status, make doctor, make verify-storage, make retention, dry-run-first
-backfills, and guarded database/blob backup and restore targets.
+Open <http://127.0.0.1:8000>. Stop the server with Ctrl-C and the database with `make db-down`.
 
-## Optional Release 3 features
+Nothing in that path touches the internet. `seed` ingests fixtures committed to this repository
+as a `fixture`-mode scrape run, with real snapshot and blob provenance, so every page has
+something truthful to show.
 
-Semantic search and generated answers are behind SEMANTIC_SEARCH_ENABLED and RAG_ENABLED, both
-off by default, and the site is complete without them. Neither can start without an explicitly
-configured model: no embedding model or answer provider is chosen or defaulted here, because that
-decision has not been made (see docs/decisions/ADR-008 and ADR-009). Before either flag is turned
-on, make evaluate must meet the thresholds in docs/evals/README.md against the real model and the
-result must be recorded in docs/status.md. See docs/operations.md for the rollout sequence.
+### What you should see
 
-Deployment uses one locked image for migrations, web, and workers. PostgreSQL is internal; only
-Caddy publishes ports. The web container sees blobs read-only while the worker owns read-write
-access. See docs/operations.md for rollout, backup, restore, and release gates.
+| Page | Seeded content |
+| --- | --- |
+| `/` | Three bills and a freshness line reporting the **oldest** healthy coverage target |
+| `/bills` | Browsable index with chamber, status, year, and title-language filters |
+| `/search?q=Perlindungan` | A ranked hit with a highlighted passage; `?q=D.R.15/2026` matches the code exactly |
+| `/bills/dr-15-2026` | One bill with two chamber timelines, reading dates, provenance, and document versions |
+| `/changes` | Recent changes, labelled Parliament's versus this index's own corrections |
+| `/status` | Five coverage targets, queue depth, open anomalies, pipeline versions |
+| `/api/v1/bills` | The read-only JSON API |
+
+`D.R.15/2026` appears in both chambers deliberately: it is one bill with two independent
+timelines, which is the case a single flat table would get wrong.
+
+### Running it again
+
+```bash
+make seed     # idempotent: a second load inserts nothing and records no changes
+make db-down  # stop the database, keep the data
+CONFIRM_RESET=yes make db-reset   # delete the dev database and its volume
+```
+
+---
+
+## Tests
+
+```bash
+make check     # lint, strict mypy, and the offline suite (SQLite, no network)
+make test-pg   # the above plus the PostgreSQL-only tests, against the dev database
+```
+
+The offline suite runs entirely on SQLite. Behaviour that only exists on PostgreSQL — the
+weighted `tsvector`, `ts_rank_cd` ranking, `ts_headline` snippets, and pgvector cosine retrieval
+— runs only when `BILLWATCHER_TEST_DATABASE_URL` points at a disposable database, and skips with
+a clear message otherwise. `make test-pg` sets it to the `billwatcher_test` database that
+`make db-up` creates. That fixture drops and recreates the `public` schema, so never aim it at a
+database you care about.
+
+`make test-live` performs a tiny opt-in check against the real Parliament site. It requires
+`BILLWATCHER_LIVE_TEST=1`, obeys the crawl delay, fetches at most two documents, and skips
+cleanly when robots policy, TLS, or upstream availability prevents it. It never runs as part of
+`make test`.
+
+---
+
+## Operator interface
+
+`make help` lists everything. The targets that matter:
+
+| Target | What it does |
+| --- | --- |
+| `check` | Lint, type check, and test — the gate before any change lands |
+| `doctor` | Exits non-zero while a critical anomaly is unresolved, a current document version is unaccepted, or a stored blob is missing |
+| `status` | Per-target freshness, queue depth, latest run, pipeline versions |
+| `seed` | Offline fixture ingestion |
+| `scrape` / `scrape-full` | An approved live crawl; both require an explicit opt-in |
+| `reparse` / `reextract` | Replay stored bytes at a newer parser or extractor; dry run by default |
+| `retention` | Roll transport logs into daily counters and prune old extractions; never deletes archive data |
+| `verify-storage` / `prune-blobs` | Check every blob reference; delete only unreferenced bytes |
+| `backup` / `backup-blobs` / `restore` / `restore-blobs` | Guarded database and blob-store operations |
+| `docker-build` / `compose-up` / `compose-down` / `logs` | The production-shaped stack |
+
+Every mutating backfill is a dry run unless you pass `ARGS=--apply`. No default target crawls
+Parliament or deletes data. There is no GitHub Actions workflow, by design: `make doctor` and the
+manual gate log in `docs/status.md` take its place.
+
+---
+
+## Crawling
+
+Live crawling is off by default and needs two separate opt-ins: `SCRAPE_ENABLED=true` and the
+explicit `--approve-live` flag that `make scrape` passes.
+
+Before the first crawl, complete the discovery gates in `docs/upstream.md`: fetch and record
+`robots.txt` and its hash, settle the archive request contract, sweep the bilingual column and
+status vocabulary, confirm TLS verification from the deployment host, and set a real contact
+address. The crawler defaults to one request at a time with a two-second delay, refuses to be
+less polite, verifies TLS strictly, allowlists only Parliament hosts, and revalidates every
+redirect.
+
+---
 
 ## Architecture
 
-- FastAPI and Jinja templates for the public read-only site
-- SQLAlchemy and Alembic over PostgreSQL
-- simple-dictionary full-text search split into metadata and per-page document units
-- strict-TLS HTTPX fetching with allowlisted redirects, byte caps, retries, and budgets
-- content-addressed storage shared by immutable page snapshots and document versions
-- additive parser/extractor backfills from stored bytes without re-crawling
-- optional, flag-gated semantic search and cited answers over pgvector, off by default
+```
+Caddy (TLS)  →  FastAPI + Jinja  →  PostgreSQL + pgvector
+                      ↑                    ↑
+              scheduled worker  →  Parliament pages and PDFs
+                      ↓
+        content-addressed blob store (private volume)
+                      ↓
+        replay / re-extract / re-chunk / re-embed, all offline
+```
 
-No GitHub workflow is included by design.
+The blob store is not a cache. It is the archival record that makes replay, versioning, and
+post-hoc parser fixes possible, and it is backed up alongside the database.
+
+Design rules the code holds to:
+
+- **Upstream state is mutable; our record is append-only.** Re-downloading changed bytes creates
+  a new document version and preserves the old one, its extracted text, and its metadata.
+- **Absence is an observation, not a deletion.** A bill missing from one crawl is recorded as
+  absent, never removed.
+- **Every derived row names the code that produced it**, so a parser or extractor fix can rebuild
+  exactly the affected rows from stored bytes without re-crawling.
+- **Anomalies are rows, not log lines.** They deduplicate by kind and entity, surface on
+  `/status`, and make `make doctor` fail until resolved.
+
+---
+
+## Optional Release 3 features
+
+Semantic search and generated answers sit behind `SEMANTIC_SEARCH_ENABLED` and `RAG_ENABLED`,
+both off. With them off, `/semantic-search`, `/ask`, and `/api/v1/ask` return 404 and nothing
+else changes.
+
+Neither can start without an explicitly configured model. **No embedding model or answer provider
+is chosen or defaulted here**, because that decision has not been made — see
+`docs/decisions/ADR-008` and `ADR-009`. The `deterministic` and `echo` providers exist for
+development and are rejected in production configuration.
+
+Before either flag goes on, `make evaluate` must meet the thresholds in `docs/evals/README.md`
+against the real model, and the result must be recorded in `docs/status.md`.
+`docs/operations.md` has the rollout sequence.
+
+---
+
+## Project state
+
+`HANDOFF.md` is the normative specification; every "must" in it is a release gate.
+`docs/status.md` is the live ledger of what is done, what is blocked, and what evidence exists.
+
+Releases 1 and 2 are implemented and covered by automated tests. Release 3 is implemented and
+feature-flagged off pending model decisions. Still open, and not resolvable in code: approval for
+a live crawl, external HTTPS verification from another network, the document republication rights
+review, and the dependency and container vulnerability reviews.
+
+## Documentation
+
+| File | Contents |
+| --- | --- |
+| `HANDOFF.md` | The specification and its acceptance criteria |
+| `docs/status.md` | Package ledger, assumption register, decision index, manual gate log |
+| `docs/operations.md` | Running, migrating, retention, backup and restore, rollout |
+| `docs/data-model.md` | Conventions the schema alone does not show |
+| `docs/upstream.md` | What has and has not been confirmed about the source site |
+| `docs/decisions/` | Architecture decision records |
+| `docs/evals/` | The versioned retrieval and answer evaluation set |

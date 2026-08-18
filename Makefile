@@ -1,15 +1,53 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 COMPOSE ?= docker compose
+DEV_COMPOSE ?= docker compose -f compose.dev.yaml
+# The PostgreSQL-only test suite needs a disposable database; this one is created by `make db-up`.
+TEST_DATABASE_URL ?= postgresql+psycopg://billwatcher:billwatcher@127.0.0.1:55432/billwatcher_test
 BACKUP_DIR ?=
 BLOB_BACKUP_DEST ?=
 RESTORE_PATH ?=
 BLOB_RESTORE_PATH ?=
 
-.PHONY: help setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+.PHONY: help quickstart env db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
 
 help: ## Show available targets
+	@echo "Start here:  make quickstart   (env + database + migrations + fixture data + server)"
+	@echo ""
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+quickstart: setup env db-up migrate seed ## One command from a fresh clone to a running site
+	@echo ""
+	@echo "Ready. The site is at http://127.0.0.1:8000 with fixture data loaded."
+	@echo "Stop the server with Ctrl-C; stop the database with 'make db-down'."
+	@echo ""
+	$(MAKE) serve
+
+env: ## Create .env from the development defaults if it does not exist
+	@if [ -f .env ]; then \
+		echo ".env already exists; leaving it alone"; \
+	else \
+		cp .env.development .env; \
+		echo "created .env from .env.development"; \
+	fi
+
+db-up: ## Start the local development PostgreSQL and wait for it
+	$(DEV_COMPOSE) up -d --wait
+	@$(DEV_COMPOSE) exec -T db psql -q -U billwatcher -d billwatcher \
+		-c "CREATE DATABASE billwatcher_test" 2>/dev/null || true
+
+db-down: ## Stop the local development database, keeping its volume
+	$(DEV_COMPOSE) down
+
+db-reset: ## Delete the local development database and its data
+	@test "$$CONFIRM_RESET" = "yes" || { echo "Set CONFIRM_RESET=yes to delete dev data"; exit 2; }
+	$(DEV_COMPOSE) down -v
+
+seed: ## Ingest the committed fixtures offline; never contacts Parliament
+	$(UV) run billwatcher load-fixtures
+
+test-pg: ## Run the full suite including the PostgreSQL-only tests
+	BILLWATCHER_TEST_DATABASE_URL=$(TEST_DATABASE_URL) $(UV) run pytest
 
 setup: ## Install the exact locked development environment
 	$(UV) sync --locked --all-groups

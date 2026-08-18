@@ -1,5 +1,25 @@
 # Operations
 
+## Getting a local instance running
+
+```bash
+make quickstart
+```
+
+That is `setup` → `env` → `db-up` → `migrate` → `seed` → `serve`, and it needs no network access
+to Parliament. `make env` writes `.env` from `.env.development` only if `.env` is absent, so it
+never overwrites a configured environment. `make db-up` starts `compose.dev.yaml`, which is a
+development-only PostgreSQL published on `127.0.0.1:55432` and is not the production stack; it
+also creates the `billwatcher_test` database that `make test-pg` uses.
+
+`make seed` runs `billwatcher load-fixtures`: the committed listing fixtures are ingested as a
+`fixture`-mode scrape run with real snapshot, blob, and coverage provenance, so browse, search,
+bill detail, chamber timelines, `/changes`, and `/status` all have truthful content. It is
+idempotent — a second load inserts nothing and records no changes — and it refuses to run against
+`ENVIRONMENT=production` without `--confirm-production`.
+
+`CONFIRM_RESET=yes make db-reset` deletes the development database and its volume.
+
 Every operator action is a Make target. `make help` lists them. No default target crawls the live
 Parliament site or deletes data, and every mutating backfill is a dry run unless `ARGS=--apply`
 is passed.

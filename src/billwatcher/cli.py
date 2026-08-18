@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 
 from billwatcher.config import get_settings
 from billwatcher.db import SessionLocal
+from billwatcher.jobs.fixtures import load_fixture_listings
 from billwatcher.jobs.rechunk import run_rechunk
 from billwatcher.jobs.reembed import drop_superseded_model, run_reembed
 from billwatcher.jobs.reextract import run_reextract
@@ -149,6 +150,27 @@ def document_worker(once: bool = True) -> None:
     typer.echo("processed" if processed else "queue empty")
     if not once:
         typer.echo("continuous scheduling is provided by the container worker loop")
+
+
+@app.command("load-fixtures")
+def load_fixtures(
+    confirm_production: bool = typer.Option(
+        False, "--confirm-production", help="Required to seed a production database."
+    ),
+) -> None:
+    """Ingest the committed listing fixtures offline so the whole site works with no network."""
+    settings = get_settings()
+    if settings.environment == "production" and not confirm_production:
+        typer.echo(
+            "FAIL: refusing to load fixture data into a production database; "
+            "pass --confirm-production if that is really intended",
+            err=True,
+        )
+        raise typer.Exit(2)
+    with SessionLocal() as session:
+        report = load_fixture_listings(session, blob_store=BlobStore(settings.blob_storage_root))
+        session.commit()
+        typer.echo(json.dumps(report.as_counts()))
 
 
 @app.command("status")

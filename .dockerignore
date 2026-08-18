@@ -13,3 +13,5 @@ tests
 var
 backups
 *.db
+.env.development
+compose.dev.yaml
