@@ -3,7 +3,7 @@ name = "billwatchernext"
 version = "0.1.0"
 description = "A provenance-first searchable archive of Malaysian Parliament bills"
 readme = "README.md"
-requires-python = ">=3.12.5,<3.14"
+requires-python = ">=3.12.13,<3.14"
 dependencies = [
   "alembic>=1.13",
   "fastapi>=0.115",

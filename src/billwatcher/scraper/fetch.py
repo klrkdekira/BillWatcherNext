@@ -1,3 +1,4 @@
+import ssl
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -34,6 +35,33 @@ class ResponseTooLarge(ValueError):
     pass
 
 
+# Transport failures where the request was never answered. A GET is idempotent, so retrying is
+# safe, and on a long crawl it is necessary: an archive run reads 67 documents per chamber over
+# several minutes and a keep-alive connection the server decides to close mid-crawl is ordinary,
+# not exceptional. The first live archive crawl died on exactly that after 59 requests.
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+)
+
+
+def _is_retryable(error: BaseException) -> bool:
+    """Whether a failed request is worth issuing again."""
+    if not isinstance(error, _RETRYABLE_TRANSPORT_ERRORS):
+        return False
+    # A certificate that does not verify will not verify on the third attempt, and the cause
+    # matters more than the delay: fail at once so the operator reads the real reason rather
+    # than three copies of it (docs/upstream.md records why this site needs a bundle at all).
+    cause = error.__cause__ or error.__context__
+    return not isinstance(cause, ssl.SSLError)
+
+
 class Fetcher:
     """Strict-TLS, allowlisted, bounded synchronous fetcher.
 
@@ -53,6 +81,11 @@ class Fetcher:
         self.sleep = sleep
         self.max_attempts = max_attempts
         self.max_redirects = max_redirects
+        # Politeness belongs here, not in each caller. The listing orchestrator used to sleep
+        # between targets while the document worker did not, so queueing 1,292 archived PDFs would
+        # have fetched them back to back — the one place the delay mattered most was the one place
+        # nobody had put it. Enforced per request, it cannot be forgotten by a new caller.
+        self._earliest_next_request = 0.0
         self.client = httpx.Client(
             transport=transport,
             follow_redirects=False,
@@ -75,6 +108,16 @@ class Fetcher:
     def get(
         self, url: str, *, etag: str | None = None, last_modified: str | None = None
     ) -> FetchResult:
+        try:
+            return self._get(url, etag=etag, last_modified=last_modified)
+        finally:
+            # Measured from the end of the request: a slow response has already given the server
+            # its breathing room, and a failed one still counts as load.
+            self._earliest_next_request = time.monotonic() + self.policy.delay_seconds
+
+    def _get(
+        self, url: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> FetchResult:
         self.policy.validate_url(url)
         headers: dict[str, str] = {}
         if etag:
@@ -82,13 +125,29 @@ class Fetcher:
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
+        result: FetchResult | None = None
         for attempt in range(self.max_attempts):
-            result = self._request_with_redirects(url, headers)
+            self._wait_for_politeness()
+            last_attempt = attempt + 1 == self.max_attempts
+            try:
+                result = self._request_with_redirects(url, headers)
+            except Exception as error:
+                if last_attempt or not _is_retryable(error):
+                    raise
+                self.sleep(self._retry_delay(None, attempt))
+                continue
             if result.status_code not in {408, 429} and result.status_code < 500:
                 return result
-            if attempt + 1 < self.max_attempts:
+            if not last_attempt:
                 self.sleep(self._retry_delay(result.headers.get("retry-after"), attempt))
+        assert result is not None  # the loop either returns, raises, or leaves a response
         return result
+
+    def _wait_for_politeness(self) -> None:
+        """Space requests by the policy delay, measured from the end of the previous request."""
+        remaining = self._earliest_next_request - time.monotonic()
+        if remaining > 0:
+            self.sleep(remaining)
 
     def _request_with_redirects(self, url: str, headers: Mapping[str, str]) -> FetchResult:
         current = url

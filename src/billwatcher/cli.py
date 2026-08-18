@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 
 from billwatcher.config import get_settings
 from billwatcher.db import SessionLocal
+from billwatcher.jobs.fixture_refresh import refresh_fixtures
 from billwatcher.jobs.fixtures import load_fixture_listings
 from billwatcher.jobs.rechunk import run_rechunk
 from billwatcher.jobs.reembed import drop_superseded_model, run_reembed
@@ -72,18 +73,38 @@ def migrate() -> None:
 @app.command("scrape")
 def scrape(
     full: bool = typer.Option(False, "--full"),
+    archive: bool = typer.Option(
+        False, "--archive", help="Crawl only the archive tree, skipping the current listings"
+    ),
+    archive_years: int | None = typer.Option(
+        None,
+        "--archive-years",
+        help="Read only the newest N archived years instead of all of them",
+    ),
     approve_live: bool = typer.Option(False, "--approve-live"),
 ) -> None:
+    if full and archive:
+        raise typer.BadParameter("--full already includes the archive; pass one or the other")
     settings = get_settings()
     if not (settings.scrape_enabled or approve_live):
         raise typer.BadParameter(
             "live crawl is disabled; set SCRAPE_ENABLED=true or pass --approve-live"
         )
-    budget = CrawlBudget(
-        settings.scrape_max_requests_per_run,
-        settings.scrape_max_bytes_per_run,
-        settings.scrape_max_duration_seconds,
-        settings.scrape_max_new_documents,
+    # The archive is a different size of job, so it gets the budget HANDOFF 11.7 gives it.
+    budget = (
+        CrawlBudget(
+            settings.archive_max_requests_per_run,
+            settings.archive_max_bytes_per_run,
+            settings.archive_max_duration_seconds,
+            settings.archive_max_new_documents,
+        )
+        if full or archive
+        else CrawlBudget(
+            settings.scrape_max_requests_per_run,
+            settings.scrape_max_bytes_per_run,
+            settings.scrape_max_duration_seconds,
+            settings.scrape_max_new_documents,
+        )
     )
     with SessionLocal() as session, Fetcher(policy()) as fetcher:
         run = ScrapeOrchestrator(
@@ -94,7 +115,8 @@ def scrape(
             count_drop_abort_fraction=settings.count_drop_abort_fraction,
             absence_streak_alert=settings.absence_streak_alert,
             allow_missing_robots=settings.robots_missing_policy == "allow",
-        ).run(mode="full" if full else "incremental")
+            archive_year_limit=archive_years,
+        ).run(mode="archive" if archive else "full" if full else "incremental")
         session.commit()
         typer.echo(
             json.dumps(
@@ -148,6 +170,113 @@ def _explain_failed_run(run: ScrapeRun) -> None:
         f"\nInspect the run with: uv run billwatcher run-report {run.id}",
         err=True,
     )
+
+
+@app.command("anomalies")
+def list_anomalies(
+    severity: str | None = typer.Option(None, "--severity", help="critical, warn, or info"),
+    kind: str | None = typer.Option(None, "--kind"),
+    include_resolved: bool = typer.Option(False, "--include-resolved"),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List anomalies with their ids, which is what acknowledging or resolving one needs.
+
+    `status` reports counts; this reports the work list.
+    """
+    with SessionLocal() as session:
+        query = select(Anomaly).order_by(Anomaly.severity, Anomaly.last_seen_at.desc())
+        if not include_resolved:
+            query = query.where(Anomaly.resolved_at.is_(None))
+        if severity:
+            query = query.where(Anomaly.severity == severity)
+        if kind:
+            query = query.where(Anomaly.kind == kind)
+        rows = session.scalars(query.limit(limit)).all()
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "id": row.id,
+                        "kind": row.kind,
+                        "severity": row.severity,
+                        "entity": f"{row.entity_type}:{row.entity_id}" if row.entity_type else None,
+                        "url": row.url,
+                        "occurrences": row.occurrence_count,
+                        "first_seen": row.first_seen_at.isoformat(),
+                        "last_seen": row.last_seen_at.isoformat(),
+                        "acknowledged_at": row.acknowledged_at.isoformat()
+                        if row.acknowledged_at
+                        else None,
+                        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+                        "detail": row.detail_json,
+                    }
+                    for row in rows
+                ],
+                indent=2,
+            )
+        )
+
+
+def _close_anomaly(anomaly_id: str, *, by: str, note: str, resolve: bool) -> None:
+    """Record a human decision about one anomaly.
+
+    `make doctor` is the gate that stands in for CI, and it fails on unresolved critical
+    anomalies. Without a way to close one, the first critical finding would leave the gate red for
+    ever and an operator would learn to ignore it — which is exactly the failure mode the anomaly
+    table was introduced to prevent (HANDOFF 25.2 defect 13).
+    """
+    now = datetime.now(UTC)
+    with SessionLocal() as session:
+        anomaly = session.get(Anomaly, anomaly_id)
+        if anomaly is None:
+            typer.echo(f"FAIL: no anomaly with id {anomaly_id}", err=True)
+            raise typer.Exit(2)
+        if not by.strip() or not note.strip():
+            raise typer.BadParameter("both --by and --note are required; the reason is the record")
+        anomaly.acknowledged_at = anomaly.acknowledged_at or now
+        anomaly.acknowledged_by = by
+        detail = dict(anomaly.detail_json)
+        decisions = list(detail.get("decisions", []))
+        decisions.append({"at": now.isoformat(), "by": by, "note": note, "resolved": resolve})
+        detail["decisions"] = decisions[-10:]
+        anomaly.detail_json = detail
+        if resolve:
+            anomaly.resolved_at = now
+        session.commit()
+        typer.echo(
+            json.dumps(
+                {
+                    "id": anomaly.id,
+                    "kind": anomaly.kind,
+                    "acknowledged_at": anomaly.acknowledged_at.isoformat(),
+                    "resolved_at": anomaly.resolved_at.isoformat() if anomaly.resolved_at else None,
+                }
+            )
+        )
+
+
+@app.command("acknowledge-anomaly")
+def acknowledge_anomaly(
+    anomaly_id: str,
+    by: str = typer.Option(..., "--by", help="Who reviewed it"),
+    note: str = typer.Option(..., "--note", help="What was decided, and why"),
+) -> None:
+    """Record that a critical anomaly has been reviewed and is deliberately not blocking.
+
+    The condition stays visible on `/status` and keeps counting occurrences; it stops failing
+    `make doctor`. Use this when upstream is at fault and there is nothing to fix here.
+    """
+    _close_anomaly(anomaly_id, by=by, note=note, resolve=False)
+
+
+@app.command("resolve-anomaly")
+def resolve_anomaly(
+    anomaly_id: str,
+    by: str = typer.Option(..., "--by", help="Who resolved it"),
+    note: str = typer.Option(..., "--note", help="What was done"),
+) -> None:
+    """Close an anomaly whose cause has been dealt with. It reappears if the cause recurs."""
+    _close_anomaly(anomaly_id, by=by, note=note, resolve=True)
 
 
 @app.command("run-report")
@@ -312,6 +441,34 @@ def load_fixtures(
         typer.echo(json.dumps(report.as_counts()))
 
 
+@app.command("refresh-fixtures")
+def refresh_fixtures_command(
+    apply: bool = typer.Option(False, "--apply", help="Overwrite the committed fixtures"),
+    records: int = typer.Option(4, "--records", help="How many records to keep per fixture"),
+) -> None:
+    """Regenerate the committed fixtures from stored snapshots, offline (HANDOFF 16.3).
+
+    Writes to `tests/fixtures/parliament/regenerated/` for review unless `--apply` is given.
+    Never contacts Parliament: the only input is a snapshot already in the blob store.
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
+        report = refresh_fixtures(
+            session,
+            blob_store=build_blob_store(settings),
+            apply=apply,
+            record_limit=records,
+        )
+        typer.echo(json.dumps(report.as_counts(), indent=2))
+        if not report.refreshed:
+            typer.echo(
+                "No fixture could be regenerated: no stored upstream snapshot matches any "
+                "fixture target. Run a crawl first, or seed from fixtures and crawl live.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+
 @app.command("status")
 def runtime_status() -> None:
     with SessionLocal() as session:
@@ -321,6 +478,7 @@ def runtime_status() -> None:
             {
                 "chamber": row.chamber,
                 "kind": row.listing_kind,
+                "scope": row.scope_key,
                 "language": row.language,
                 "state": row.state,
                 "last_success": row.last_success_at.isoformat() if row.last_success_at else None,
@@ -525,6 +683,21 @@ def evaluate_retrieval(as_json: bool = typer.Option(False, "--json")) -> None:
         for case in report.cases:
             if not case.passed:
                 typer.echo(f"  failed: {case.case_id} — {case.detail}")
+    # HANDOFF 20 makes the manual gate log in docs/status.md the record that substitutes for CI,
+    # so the useful thing this command can do is emit the line to paste into it. A result nobody
+    # writes down is not a gate.
+    verdict = "MET" if report.met_thresholds else "NOT MET"
+    typer.echo("")
+    typer.echo("Gate-log line for docs/status.md (HANDOFF 20):")
+    typer.echo(
+        f"- {datetime.now(UTC).date().isoformat()} — <your name> — Evaluation set "
+        f"{report.set_version} / corpus {report.corpus_version} against embeddings "
+        f"`{report.embedding_model}`"
+        + (f" and answers `{report.answer_model}`" if report.answer_model else "")
+        + f". Thresholds **{verdict}**: "
+        + ", ".join(f"{name} {value}" for name, value in report.metrics.items())
+        + "."
+    )
     if not report.met_thresholds:
         typer.echo(
             "Thresholds not met. Record this before enabling semantic search or RAG.", err=True

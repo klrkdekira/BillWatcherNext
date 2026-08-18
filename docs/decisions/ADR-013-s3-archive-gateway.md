@@ -42,7 +42,12 @@ The blob is located by a digest read from the database, never from anything in t
 `Link: rel=canonical` to Parliament's URL, and `X-Robots-Tag: noindex`, because our copy is a
 preservation artifact and not the authoritative record.
 
-**Turning serving on is a rights decision, not a configuration change.** It requires the A14
+**Turning serving on is a rights decision, not a configuration change** — and since 2026-08-18 the
+code enforces that rather than only asserting it. In production, `SERVE_ARCHIVED_DOCUMENTS=true` is
+refused unless `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true` is also set, so an operator has to state
+that the review concluded. Before that, this paragraph and a single flag disagreed: one flag was
+exactly a configuration change. Development is deliberately unguarded, because proving the serving
+path locally is how this ADR was validated. It requires the A14
 review to conclude, ADR-004 to be superseded, and the outcome recorded in the manual gate log.
 
 ## Consequences

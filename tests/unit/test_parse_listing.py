@@ -15,8 +15,7 @@ SOURCE = "https://www.parlimen.gov.my/bills-dewan-rakyat.html?lang=bm&uweb=dr"
     [
         "current_dr_bm.html",
         "current_dn_bm.html",
-        "archive_dr_bm.html",
-        "archive_dn_bm.html",
+        "current_dn_bm_withdrawn.html",
         "current_dr_en.html",
         "current_dr_bm_dated.html",
         "current_dn_bm_dated.html",

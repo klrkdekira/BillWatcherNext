@@ -314,7 +314,7 @@ def test_replay_at_a_bumped_parser_attributes_changes_and_keeps_overrides(tmp_pa
         database.flush()
 
         bumped = _bump_parser(original_title)
-        with mock.patch("billwatcher.scraper.ingest.parse_listing", bumped):
+        with mock.patch("billwatcher.scraper.ingest.parse_stored_listing", bumped):
             counts = replay_snapshot(
                 database,
                 snapshot,
@@ -342,7 +342,9 @@ def _bump_parser(original_title: str):
 
     real = parse_listing
 
-    def corrected(body: str, *, source_url: str):
+    def corrected(body: str, *, url: str, source_url: str):
+        # Matches the dispatcher's signature: replay recovers the shape from the stored URL.
+        assert url
         listing = real(body, source_url=source_url)
         records = tuple(
             replace(record, title=f"{original_title} (Pindaan)")
@@ -353,3 +355,66 @@ def _bump_parser(original_title: str):
         return replace(listing, records=records)
 
     return corrected
+
+
+def test_an_override_may_restore_a_value_the_crawl_moved_away_from() -> None:
+    """Oscillation means two sources disagree. An operator correction is not two sources."""
+    from billwatcher.models import FieldOverride
+    from billwatcher.scraper.changes import update_tracked_field
+    from billwatcher.scraper.normalize import same_title
+
+    with session() as database:
+        bill = Bill(
+            identifier_raw="D.R.9/2024",
+            identifier_normalized="DR-9-2024",
+            number=9,
+            year=2024,
+            originating_chamber="dewan_rakyat",
+            slug="dr-9-2024",
+            title_bm="RUU Pertama 2024",
+            identifier_scheme_version=1,
+            first_seen_at=NOW,
+            last_seen_at=NOW,
+            last_checked_at=NOW,
+            last_changed_at=NOW,
+        )
+        database.add(bill)
+        database.flush()
+
+        def apply(incoming: str) -> bool:
+            return update_tracked_field(
+                database,
+                entity=bill,
+                entity_type="bill",
+                field_path="title_bm",
+                incoming=incoming,
+                changed_at=NOW,
+                change_source="upstream",
+                run_id=None,
+                snapshot_id=None,
+                source_url=URL,
+                equivalent=same_title,
+                oscillation_is_conflict=True,
+            )
+
+        assert apply("RUU Kedua 2024") is True
+        # Upstream offering the old value back is a disagreement, not an edit.
+        assert apply("RUU Pertama 2024") is False
+        assert bill.title_bm == "RUU Kedua 2024"
+
+        database.add(
+            FieldOverride(
+                entity_type="bill",
+                entity_id=bill.id,
+                field_path="title_bm",
+                value="RUU Pertama 2024",
+                reason="the second title was upstream's mistake",
+                actor="operator",
+                created_at=NOW,
+                upstream_value_at_creation="RUU Kedua 2024",
+            )
+        )
+        database.flush()
+        # Now it may be restored, because a human said so.
+        assert apply("RUU Kedua 2024") is True
+        assert bill.title_bm == "RUU Pertama 2024"

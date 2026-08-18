@@ -5,13 +5,14 @@
   <h2>Coverage targets</h2>
   {% if targets %}
   <table>
-    <caption>Freshness is per target, so a healthy current listing cannot hide a broken archive.</caption>
-    <thead><tr><th>Chamber</th><th>Kind</th><th>Language</th><th>State</th><th>Last success</th><th>Records</th></tr></thead>
+    <caption>Freshness is per target, so a healthy current listing cannot hide a broken archive, and one unreadable archived year does not hide behind the rest.</caption>
+    <thead><tr><th>Chamber</th><th>Kind</th><th>Scope</th><th>Language</th><th>State</th><th>Last success</th><th>Records</th></tr></thead>
     <tbody>
       {% for target in targets %}
       <tr>
         <td>{{ "Dewan Rakyat" if target.chamber == "dewan_rakyat" else "Dewan Negara" }}</td>
         <td>{{ target.listing_kind }}</td>
+        <td>{{ target.scope_key or ("year index" if target.listing_kind == "archive" else "all") }}</td>
         <td>{{ target.language }}</td>
         <td><span class="badge state-{{ target.state }}">{{ target.state.replace("_", " ") }}</span></td>
         <td>{{ target.last_success_at or "Never" }}</td>

@@ -17,7 +17,8 @@ URL = "https://www.parlimen.gov.my/bills-dewan-rakyat.html?lang=bm&uweb=dr"
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
 
 
-def client(*, malicious: bool = False) -> TestClient:
+def client(*, malicious: bool = False, **settings: object) -> TestClient:
+    """A seeded app. Keyword settings override configuration for the app under test."""
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -42,7 +43,9 @@ def client(*, malicious: bool = False) -> TestClient:
             bill.title_bm = "</script><script>alert(1)</script>"
         session.add(BillSlugAlias(slug="old-dr-15-2026", bill_id=bill.id, reason="test alias"))
         session.commit()
-    return TestClient(create_app(factory))
+    from billwatcher.config import Settings
+
+    return TestClient(create_app(factory, Settings(**settings) if settings else None))
 
 
 def test_public_pages_are_server_rendered_and_no_javascript_required() -> None:

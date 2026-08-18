@@ -1,10 +1,10 @@
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
+import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,11 @@ from billwatcher.models import (
 from billwatcher.operations import record_anomaly
 from billwatcher.scraper.fetch import Fetcher, FetchResult
 from billwatcher.scraper.ingest import IngestCounts, ingest_listing
+from billwatcher.scraper.parse_archive import (
+    ArchiveParseError,
+    parse_archive_index,
+    parse_archive_year,
+)
 from billwatcher.scraper.parse_listing import ListingParseError, ParsedListing, parse_listing
 from billwatcher.scraper.presence import record_full_run_presence
 from billwatcher.scraper.queue import CircuitBreaker, CrawlBudget
@@ -33,14 +38,24 @@ BACKFILL_LOCK_KEY: Final = 0x4241434B
 
 @dataclass(frozen=True, slots=True)
 class ListingTarget:
+    """One fetchable upstream document, and how to read it.
+
+    `shape` names the parser: a current listing is HTML, while the archive is a `dhtmlXTree`
+    fetched as XML in two steps — an index of years, then one document per year (ADR-014).
+    `scope` distinguishes those per-year documents from each other on `/status`, which is what
+    the `coverage_targets.scope_key` column exists for.
+    """
+
     chamber: str
     listing_kind: str
     language: str
     url: str
+    shape: str = "listing"
+    scope: str = ""
 
     @property
     def scope_key(self) -> str:
-        return ""
+        return self.scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,19 +81,58 @@ TARGETS: Final = (
         "ms",
         "https://www.parlimen.gov.my/bills-dewan-negara.html?lang=bm&uweb=dn",
     ),
+    # The archive entry point is the tree index, not the `arkib=yes` HTML page: that page is a
+    # search form and a JavaScript tree, and it carries no bill rows at all (ADR-014).
     ListingTarget(
         "dewan_rakyat",
         "archive",
         "ms",
-        "https://www.parlimen.gov.my/bills-dewan-rakyat.html?arkib=yes&lang=bm&uweb=dr",
+        "https://www.parlimen.gov.my/bills-dewan-rakyat.html?lang=bm&uweb=dr&arkib=yes&ajx=0",
+        shape="archive_index",
     ),
     ListingTarget(
         "dewan_negara",
         "archive",
         "ms",
-        "https://www.parlimen.gov.my/bills-dewan-negara.html?arkib=yes&lang=bm&uweb=dn",
+        "https://www.parlimen.gov.my/bills-dewan-negara.html?lang=bm&uweb=dn&arkib=yes&ajx=0",
+        shape="archive_index",
     ),
 )
+
+# Modes that crawl the archive. Reading it costs one request per year per chamber, so an
+# incremental run leaves it alone: HANDOFF 11.7 makes a full archive crawl an explicitly
+# triggered mode with its own budget.
+ARCHIVE_MODES: Final = frozenset({"full", "archive"})
+CURRENT_MODES: Final = frozenset({"incremental", "full", "fixture"})
+# A mode outside this set would select no targets at all and report a successful run that read
+# nothing, which is the worst possible outcome for a typo.
+CRAWL_MODES: Final = ARCHIVE_MODES | CURRENT_MODES
+
+
+def archive_year_url(index_url: str, year: int) -> str:
+    """The tree request for one archived year, derived from the chamber's index request."""
+    return index_url.replace("ajx=0", "ajx=1") + f"&id=0_{year}"
+
+
+# The newest archived year can still gain bills, so it has a real freshness expectation. A year
+# that has closed cannot change, and zero means "not expected to be read again" — see
+# `evaluate_coverage`.
+NEWEST_ARCHIVE_YEAR_INTERVAL_HOURS: Final = 720
+CLOSED_ARCHIVE_YEAR_INTERVAL_HOURS: Final = 0
+
+
+def _expected_interval_hours(target: ListingTarget) -> int:
+    """How long a target may go unread before `/status` calls it stale.
+
+    A current listing changes with every sitting. The archive index changes once a year, when it
+    gains a node. An archived year is decided by whether it has closed, which the orchestrator
+    knows and sets explicitly; the value here is only the default for a row being created.
+    """
+    if target.listing_kind == "current":
+        return 12
+    if not target.scope:
+        return 168
+    return NEWEST_ARCHIVE_YEAR_INTERVAL_HOURS
 
 
 class TargetUnreachable(RuntimeError):
@@ -116,8 +170,8 @@ class ScrapeOrchestrator:
         fetcher: Fetcher,
         blob_store: BlobStore,
         budget: CrawlBudget,
-        sleep: Callable[[float], None] = time.sleep,
         count_drop_abort_fraction: float = 0.30,
+        archive_year_limit: int | None = None,
         absence_streak_alert: int = 3,
         allow_missing_robots: bool = False,
     ) -> None:
@@ -125,13 +179,17 @@ class ScrapeOrchestrator:
         self.fetcher = fetcher
         self.blob_store = blob_store
         self.budget = budget
-        self.sleep = sleep
         self.count_drop_abort_fraction = count_drop_abort_fraction
+        # None reads every archived year. A limit reads only the newest ones, which is the only
+        # cheap archive refresh that means anything: a year that has closed cannot change.
+        self.archive_year_limit = archive_year_limit
         self.absence_streak_alert = absence_streak_alert
         self.allow_missing_robots = allow_missing_robots
         self.breaker = CircuitBreaker()
 
     def run(self, *, mode: str = "incremental", trigger: str = "manual") -> ScrapeRun:
+        if mode not in CRAWL_MODES:
+            raise ValueError(f"unknown crawl mode {mode!r}; expected one of {sorted(CRAWL_MODES)}")
         now = datetime.now(UTC)
         run = ScrapeRun(
             mode=mode,
@@ -172,7 +230,7 @@ class ScrapeOrchestrator:
                         applied.append(counts)
                     # Absence is only evidence when every expected listing was read and
                     # published (HANDOFF 10.3), so a failed target suppresses it.
-                    if budget_target is None and mode == "full" and not failures:
+                    if budget_target is None and mode in {"full", "archive"} and not failures:
                         self._record_presence(run, prepared)
                     self.session.flush()
                 except Exception:
@@ -241,27 +299,125 @@ class ScrapeOrchestrator:
         prepared: list[PreparedListing] = []
         failures: list[tuple[ListingTarget, Exception]] = []
         for target in TARGETS:
+            if target.listing_kind == "current" and run.mode not in CURRENT_MODES:
+                continue
+            if target.shape == "archive_index" and run.mode not in ARCHIVE_MODES:
+                continue
             try:
-                prepared.append(self._prepare_target(run, target))
+                if target.shape == "archive_index":
+                    prepared.extend(self._prepare_archive(run, target, failures))
+                else:
+                    prepared.append(self._prepare_target(run, target))
             except BudgetExhausted:
                 # A spent budget is a run-level signal, not one target being unparseable.
                 raise
             except (ListingParseError, UnicodeDecodeError, ScrapeRefused) as error:
                 if target.listing_kind == "current":
                     raise
-                coverage = self._coverage(target)
-                coverage.state = "failing"
-                self._anomaly(
-                    "listing_unavailable",
-                    "warn",
-                    "coverage_target",
-                    coverage.id,
-                    {"target": target.url, "reason": str(error)[:500]},
-                    datetime.now(UTC),
-                    url=target.url,
-                )
+                self._degrade(target, error)
                 failures.append((target, error))
         return prepared, failures
+
+    def _degrade(self, target: ListingTarget, error: Exception) -> None:
+        """Mark one target broken on its own coverage row without failing the run."""
+        coverage = self._coverage(target)
+        coverage.state = "failing"
+        self._anomaly(
+            "listing_unavailable",
+            "warn",
+            "coverage_target",
+            coverage.id,
+            {"target": target.url, "reason": str(error)[:500], "scope": target.scope},
+            datetime.now(UTC),
+            url=target.url,
+        )
+
+    def _prepare_archive(
+        self,
+        run: ScrapeRun,
+        index: ListingTarget,
+        failures: list[tuple[ListingTarget, Exception]],
+    ) -> list[PreparedListing]:
+        """Read the archive index, then each year it offers.
+
+        The index is a target in its own right — if it will not parse, the chamber's archive is
+        unreachable and its coverage row says so. Each year is a target of its own too, so one
+        unreadable year degrades that year and nothing else: the archive is 34 years of history
+        and losing all of it because 2007 broke would be the wrong trade.
+        """
+        result = self._fetch(run, index.listing_kind, index.url)
+        coverage = self._coverage(index)
+        coverage.last_attempt_at = result.requested_at
+        if result.status_code != 200:
+            self.breaker.record(failed=True)
+            raise TargetUnreachable(
+                f"{index.url} returned {result.status_code}; the archive index was not read"
+            )
+        snapshot = self._snapshot_for(run.id, index.url)
+        if snapshot is None:
+            raise RuntimeError("fetch did not create a source snapshot")
+        try:
+            parsed_index = parse_archive_index(
+                result.body.decode("utf-8"), source_url=result.final_url
+            )
+        except (UnicodeDecodeError, ArchiveParseError) as error:
+            snapshot.parse_status = "failed"
+            snapshot.parse_error = str(error)[:1000]
+            self.breaker.record(failed=False)
+            raise
+        snapshot.parse_status = "succeeded"
+        snapshot.parsed_at = datetime.now(UTC)
+        snapshot.records_parsed = len(parsed_index.years)
+        snapshot.structure_fingerprint = parsed_index.structure_fingerprint
+        coverage.last_success_at = result.requested_at
+        coverage.last_success_run_id = run.id
+        coverage.last_record_count = len(parsed_index.years)
+        coverage.state = "healthy"
+        self.breaker.record(failed=False)
+
+        years = parsed_index.years
+        if self.archive_year_limit is not None:
+            # Newest first, which is the order the index publishes and the only order in which a
+            # partial archive crawl is useful: an archived year that has closed cannot change.
+            years = years[: self.archive_year_limit]
+        prepared: list[PreparedListing] = []
+        newest = max(parsed_index.years)
+        for year in years:
+            target = ListingTarget(
+                index.chamber,
+                "archive",
+                index.language,
+                archive_year_url(index.url, year),
+                shape="archive_year",
+                scope=str(year),
+            )
+            try:
+                item = self._prepare_target(run, target)
+                # Set every run, not just on creation: last year's newest year closes when the
+                # index gains a node, and its freshness expectation has to close with it.
+                item.coverage.expected_interval_hours = (
+                    NEWEST_ARCHIVE_YEAR_INTERVAL_HOURS
+                    if year == newest
+                    else CLOSED_ARCHIVE_YEAR_INTERVAL_HOURS
+                )
+                prepared.append(item)
+            except BudgetExhausted:
+                raise
+            except (
+                ListingParseError,
+                UnicodeDecodeError,
+                ScrapeRefused,
+                TargetUnreachable,
+                httpx.HTTPError,
+            ) as error:
+                # A year that could not be read this time degrades that year and nothing else.
+                # This is deliberately broader than the current-listing rule: an archived year is
+                # closed history that the next run will re-read, so a dropped connection two
+                # thirds of the way through 67 requests must not discard the sixty-six years that
+                # did read. The first live archive crawl was lost exactly that way.
+                self._degrade(target, error)
+                failures.append((target, error))
+        return prepared
 
     def _preflight(self, run: ScrapeRun) -> None:
         url = "https://www.parlimen.gov.my/robots.txt"
@@ -343,7 +499,12 @@ class ScrapeOrchestrator:
         if snapshot is None:
             raise RuntimeError("fetch did not create a source snapshot")
         try:
-            listing = parse_listing(result.body.decode("utf-8"), source_url=result.final_url)
+            body = result.body.decode("utf-8")
+            listing = (
+                parse_archive_year(body, source_url=result.final_url)
+                if target.shape == "archive_year"
+                else parse_listing(body, source_url=result.final_url)
+            )
         except (UnicodeDecodeError, ListingParseError) as error:
             snapshot.parse_status = "failed"
             snapshot.parse_error = str(error)[:1000]
@@ -416,7 +577,6 @@ class ScrapeOrchestrator:
         )
         run.parsed += len(listing.records)
         self.breaker.record(failed=False)
-        self.sleep(self.fetcher.policy.delay_seconds)
         return PreparedListing(target, listing, snapshot, coverage, result.requested_at, expected)
 
     def _ingest_prepared(self, run: ScrapeRun, item: PreparedListing) -> IngestCounts:
@@ -549,7 +709,7 @@ class ScrapeOrchestrator:
                 listing_kind=target.listing_kind,
                 language=target.language,
                 scope_key=target.scope_key,
-                expected_interval_hours=12 if target.listing_kind == "current" else 168,
+                expected_interval_hours=_expected_interval_hours(target),
                 state="never_run",
             )
             self.session.add(row)

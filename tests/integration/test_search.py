@@ -21,7 +21,7 @@ def seeded() -> Session:
     session = Session(engine)
     for name, chamber in (
         ("current_dr_bm.html", "dewan_rakyat"),
-        ("archive_dn_bm.html", "dewan_negara"),
+        ("current_dn_bm_withdrawn.html", "dewan_negara"),
     ):
         listing = parse_listing((FIXTURES / name).read_text(), source_url=URL)
         ingest_listing(

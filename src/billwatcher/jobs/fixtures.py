@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from billwatcher.models import Blob, CoverageTarget, ScrapeRun, SourceSnapshot
 from billwatcher.scraper.ingest import ingest_listing
-from billwatcher.scraper.parse_listing import parse_listing
+from billwatcher.scraper.parse_archive import parse_stored_listing
 from billwatcher.storage.blobs import BlobStore
 from billwatcher.version import NORMALIZER_VERSION, PARSER_VERSION
 
@@ -33,6 +33,10 @@ class FixtureTarget:
     listing_kind: str
     language: str
     url: str
+    # An archived year is one target per year, exactly as the live crawl reads it, so a seeded
+    # database has the same coverage shape a real one does.
+    scope: str = ""
+    media_type: str = "text/html"
 
 
 # The dated variants are used for the current listings so a seeded site shows real chamber
@@ -59,19 +63,29 @@ FIXTURE_TARGETS: Final = (
         "en",
         "https://www.parlimen.gov.my/bills-dewan-rakyat.html?lang=en&uweb=dr",
     ),
+    # The archive is the tree Parliament serves for `arkib=yes`, one XML document per year
+    # (ADR-014). The year index is not seeded because it lists years, not bills; a seeded
+    # database therefore shows the archived years healthy and the index never run, which is
+    # exactly what happened.
     FixtureTarget(
-        "archive_dr_bm.html",
+        "archive_year_dr_2024.xml",
         "dewan_rakyat",
         "archive",
         "ms",
-        "https://www.parlimen.gov.my/bills-dewan-rakyat.html?arkib=yes&lang=bm&uweb=dr",
+        "https://www.parlimen.gov.my/bills-dewan-rakyat.html"
+        "?lang=bm&uweb=dr&arkib=yes&ajx=1&id=0_2024",
+        scope="2024",
+        media_type="text/xml",
     ),
     FixtureTarget(
-        "archive_dn_bm.html",
+        "archive_year_dn_2011.xml",
         "dewan_negara",
         "archive",
         "ms",
-        "https://www.parlimen.gov.my/bills-dewan-negara.html?arkib=yes&lang=bm&uweb=dn",
+        "https://www.parlimen.gov.my/bills-dewan-negara.html"
+        "?lang=bm&uweb=dn&arkib=yes&ajx=1&id=0_2011",
+        scope="2011",
+        media_type="text/xml",
     ),
 )
 
@@ -131,7 +145,7 @@ def load_fixture_listings(
             raise FileNotFoundError(f"fixture is missing: {path}")
         body = path.read_bytes()
         snapshot = _snapshot(session, run, target, body, blob_store, observed_at)
-        listing = parse_listing(body.decode("utf-8"), source_url=target.url)
+        listing = parse_stored_listing(body.decode("utf-8"), url=target.url, source_url=target.url)
         snapshot.parse_status = "succeeded"
         snapshot.parsed_at = observed_at
         snapshot.records_parsed = len(listing.records)
@@ -190,7 +204,7 @@ def _snapshot(
         blob = Blob(
             sha256=stored.sha256,
             byte_size=stored.byte_size,
-            media_type="text/html",
+            media_type=target.media_type,
             storage_path=stored.location,
             compression=stored.compression,
             ref_count=0,
@@ -203,7 +217,7 @@ def _snapshot(
         final_url=target.url,
         requested_at=observed_at,
         status_code=200,
-        response_headers={"content-type": "text/html; charset=utf-8"},
+        response_headers={"content-type": f"{target.media_type}; charset=utf-8"},
         blob_sha256=stored.sha256,
         parser_version=PARSER_VERSION,
         parse_status="pending",
@@ -211,6 +225,13 @@ def _snapshot(
     session.add(snapshot)
     session.flush()
     return snapshot
+
+
+def _expected_interval_hours(target: FixtureTarget) -> int:
+    """Mirror the live crawl's intervals so a seeded `/status` reads like a real one."""
+    if target.listing_kind == "current":
+        return 12
+    return 720 if target.scope else 168
 
 
 def _update_coverage(
@@ -225,7 +246,7 @@ def _update_coverage(
             CoverageTarget.chamber == target.chamber,
             CoverageTarget.listing_kind == target.listing_kind,
             CoverageTarget.language == target.language,
-            CoverageTarget.scope_key == "",
+            CoverageTarget.scope_key == target.scope,
         )
     )
     if row is None:
@@ -233,8 +254,8 @@ def _update_coverage(
             chamber=target.chamber,
             listing_kind=target.listing_kind,
             language=target.language,
-            scope_key="",
-            expected_interval_hours=12 if target.listing_kind == "current" else 168,
+            scope_key=target.scope,
+            expected_interval_hours=_expected_interval_hours(target),
             state="never_run",
         )
         session.add(row)

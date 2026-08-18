@@ -698,7 +698,7 @@ The fetcher returns an immutable result containing request URL, final URL, times
 1. Start a `scrape_run` with mode and trigger.
 2. Validate crawl permission and policy.
 3. Fetch the current and archive entry points for both chambers. Fetch English only when enabled.
-4. Discover pagination/archive requests from the confirmed upstream contract; bound page count and stop on repeated content hashes.
+4. Discover pagination/archive requests from the confirmed upstream contract; bound page count and stop on repeated content hashes. For this site's archive the confirmed contract is a year index rather than pagination, so the bound is on year count and each year is a target of its own (ADR-014, §25.6).
 5. Snapshot every fetched page before parsing it.
 6. Parse table labels and expanded-detail labels semantically. Do not depend only on `nth-child`, generated IDs, or visual CSS classes.
 7. Normalize identifiers with a tested parser tolerant of whitespace and punctuation differences. Keep `identifier_raw` if normalization fails and raise `unparseable_identifier` instead of dropping the row.
@@ -744,7 +744,8 @@ The v1.0 contract accepted only `DD/MM/YYYY`, which will silently produce nulls 
 - Per-run limits: `max_requests`, `max_bytes`, `max_duration_seconds`, `max_new_documents`. All configurable; all recorded in the run's policy snapshot.
 - Hitting a limit ends the run as `partial` with the queue intact and raises `budget_exhausted`. The next run resumes from the queue.
 - The scheduler adds jitter, never overlaps runs (enforced by the advisory lock, not by timing), and does not attempt to catch up on missed runs by bursting.
-- A full archive crawl is a separate, explicitly triggered mode with its own, larger budget.
+- A full archive crawl is a separate, explicitly triggered mode with its own, larger budget. "Larger" is not a nicety: the archive introduces its whole back catalogue of documents in one run, and a document budget spent mid-run rolls the run's publication back, so an archive crawl under the incremental budget publishes nothing while appearing to have read everything (§25.6).
+- Retrying is part of resumption. A crawl long enough to matter will have a connection closed under it; an unanswered GET is idempotent and must be retried before the target is called unreachable.
 
 ## 12. Search contract
 
@@ -1241,7 +1242,7 @@ Status and evidence links live in `docs/status.md`; this table defines what coun
 | Requirement | Evidence required at completion |
 | --- | --- |
 | Scrape Parliament bills | Dated upstream notes, robots result and hash, fixtures, successful reviewed full run, stored source links |
-| Both chambers and archive | Run counts plus test/data examples from current/archive for `dr` and `dn`; all coverage targets healthy |
+| Both chambers and archive | Run counts plus test/data examples from current/archive for `dr` and `dn`; all coverage targets healthy, including one per archived year |
 | Versioned bill downloads | A document with two or more versions, both blobs present, both extractions readable, bill page showing both with distinct retrieval dates; the §18 versioning suite passing |
 | Change tracking | `record_changes` history for a real bill, a `/changes` or per-bill history view, and a second identical run writing zero rows |
 | Reprocessing | `make reparse --dry-run` output showing zero changes at the current parser version, and a recorded `backfill_jobs` row from a real bump |
@@ -1295,6 +1296,7 @@ These links informed the handoff and should be rechecked because upstream pages 
 | 1.1 | 2026-08-16 | Added versioned document downloading (§9), data change tracking (§10), project tracking (§20), a glossary (§3) and assumption register (§4); corrected the defects in §25.2. |
 | 1.2 | 2026-08-17 | Resolved document-version hash uniqueness conflict: rollback observations create monotonic rows sharing an existing blob (ADR-005). |
 | 1.3 | 2026-08-18 | Recorded refuted assumptions A2 (as stated) and A13, and the A9 passage-phrase correction, against dated evidence in `docs/upstream.md` (§25.4). No contract changes. |
+| 1.4 | 2026-08-18 | Recorded the archive request contract as observed (§25.6): the archive is a year-indexed XML tree, not the `carian.html` search form. Then downloaded the whole document corpus and read every policy page the site publishes. Closes A3, A7, A8, A9, A10 and A12; A5 and A11 partially; A13's reading is now complete. No contract in §8-§14 changes; §11.3 step 4, §11.4 and §11.7 gain the observed shape. |
 
 ### 25.2 Defects corrected in 1.1
 
@@ -1334,8 +1336,49 @@ These record upstream facts observed on 2026-08-18 (dated evidence in `docs/upst
 
 ### 25.5 Known gaps deliberately left open
 
-- Whether a revised bill appears at the same URL or a new one (A11) is unresolved; §9.2 handles both, but the archive discovery spike must settle which is common before effort is spent on `document_relations` heuristics.
-- Corpus size and storage growth (A12) are unmeasured; backup sizing in §16.5 is provisional until the first full crawl.
-- The status vocabulary in §8 is provisional pending the full sweep (A9) and will change.
+- Whether a revised bill appears at the same URL or a new one (A11) is unresolved; §9.2 handles both. The archive sweep could not settle it: it needs the same document observed twice over time, not once thoroughly. No effort has been spent on `document_relations` heuristics.
+- ~~Corpus size and storage growth (A12) are unmeasured~~ — measured on 2026-08-18 (§25.6), listings and documents both. The whole document corpus is 1,264 stored PDFs, 27,575 pages, **0.24 GB**, so §16.5's backup sizing is no longer provisional. Growth is bounded by sitting frequency: about 60 bills per chamber per year at ~270 KB each.
+- ~~The status vocabulary in §8 is provisional pending the full sweep (A9)~~ — swept on 2026-08-18 across the whole published corpus. It gained `withdrawn` and `third_read` mappings for archive-only phrases; the §8 vocabulary itself needed no new values.
 - Document diffing beyond "these versions differ" is out of scope for Release 1 and has no design here.
 - Sitting-calendar-aware scheduling is suggested, not specified.
+- The `D.N.` half of the identifier rule (A5) has never been exercised: no `D.N.` code exists anywhere in 35 years of archive.
+
+### 25.6 Corrections recorded in 1.4
+
+These record upstream facts observed on 2026-08-18 from a full sweep of the archive tree — 67 XML documents, both chambers, 1990 to 2024 — with dated evidence in `docs/upstream.md` and the decision in ADR-014. No contract in §8-§14 changes: the model already covered the observed behaviour, which is the second time that has been true and is the strongest evidence yet that §8's bill/chamber/event split is right.
+
+1. **The archive is a year-indexed XML tree, not the `carian.html` search form.** §5 and ADR-011 inferred the mechanism from the `?arkib=yes` page's markup without issuing the request. Issuing it shows that `carian.html` is a full-text search over document *pages* — it returns `Halaman 48` hits with PDF fragment links and no bill code, status, or date anywhere — while the archived listing is a `dhtmlXTree` whose XML the same page loads from `&arkib=yes&ajx=0` (an index of years) and `&arkib=yes&ajx=1&id=0_<year>`. Consequences now normative: the archive is **one target per year** rather than one paginated target, so §11.3 step 4's "bound page count" becomes "bound year count"; a cookieless request to `carian.html` is answered with a `302` and a session cookie, and the fetcher must keep cookies for the run for `lang=en` to work at all; and because the tree declares no header row, §11.6's structure fingerprint has nothing to hash — for the archive it is the set of detail labels the parser does *not* recognise, which is stable while the vocabulary holds and changes the moment a label is renamed.
+
+2. **A8 answered: the archive is partitioned by calendar year**, not by parliamentary term or session. 34 year nodes for the Dewan Rakyat, 33 for the Dewan Negara, both 1990-2024, with gaps.
+
+3. **A9 closed, and three phrases exist only in the archive.** `Ditarik Balik`, `Tolak`, and `Bacaan Kali Kedua dan Ketiga` never appear on a current listing, so 60 archived rows — including every withdrawn bill in 35 years — would have stored `unknown`. This is the second time A9's warning has been vindicated: designing the vocabulary from what is currently visible is not conservative, it is wrong.
+
+4. **A7 closed: every one of 2,245 archived dates is `DD/MM/YYYY`.** No Malay month name and no date range has ever been observed, in either the current listings or 35 years of archive. §11.5's tolerance for both is retained because it costs nothing, but it is not upstream behaviour we have seen. Thirteen readings are dated `30/11/-0001`, a zero date leaking out of the upstream database; §11.5's "an unparseable date raises an anomaly and leaves the date NULL" is what saves those rows from becoming plausible fiction.
+
+5. **A12 measured**: 2,130 archived rows, 1,202 distinct identifiers, 2,067 document links, ~4 MB of XML. Published: 1,269 bills spanning 1990-2026, 2,256 chamber records, 4,861 events, 1,295 documents queued.
+
+6. **§11.7's "own, larger budget" for the archive crawl is load-bearing, not advisory.** The archive introduces ~2,000 documents at once, and §11.7's rule that a spent budget ends the run `partial` combines with §11.6's rollback to mean the run publishes *nothing*. Without a separate archive budget the archive crawl silently accomplishes nothing while reporting that it read everything.
+
+7. **One bill's title is published in several forms, and §10.1 needs an equivalence rule.** `RUU X` and `Rang Undang-Undang X` are one title; the site uses both, and eight archived bills carry one form in one chamber's node and the other in the other's. Treating them as different values rewrites the title on every crawl and appends two changes to the history for ever, which breaks §22's "a second identical run writes zero rows". Sixteen identifiers are affected. Three genuinely differ — including **D.R.11/2013, where the two chambers publish two entirely different bills under one code** — and those raise `duplicate_identifier_conflict` rather than oscillating.
+
+8. **Anomalies must key on the upstream document, not the snapshot of it.** §8's "deduplicate by kind plus entity" is right, but a snapshot is a new entity every run, so a permanent upstream defect added one anomaly per crawl and turned §10.5's work list into a log.
+
+9. **§10.5's minimum set needs two more kinds for this shape**: `unmapped_detail_label` and `malformed_row`. The tree can fail in two ways a column-shaped listing cannot — a detail label we do not understand, and a node whose text does not match the grammar — and reporting either as an identifier problem sends an operator to the wrong place.
+
+10. **A gate nobody can clear is a gate everybody ignores.** §25.2 defect 13 added the anomalies table and `make doctor` as the alert channel, and the schema has had `acknowledged_at` and `resolved_at` from the start, but nothing ever wrote them: the first genuine critical anomaly would have left `make doctor` red permanently. `acknowledge-anomaly` and `resolve-anomaly` close that, and both demand a name and a reason.
+
+11. **Politeness must live in the fetcher, not in each caller.** §5 sets a minimum delay and §11.7 bounds a run, but nothing said *where* the delay is enforced, so it was written into the listing orchestrator and simply absent from the document worker. Draining the 1,292-document queue would have fetched PDFs back to back against a government site. A per-caller delay is a rule that a new caller can forget; a per-request one in the fetcher cannot be.
+
+12. **Validating content instead of trusting a status code is load-bearing, not defensive.** §11.4 step 3 requires magic-byte validation, and the corpus shows why: 31 archived document links do not exist, and the server answers each with **HTTP 200**, `Content-Type: text/html`, and a 23-byte body reading `File does not exist (1)`. A crawler that trusted the status code would have stored 31 HTML error pages as bills.
+
+13. **A document does not have one canonical URL.** 62 sets of byte-identical documents are published at two or more URLs, normally one copy per chamber, and in the archive also under the year each chamber considered the bill. §9.2's content-hash identity collapses them to one blob linked from every bill; URL identity would have double-counted the archive. What remains unobserved is A11 as asked — after fetching all 1,295 documents, none has a second version, so no revision has been seen.
+
+14. **Some bills are scans, and §11.4 step 7's optional OCR worker has a defined subset to serve.** 22 documents (1.7%) yield no text: 12 extract empty and 10 fail outright, concentrated in 2010, 2013 and 2018 at roughly 45 KB per page. Age does not predict it — a 1995 bill extracts cleanly. Distinguishing `empty` from `failed` from `succeeded`, which §11.4 step 5 requires, is what makes the subset addressable instead of invisible.
+
+15. **A13 asked for a reading, and the reading is now complete.** The site publishes no robots.txt *and no terms of use*: Penafian, Dasar Privasi, Dasar Keselamatan and an FAQ are the entire policy set, none mentions crawling or reuse, and `/hakcipta.html` and `/terma-penggunaan.html` do not exist (answered, of course, with HTTP 200). The crawl decision now rests on having looked. For A14 the same absence argues the other way: "Hakcipta Terpelihara" with no licence is not permission to republish, so §6's official-link-only default holds.
+
+16. **A containerised crawler needs outbound access, and §16.2's network split did not give it any.** The `worker` sat alone on the `internal: true` network, so it would have started, reported healthy, and failed every fetch. Live crawling had only ever been run from the host, which is why nothing caught it. Any deployment contract that isolates a database has to say explicitly which services still need egress.
+
+17. **§7 and §16.2 specify Caddy, and this deployment does not use it.** TLS is terminated by an nginx deployed separately, so the `Caddyfile` and the `caddy` service are removed and the stack publishes one loopback origin for an external proxy (ADR-015). Two consequences the contract should carry: the response security headers must live in the **application**, because it is the only component the repository controls, and §17's caution about HSTS becomes a defaulted-off setting rather than proxy configuration. What the contract loses is certificate automation as a property of the stack, and the ability to rehearse the TLS path from the repository at all.
+
+18. **A long crawl loses connections, and §11.7's resumption rules must cover transport failures.** The first live archive attempt died after 59 of 136 requests on a server-closed keep-alive and published nothing. Retrying an unanswered GET is safe and necessary at this length, and an archived year that still cannot be read must degrade that year alone — 66 years of closed history are not withheld because 2007 timed out.

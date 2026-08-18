@@ -11,6 +11,7 @@ from billwatcher.scraper.normalize import (
     normalize_status,
     normalize_text,
     parse_dates,
+    same_title,
 )
 
 # Document links are carried in an inline script call, not an href.
@@ -208,7 +209,10 @@ _LABELS = {
 }
 
 # Dated columns are matched semantically, never by position, and each projects onto one event
-# type (HANDOFF 11.3 step 6). Provisional until the bilingual label sweep (assumption A2).
+# type (HANDOFF 11.3 step 6). The live site publishes no dated *columns* at all — its readings live
+# in the detail box below — so none of these has ever been observed. They are kept because a column
+# is the shape the handoff expected and a redesign could produce one; the labels that matter in
+# practice are in `_DETAIL_DATE_LABELS`.
 _DATE_LABELS = {
     "bacaan kali pertama": "first_reading",
     "bacaan pertama": "first_reading",
@@ -305,7 +309,7 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
             )
             continue
         links = tuple(
-            _absolute(source_url, link)
+            absolute_document_url(source_url, link)
             for cell in row
             for link in cell.links
             if link.lower().split("?", 1)[0].endswith(".pdf")
@@ -329,8 +333,10 @@ def parse_listing(html: str, *, source_url: str) -> ParsedListing:
             by_identifier[identifier.normalized] = record
             records.append(record)
             continue
-        if existing.title == record.title and existing.status_raw == record.status_raw:
+        if same_title(existing.title, record.title) and existing.status_raw == record.status_raw:
             # A benign repeat of the same row; collapse it rather than inventing a second bill.
+            # Titles are compared as titles, not as strings: the site publishes `RUU X` and
+            # `Rang Undang-Undang X` for one bill, and that is not a conflict.
             continue
         issues.append(
             ParseIssue(
@@ -379,6 +385,10 @@ def _date_cells(
 
 
 # Labels observed inside the expanded per-bill detail on the live listing (docs/upstream.md).
+# Observed in the hidden detail box of both current listings and in the archive tree, in both
+# languages (docs/upstream.md, 2026-08-18). The English page writes "The second reading" and
+# "Passed At"; without those two entries an English crawl parses every row and silently keeps
+# no dates at all.
 _DETAIL_DATE_LABELS = {
     "bacaan pertama pada": "first_reading",
     "bacaan kedua pada": "second_reading",
@@ -386,6 +396,10 @@ _DETAIL_DATE_LABELS = {
     "diluluskan pada": "passed",
     "dirujuk jkpk pada": "committee_referral",
     "dirujuk ke jkpk pada": "committee_referral",
+    "first reading": "first_reading",
+    "the second reading": "second_reading",
+    "the third reading": "third_reading",
+    "passed at": "passed",
 }
 _PRESENTER_LABELS = {"dibentang oleh", "presented by"}
 
@@ -394,8 +408,12 @@ def _text_of(cell: Cell | None) -> str:
     return cell.text if cell is not None else ""
 
 
-def _absolute(source_url: str, link: str) -> str:
-    """Resolve a listing link, percent-encoding the spaces real document paths contain."""
+def absolute_document_url(source_url: str, link: str) -> str:
+    """Resolve a listing link, percent-encoding the spaces real document paths contain.
+
+    Shared with the archive tree parser, which reaches documents through the same
+    `loadResult('<path>')` call with the same unencoded spaces.
+    """
     return urljoin(source_url, quote(link, safe="/:?=&%#"))
 
 

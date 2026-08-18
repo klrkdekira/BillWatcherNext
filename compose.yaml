@@ -65,8 +65,14 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    # TLS is terminated by a reverse proxy outside this stack (ADR-015), so the app is published
+    # on the loopback interface for it to proxy to — not on 0.0.0.0, which would put an
+    # unencrypted origin on the network. A proxy on another host needs that bind changed, and
+    # then the port has to be firewalled deliberately.
+    ports:
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
-    networks: [backend]
+    networks: [backend, egress]
     logging: *logging
     read_only: true
     tmpfs: [/tmp]
@@ -82,34 +88,22 @@ services:
       - blobs:/var/lib/billwatcher/blobs
     restart: unless-stopped
     stop_grace_period: 30s
-    networks: [backend]
-    logging: *logging
-
-  caddy:
-    image: caddy:2.10.2-alpine
-    environment:
-      SITE_HOST: $SITE_HOST
-    depends_on:
-      app: {condition: service_healthy}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    restart: unless-stopped
-    networks: [backend, public]
+    # The worker crawls Parliament, so it needs outbound access. On an internal-only network it
+    # would start, look healthy, and fail every fetch.
+    networks: [backend, egress]
     logging: *logging
 
 networks:
+  # The database and the blob gateway are reachable only from the other containers, never from the
+  # host and never from the internet.
   backend:
     internal: true
-  public:
+  # Outbound access. The worker cannot do its job without it — it crawls parlimen.gov.my — and the
+  # app needs it only when RAG is enabled and has to reach an answer provider (ADR-009). The
+  # database and gateway are deliberately not on this network.
+  egress:
 
 volumes:
   postgres_data:
   blobs:
   blob_iam:
-  caddy_data:
-  caddy_config:

@@ -10,7 +10,10 @@ CHAMBERS = frozenset({"dewan_rakyat", "dewan_negara"})
 
 CHAMBER_LABELS = MappingProxyType({"dewan_rakyat": "Dewan Rakyat", "dewan_negara": "Dewan Negara"})
 
-# HANDOFF 8. Provisional until the full bilingual status sweep (assumption A9).
+# HANDOFF 8. The bilingual status sweep behind assumption A9 is complete (docs/upstream.md,
+# 2026-08-18): every phrase the site publishes maps into this set, and the sweep needed no new
+# values. Entries the site has never published are kept — a three-reading legislature will use
+# `third_read`, and `introduced`, `tabled`, `committee` and `lapsed` cost nothing to carry.
 NORMALIZED_STATUSES = frozenset(
     {
         "introduced",

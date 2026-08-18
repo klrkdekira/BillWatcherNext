@@ -4,8 +4,12 @@ A listing that keeps serving the same body for every "next page" is a common ups
 it looks like progress and produces a plausible crawl that never terminates. This guard bounds
 the page count and stops the moment a body repeats.
 
-The archive request contract is still unresolved (assumption A3), so no live target paginates
-yet. The guard is the piece that contract will plug into, and it is tested on its own.
+No live target paginates, and now that the archive contract is settled none will: the archive is
+a year index rather than a page sequence, so its bound is a year count and its repeat detection is
+per-year content hashing by the snapshot layer (ADR-014). This guard is kept because it is the
+right shape for the failure it names — a "next page" that keeps serving the same body looks like
+progress and produces a plausible crawl that never terminates — and because either listing could
+start paginating at any redesign. It is tested on its own.
 """
 
 import hashlib

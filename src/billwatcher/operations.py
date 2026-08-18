@@ -42,6 +42,12 @@ def record_anomaly(
     lookup = lookup.where(
         Anomaly.entity_id.is_(None) if entity_id is None else Anomaly.entity_id == entity_id
     )
+    if entity_type is None and url is not None:
+        # A condition that belongs to an upstream *document* rather than to a row we store has no
+        # entity id — `entity_id` is a 36-character key for our own primary keys, not a place to
+        # put a URL. The document's identity is its URL, so that is what deduplicates it. Without
+        # this, every parse-issue anomaly for every listing would collapse onto one row.
+        lookup = lookup.where(Anomaly.url == url)
     existing = session.scalar(lookup)
     if existing is not None:
         existing.last_seen_at = now
@@ -81,16 +87,19 @@ def evaluate_coverage(session: Session, *, now: datetime | None = None) -> list[
             # though it has succeeded before.
             target.state = "failing"
             continue
+        # An interval of zero means the target is not expected to be read again, so staleness
+        # cannot apply to it. That is the honest state of a *closed* archived year: 1994 will
+        # never gain another bill, and demanding a monthly re-read of 66 immutable years would
+        # produce 66 warnings that mean nothing and teach an operator to skim past all of them.
+        # The newest archived year keeps a real interval, because it can still change.
+        if target.expected_interval_hours == 0:
+            target.state = "healthy"
+            if existing_stale := _open_staleness(session, target):
+                existing_stale.resolved_at = now
+            continue
         stale = now - success > timedelta(hours=target.expected_interval_hours)
         target.state = "stale" if stale else "healthy"
-        existing = session.scalar(
-            select(Anomaly).where(
-                Anomaly.kind == "target_stale",
-                Anomaly.entity_type == "coverage_target",
-                Anomaly.entity_id == target.id,
-                Anomaly.resolved_at.is_(None),
-            )
-        )
+        existing = _open_staleness(session, target)
         if stale:
             detail = {
                 "last_success_at": success.isoformat(),
@@ -115,6 +124,17 @@ def evaluate_coverage(session: Session, *, now: datetime | None = None) -> list[
         elif existing:
             existing.resolved_at = now
     return targets
+
+
+def _open_staleness(session: Session, target: CoverageTarget) -> Anomaly | None:
+    return session.scalar(
+        select(Anomaly).where(
+            Anomaly.kind == "target_stale",
+            Anomaly.entity_type == "coverage_target",
+            Anomaly.entity_id == target.id,
+            Anomaly.resolved_at.is_(None),
+        )
+    )
 
 
 def diagnose(session: Session, *, blob_store: BlobStore) -> list[str]:

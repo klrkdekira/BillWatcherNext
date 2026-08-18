@@ -87,7 +87,7 @@ def seed(session: Session) -> tuple[str, str, str]:
     run_id, snapshot_id, attempt_id = provenance(session)
     for name, chamber in (
         ("current_dr_bm.html", "dewan_rakyat"),
-        ("archive_dn_bm.html", "dewan_negara"),
+        ("current_dn_bm_withdrawn.html", "dewan_negara"),
     ):
         ingest_listing(
             session,

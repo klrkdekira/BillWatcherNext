@@ -38,7 +38,7 @@ something truthful to show.
 | `/search?q=Perlindungan` | A ranked hit with a highlighted passage; `?q=D.R.15/2026` matches the code exactly |
 | `/bills/dr-15-2026` | One bill with two chamber timelines, reading dates, provenance, and document versions |
 | `/changes` | Recent changes, labelled Parliament's versus this index's own corrections |
-| `/status` | Five coverage targets, queue depth, open anomalies, pipeline versions |
+| `/status` | Per-target freshness — current listings, archive indexes, and one row per archived year — queue depth, open anomalies, pipeline versions |
 | `/api/v1/bills` | The read-only JSON API |
 
 `D.R.15/2026` appears in both chambers deliberately: it is one bill with two independent
@@ -77,6 +77,9 @@ cleanly when robots policy, TLS, or upstream availability prevents it. It never 
 
 ## Operator interface
 
+What is left to do, and who can do it, is in [`TODO.md`](TODO.md); the dated evidence behind it is
+in [`docs/status.md`](docs/status.md).
+
 `make help` lists everything. The targets that matter:
 
 | Target | What it does |
@@ -85,7 +88,10 @@ cleanly when robots policy, TLS, or upstream availability prevents it. It never 
 | `doctor` | Exits non-zero while a critical anomaly is unresolved, a current document version is unaccepted, or a stored blob is missing |
 | `status` | Per-target freshness, queue depth, latest run, pipeline versions |
 | `seed` | Offline fixture ingestion |
-| `scrape` / `scrape-full` | An approved live crawl; both require an explicit opt-in |
+| `scrape` | An approved live crawl of the current listings; requires an explicit opt-in |
+| `scrape-archive` / `scrape-full` | The archive, or the archive plus the current listings, with the archive's own larger budget |
+| `anomalies` / `resolve-anomaly` / `acknowledge-anomaly` | The `doctor` work list, and the two ways to close an item with a name and a reason attached |
+| `fixtures-refresh` | Regenerate the committed fixtures from stored snapshots, offline |
 | `reparse` / `reextract` | Replay stored bytes at a newer parser or extractor; dry run by default |
 | `retention` | Roll transport logs into daily counters and prune old extractions; never deletes archive data |
 | `verify-storage` / `prune-blobs` | Check every blob reference; delete only unreferenced bytes |
@@ -133,28 +139,61 @@ Inspect the run with: uv run billwatcher run-report <run-id>
 The two current listings ingest fully: 126 bills across both chambers, with reading dates,
 presenters, and document links read out of the hidden per-bill detail table each row carries.
 
-**The archive does not.** `?arkib=yes` returns a search form, not archived rows — it is a
-`GET /carian.html` endpoint whose response shape has not been observed yet (ADR-011). Both archive
-coverage targets therefore report `failing` on `/status`, each raises a warning, and a run ends
-`partial` while the current listings publish normally. Release 1's archived-listings criterion is
-not met until that endpoint is implemented.
+**The archive ingests too, and it is much larger.** `?arkib=yes` shows a search form, but the
+archived listing is not in that page: it is a `dhtmlXTree` whose XML the page loads separately —
+one document per archived year, 1990 to 2024, 67 of them across the two chambers (ADR-014). A
+`make scrape-archive` run reads all of them and publishes **1,269 bills spanning 1990 to 2026**,
+2,256 chamber records, and 4,861 events, with one coverage target per year so a single unreadable
+year is visible on `/status` instead of hiding in an average.
 
-The remaining discovery gates in `docs/upstream.md` are the `carian.html` contract, the Dewan
-Negara detail labels, the English listing structure, and a real contact address.
+`carian.html`, incidentally, is a full-text search over the *text inside* bill PDFs — page-level
+hits with fragment links. It carries no bill code, status, or date, so it is not crawled. Reading
+the form and assuming it was the archive is the mistake ADR-011 made and ADR-014 corrects.
+
+A crawl also queues every document it finds, and the queue has been drained: **1,295 documents,
+1,264 stored and validated, 27,575 pages, 0.24 GB** — one request every two seconds, each PDF
+hashed, magic-byte validated, stored, and text-extracted.
+
+That is where the archive stops being tidy, and the numbers are the point:
+
+- **31 links are dead**, and Parliament answers them with `HTTP 200`, `text/html`, and a 23-byte
+  `File does not exist (1)`. Validating content rather than trusting a status code is the only
+  reason none of them was stored as a bill document.
+- **22 documents have no extractable text** — scans, concentrated in 2010, 2013 and 2018. Age is
+  not the predictor: a bill from 1995 extracts cleanly. Those 22 are findable by their listing
+  metadata but not by their contents until the optional OCR worker is built.
+- **62 documents are published at more than one URL**, usually one copy per chamber. Identity is the
+  content hash, so all 62 collapse to one stored blob linked from every bill that points at it. URL
+  identity would have counted the archive twice.
+- **No document has a second version yet**, so the versioning machinery is exercised only by
+  fixtures. That is the archive being young, not the code being untested.
+
+The remaining discovery gate in `docs/upstream.md` is whether a revised document keeps its URL
+(A11), which needs the same document observed twice over time. A real contact address is still
+needed before a public deployment.
 
 ---
 
 ## Architecture
 
 ```
-Caddy (TLS)  →  FastAPI + Jinja  →  PostgreSQL + pgvector
-                      ↑                    ↑
-              scheduled worker  →  Parliament pages and PDFs
-                      ↓
-        content-addressed blob store (private volume)
-                      ↓
+  your nginx  ──►  FastAPI + Jinja  ──►  PostgreSQL + pgvector
+ (TLS, not in                ▲                    ▲
+  this repo)                 │                    │
+                    scheduled worker  ──►  Parliament pages and PDFs
+                             │
+                             ▼
+             content-addressed blob store (private volume)
+                             │
+                             ▼
         replay / re-extract / re-chunk / re-embed, all offline
 ```
+
+TLS is terminated by an nginx deployed separately (ADR-015). This stack publishes exactly one
+thing — the app on `127.0.0.1:8000` — for that proxy to sit in front of; PostgreSQL and the blob
+gateway are on an internal network and are never reachable from the host. The app sets its own
+security headers, so the proxy must not set copies of them, and it needs `proxy_buffering off` for
+the status page's event stream. `docs/operations.md` has the configuration.
 
 The blob store is not a cache. It is the archival record that makes replay, versioning, and
 post-hoc parser fixes possible, and it is backed up alongside the database.

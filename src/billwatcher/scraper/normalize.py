@@ -1,3 +1,4 @@
+import html
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -17,7 +18,14 @@ _TRACKING_PARAMETERS = {
     "utm_source",
     "utm_term",
 }
-_IDENTIFIER_RE = re.compile(r"^\s*D\s*[.\-]?\s*([RN])\s*[.\-]?\s*(\d+)\s*/\s*(\d{4})\s*$", re.I)
+# Tolerant of whitespace and punctuation differences, which the site has plenty of: `D.R.7/2024`,
+# `D.R. 7/2024`, `D.R 7/2024`, `D.R.  7/2024` and `D.R.16//2017` are all one bill code. The
+# repeated separator is deliberate — the doubled slash is the only spelling under which
+# D.R.16/2017 is ever published, so refusing it would drop that bill from the archive entirely.
+# What is *not* tolerated is a stray token: `D.R.40/2017 ARKIB` still fails loudly.
+_IDENTIFIER_RE = re.compile(
+    r"^\s*D\s*[.\-]?\s*([RN])\s*[.\-]?\s*(\d+)(?:\s*/\s*)+(\d{4})\s*$", re.I
+)
 _IDENTIFIER_QUERY_RE = re.compile(
     r"^\s*D\s*[.\-]?\s*([RN])\s*[.\-]?\s*(\d+)?\s*(?:/\s*(\d{4}))?\s*$", re.I
 )
@@ -75,6 +83,36 @@ class DateRange:
 
 def normalize_text(value: str) -> str:
     return " ".join(unicodedata.normalize("NFC", value).split())
+
+
+# `RUU` is the published abbreviation of `Rang Undang-Undang`, and the site uses both forms for
+# the same bill: the current listings say `RUU X`, the older archive years say
+# `Rang Undang-Undang X`, and eight archived bills carry one form in the Dewan Rakyat node and
+# the other in the Dewan Negara node. Without an equivalence rule, every archive crawl would
+# rewrite those titles and log a change, so a second identical run would not write zero rows.
+_TITLE_PREFIX = re.compile(r"^(?:ruu\b|rang\s+undang\s*-?\s*undang)[\s.:-]*", re.I)
+_TITLE_DROPPED = re.compile(r"[\\'\u2018\u2019\u02bc]")
+_TITLE_PUNCTUATION = re.compile(r"[^0-9a-z\u00c0-\u024f]+")
+
+
+def canonical_title(raw: str) -> str:
+    """Reduce a published title to the form that decides whether two titles are one title.
+
+    This is a comparison key only. It is never stored and never shown: the published wording is
+    what the site said, and this decides whether new wording is a different title or the same
+    title spelled another way (`Al-Qur'an` / `Al-Quran`, `(No. 2)` / `(No.2)`).
+    """
+    value = html.unescape(html.unescape(normalize_text(raw)))
+    value = _TITLE_PREFIX.sub("", value)
+    value = _TITLE_DROPPED.sub("", value)
+    return _TITLE_PUNCTUATION.sub(" ", value.casefold()).strip()
+
+
+def same_title(left: str | None, right: str | None) -> bool:
+    """Whether two published titles name the same bill."""
+    if left is None or right is None:
+        return left is right
+    return canonical_title(left) == canonical_title(right)
 
 
 def normalize_identifier(raw: str) -> Identifier:
@@ -193,12 +231,24 @@ _STATUS_MAP = {
     "defeated": "defeated",
     "dibentangkan": "tabled",
     "tabled": "tabled",
-    # Observed on the live Dewan Rakyat listing, 2026-08-18 (docs/upstream.md). These are the
-    # phrases the site actually publishes; the entries above remain provisional guesses until
-    # the full bilingual sweep required by assumption A9 confirms or removes them.
+    # Observed phrases, 2026-08-18 (docs/upstream.md). The entries above remain provisional
+    # guesses; everything below is a string the site actually publishes. The sweep behind
+    # assumption A9 covered both current listings, both languages, and every archived row from
+    # 1990 to 2024 — 2,143 published rows, 2,130 after collapsing the ones upstream repeats —
+    # which is the whole published corpus.
     "lulus": "passed",
     "dirujuk ke jkpk": "referred",
+    "referred to jkpk": "referred",
     "tidak mendapat undi 2/3 peringkat bacaan ke-2": "defeated",
+    "did not obtain a two-thirds majority vote at the second reading stage": "defeated",
+    # Archive-only phrases. `Tolak` is the archive's word for a bill the chamber rejected;
+    # `Ditolak` above was the handoff's guess and is kept because it costs nothing.
+    "tolak": "defeated",
+    # The Dewan Negara routinely takes the second and third readings in one sitting and
+    # publishes them as one status. The furthest stage it names is the third reading, which is
+    # what the normalized value records; the raw phrase is retained either way.
+    "bacaan kali kedua dan ketiga": "third_read",
+    "second and third reading": "third_read",
 }
 
 
@@ -208,8 +258,13 @@ assert set(_STATUS_MAP.values()) <= NORMALIZED_STATUSES
 
 
 def normalize_status(raw: str) -> str:
-    """Map only explicit phrases. An unrecognised status is `unknown`, never a guess."""
-    return _STATUS_MAP.get(normalize_text(raw).casefold(), "unknown")
+    """Map only explicit phrases. An unrecognised status is `unknown`, never a guess.
+
+    A trailing full stop is stripped first: the English listing publishes
+    "Did not obtain a two-thirds majority vote at the Second Reading stage." with a period and
+    the Malay one without, and that is punctuation rather than a different status.
+    """
+    return _STATUS_MAP.get(normalize_text(raw).casefold().rstrip("."), "unknown")
 
 
 @dataclass(frozen=True, slots=True)

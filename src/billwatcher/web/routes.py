@@ -698,7 +698,14 @@ def status_context(session: Session) -> dict[str, Any]:
     """Everything /status shows, built once so the page and the stream cannot diverge."""
     targets = sorted(
         evaluate_coverage(session),
-        key=lambda target: (target.chamber, target.listing_kind, target.language),
+        # Archived years read newest first, which is the order the archive itself publishes and
+        # the order an operator cares about: the newest year is the only one that can change.
+        key=lambda target: (
+            target.chamber,
+            target.listing_kind,
+            target.language,
+            _scope_order(target.scope_key),
+        ),
     )
     anomaly_counts: dict[str, int] = {
         severity: int(count)
@@ -762,6 +769,13 @@ def run_ask(
         return "Generated answers are not enabled on this deployment.", 404
     except ValueError as error:
         return str(error), 400
+
+
+def _scope_order(scope_key: str) -> tuple[int, str]:
+    """Order an unscoped target first, then scopes descending when they are years."""
+    if not scope_key:
+        return (0, "")
+    return (1, f"{9999 - int(scope_key):04d}" if scope_key.isdigit() else scope_key)
 
 
 def _archive_filename(version: DocumentVersion) -> str:

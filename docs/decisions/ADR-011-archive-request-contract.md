@@ -1,7 +1,18 @@
 # ADR-011: The archive is a search endpoint, and needs no browser automation
 
-Status: accepted
+Status: superseded by ADR-014
 Date: 2026-08-18
+Superseded: 2026-08-18
+
+> **Superseded.** The mechanism recorded below is wrong. `carian.html` is a full-text search over
+> document pages and carries no bill metadata at all; the archived listing is a `dhtmlXTree` whose
+> XML is fetched from the same page with `&ajx=0` and `&ajx=1&id=0_<year>`. ADR-014 records the
+> real contract and the observations that settled it. What survives from this ADR is its rejection
+> of browser automation, which ADR-014 restates and keeps.
+>
+> The error is worth keeping visible: this ADR inferred a request mechanism from one page's markup
+> without ever issuing the request. Reading the form was correct; concluding that the form was the
+> archive was not.
 
 ## Context
 

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from billwatcher.models import BackfillJob, Blob, SourceSnapshot
 from billwatcher.scraper.ingest import replay_snapshot
+from billwatcher.scraper.parse_archive import is_archive_index_url, parse_stored_listing
 from billwatcher.storage.blobs import BlobStore
 from billwatcher.version import PARSER_VERSION
 
@@ -35,6 +36,9 @@ def run_reparse(
         .order_by(SourceSnapshot.requested_at)
         .limit(limit)
     ).all()
+    # The archive index lists years, not bills. It is snapshotted because it decides what the
+    # crawl fetched, but replaying it would be replaying a table of contents.
+    snapshots = [row for row in snapshots if not is_archive_index_url(row.url)]
     processed = changes = failed = 0
     if dry_run:
         # Parsing still validates stored bytes, but no domain projection is changed.
@@ -43,10 +47,9 @@ def run_reparse(
                 blob = session.get(Blob, snapshot.blob_sha256)
                 if blob is None:
                     raise ValueError("blob row missing")
-                from billwatcher.scraper.parse_listing import parse_listing
-
-                parse_listing(
+                parse_stored_listing(
                     blob_store.get(blob.sha256, compression=blob.compression).decode("utf-8"),
+                    url=snapshot.url,
                     source_url=snapshot.final_url,
                 )
                 processed += 1

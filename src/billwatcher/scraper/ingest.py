@@ -2,6 +2,7 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,11 +20,11 @@ from billwatcher.models import (
 )
 from billwatcher.operations import record_anomaly
 from billwatcher.scraper.changes import update_tracked_field
-from billwatcher.scraper.normalize import canonicalize_url, normalize_text
+from billwatcher.scraper.normalize import canonicalize_url, normalize_text, same_title
+from billwatcher.scraper.parse_archive import parse_stored_listing
 from billwatcher.scraper.parse_listing import (
     ParsedDateCell,
     ParsedListing,
-    parse_listing,
 )
 from billwatcher.search.indexer import rebuild_bill_metadata_unit
 from billwatcher.storage.blobs import BlobStore
@@ -102,6 +103,11 @@ def ingest_listing(
                 run_id=run_id,
                 snapshot_id=snapshot_id,
                 source_url=source_url,
+                # One bill's title is published in several forms across the site, so a rewrite
+                # is only a change when it is a different title (HANDOFF 10.1). And a title that
+                # keeps changing back is two chambers disagreeing, not an edit history.
+                equivalent=same_title,
+                oscillation_is_conflict=True,
             )
             if changed:
                 bill.last_changed_at = checked_at
@@ -249,7 +255,9 @@ def replay_snapshot(
     if blob is None:
         raise ValueError("snapshot blob row is missing")
     body = blob_store.get(blob.sha256, compression=blob.compression)
-    listing = parse_listing(body.decode("utf-8"), source_url=snapshot.final_url)
+    listing = parse_stored_listing(
+        body.decode("utf-8"), url=snapshot.url, source_url=snapshot.final_url
+    )
     return ingest_listing(
         session,
         listing,
@@ -535,18 +543,15 @@ def _record_parse_issues(
 ) -> None:
     """Turn retained bad rows into anomalies so nothing disappears without a trace.
 
-    Anomalies deduplicate by kind plus entity (HANDOFF 8), so one snapshot yields at most one
-    anomaly per kind, carrying a bounded list of the offending rows.
+    These deduplicate on the **upstream document**, identified by its URL, rather than on the
+    snapshot of it. Keying on the snapshot looked right and was not: a snapshot is a new row every
+    run, so a permanent upstream defect — and there are several, see `docs/upstream.md` — would add
+    one anomaly per crawl for ever and turn `/status` into a log. The document is not an entity we
+    store, so it has no entity id; `record_anomaly` deduplicates those on the URL.
     """
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for issue in listing.issues:
-        conflict = issue.reason.startswith("duplicate identifier")
-        key = (
-            ("duplicate_identifier_conflict", "critical")
-            if conflict
-            else ("unparseable_identifier", "warn")
-        )
-        grouped.setdefault(key, []).append(
+        grouped.setdefault(_classify_issue(issue.reason), []).append(
             {
                 "row": issue.row_number,
                 "reason": issue.reason,
@@ -555,13 +560,36 @@ def _record_parse_issues(
             }
         )
     for (kind, severity), rows in grouped.items():
-        _upsert_anomaly(
+        record_anomaly(
             session,
-            kind,
-            severity,
-            "source_snapshot",
-            snapshot_id,
-            source_url,
-            observed_at,
-            {"count": len(rows), "rows": rows[:MAX_ISSUE_ROWS]},
+            kind=kind,
+            severity=severity,
+            url=source_url,
+            now=observed_at,
+            detail={
+                "count": len(rows),
+                "rows": rows[:MAX_ISSUE_ROWS],
+                "latest_snapshot_id": snapshot_id,
+            },
         )
+
+
+# Which anomaly a retained row maps to. `unmapped_detail_label` and `malformed_row` extend the
+# HANDOFF 10.5 minimum set, which the handoff states as a minimum: the archive tree can fail in
+# two ways a column-shaped listing cannot — a detail label we do not understand, and a node whose
+# text does not match the grammar at all — and reporting either as an identifier problem would
+# send an operator looking in the wrong place.
+_ISSUE_KINDS: Final = (
+    ("duplicate identifier", ("duplicate_identifier_conflict", "critical")),
+    ("unmapped detail label", ("unmapped_detail_label", "warn")),
+    ("unparseable bill identifier", ("unparseable_identifier", "warn")),
+)
+
+
+def _classify_issue(reason: str) -> tuple[str, str]:
+    for prefix, kind in _ISSUE_KINDS:
+        if reason.startswith(prefix):
+            return kind
+    # A row that could not be read as a row at all: no title, no status, or text that does not
+    # match the shape the parser understands.
+    return ("malformed_row", "warn")

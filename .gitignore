@@ -11,3 +11,6 @@ htmlcov/
 var/
 backups/
 *.db
+
+# Staging output of `make fixtures-refresh`; a regenerated fixture is committed only after review.
+tests/fixtures/parliament/regenerated/

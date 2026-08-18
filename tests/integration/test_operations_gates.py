@@ -2,10 +2,11 @@
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from billwatcher.db import Base
 from billwatcher.jobs.retention import apply_retention
@@ -20,7 +21,7 @@ from billwatcher.models import (
     FetchAttempt,
     SourceSnapshot,
 )
-from billwatcher.operations import diagnose, prune_unreferenced_blobs
+from billwatcher.operations import diagnose, prune_unreferenced_blobs, record_anomaly
 from billwatcher.storage.blobs import FilesystemBlobStore
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
@@ -284,3 +285,63 @@ def test_retention_releases_only_failed_snapshot_blobs(session: Session, tmp_pat
     assert blob is not None and blob.ref_count == 0
     # Retention never deletes bytes; only the reference-checked pruner may.
     assert Path(stored.location).exists()
+
+
+def test_a_reviewed_critical_anomaly_can_stop_failing_the_gate(tmp_path) -> None:
+    """A gate nobody can clear is a gate everybody learns to ignore.
+
+    `make doctor` fails on unresolved critical anomalies. The columns to close one existed from
+    the start; the operator commands that write them did not, so the first genuine critical would
+    have left the gate red permanently.
+    """
+    from typer.testing import CliRunner
+
+    from billwatcher.cli import app
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'ops.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        record_anomaly(
+            session,
+            kind="structure_drift",
+            severity="critical",
+            entity_type="source_snapshot",
+            entity_id="snap-1",
+            detail={"before": "a", "after": "b"},
+            now=datetime(2026, 8, 18, tzinfo=UTC),
+        )
+        session.commit()
+        anomaly_id = session.scalars(select(Anomaly)).one().id
+        assert diagnose(session, blob_store=FilesystemBlobStore(tmp_path / "blobs"))
+
+    runner = CliRunner()
+    with mock.patch("billwatcher.cli.SessionLocal", sessionmaker(bind=engine)):
+        refused = runner.invoke(app, ["resolve-anomaly", "no-such-id", "--by", "a", "--note", "b"])
+        assert refused.exit_code == 2
+
+        listed = runner.invoke(app, ["anomalies", "--severity", "critical"])
+        assert listed.exit_code == 0
+        assert anomaly_id in listed.stdout
+
+        closed = runner.invoke(
+            app,
+            [
+                "acknowledge-anomaly",
+                anomaly_id,
+                "--by",
+                "operator",
+                "--note",
+                "upstream redesigned the page; fixture and parser updated",
+            ],
+        )
+        assert closed.exit_code == 0
+
+    with Session(engine) as session:
+        # The gate passes, and why it passes is recorded on the anomaly itself.
+        assert diagnose(session, blob_store=FilesystemBlobStore(tmp_path / "blobs")) == []
+        anomaly = session.scalars(select(Anomaly)).one()
+        assert anomaly.acknowledged_by == "operator"
+        assert anomaly.resolved_at is None
+        assert anomaly.detail_json["decisions"][-1]["note"].startswith("upstream redesigned")
+        # It is still visible: acknowledging is not deleting.
+        assert anomaly.severity == "critical"

@@ -26,6 +26,34 @@ FIXTURES = Path("tests/fixtures/parliament")
 POLICY = CrawlPolicy("BillWatcherNext/0.1 (+https://example.org/about)")
 
 
+# The archive is a tree fetched as XML: an index of years, then one document per year
+# (ADR-014). The reduced index offers 2024 and 2011, so a full run reads four archived years —
+# two chambers times two years — on top of the two current listings.
+ARCHIVE_YEARS = {"2024": "archive_year_dr_2024.xml", "2011": "archive_year_dn_2011.xml"}
+
+
+def upstream_document(request: httpx.Request) -> httpx.Response:
+    """Answer a listing request with the committed fixture for that exact upstream document."""
+    params = request.url.params
+    chamber = "dn" if params.get("uweb") == "dn" else "dr"
+    if params.get("arkib") == "yes":
+        if params.get("ajx") == "0":
+            name = "archive_index_dr.xml"
+        else:
+            year = (params.get("id") or "").removeprefix("0_")
+            name = ARCHIVE_YEARS[year]
+        media_type = "text/xml"
+    else:
+        name = f"current_{chamber}_bm.html"
+        media_type = "text/html"
+    return httpx.Response(
+        200,
+        content=(FIXTURES / name).read_bytes(),
+        headers={"Content-Type": f"{media_type}; charset=utf-8"},
+        request=request,
+    )
+
+
 def transport(robots: bytes = b"User-agent: *\nAllow: /\n") -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -35,15 +63,7 @@ def transport(robots: bytes = b"User-agent: *\nAllow: /\n") -> httpx.MockTranspo
                 headers={"Content-Type": "text/plain"},
                 request=request,
             )
-        chamber = "dn" if request.url.params.get("uweb") == "dn" else "dr"
-        archived = request.url.params.get("arkib") == "yes"
-        name = f"{'archive' if archived else 'current'}_{chamber}_bm.html"
-        return httpx.Response(
-            200,
-            content=(FIXTURES / name).read_bytes(),
-            headers={"Content-Type": "text/html; charset=utf-8"},
-            request=request,
-        )
+        return upstream_document(request)
 
     return httpx.MockTransport(handler)
 
@@ -60,15 +80,7 @@ def missing_robots(status_code: int = 404) -> httpx.MockTransport:
                 headers={"Content-Type": "text/html"},
                 request=request,
             )
-        chamber = "dn" if request.url.params.get("uweb") == "dn" else "dr"
-        archived = request.url.params.get("arkib") == "yes"
-        name = f"{'archive' if archived else 'current'}_{chamber}_bm.html"
-        return httpx.Response(
-            200,
-            content=(FIXTURES / name).read_bytes(),
-            headers={"Content-Type": "text/html; charset=utf-8"},
-            request=request,
-        )
+        return upstream_document(request)
 
     return httpx.MockTransport(handler)
 
@@ -86,7 +98,6 @@ def orchestrator(
         fetcher=fetcher,
         blob_store=FilesystemBlobStore(tmp_path),
         budget=CrawlBudget(20, 1_000_000, 60, 20),
-        sleep=lambda _delay: None,
         allow_missing_robots=allow_missing_robots,
     )
 
@@ -99,21 +110,30 @@ def test_full_orchestration_is_auditable_and_idempotent(tmp_path) -> None:
         database.flush()
         assert first.state == "succeeded"
         assert first.publish_decision == "published"
-        assert first.fetched == 5
-        assert first.parsed == 4
-        assert database.scalar(select(func.count()).select_from(Bill)) == 3
-        assert database.scalar(select(func.count()).select_from(CoverageTarget)) == 4
-        assert database.scalar(select(func.count()).select_from(FetchAttempt)) == 5
-        assert database.scalar(select(func.count()).select_from(SourceSnapshot)) == 5
-        assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 3
+        # One robots.txt, two current listings, two archive indexes, and the two archived years
+        # each index offers.
+        assert first.fetched == 9
+        assert first.parsed == 18
+        assert database.scalar(select(func.count()).select_from(Bill)) == 9
+        # Two current listings, two archive indexes, and one row per archived year per chamber,
+        # so a single unreadable year is visible on `/status` instead of hiding in an average.
+        assert database.scalar(select(func.count()).select_from(CoverageTarget)) == 8
+        assert database.scalar(select(func.count()).select_from(FetchAttempt)) == 9
+        assert database.scalar(select(func.count()).select_from(SourceSnapshot)) == 9
+        assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 9
+        assert database.scalar(select(func.count()).select_from(Anomaly)) == 0
 
-        second = orchestrator(database, tmp_path, transport()).run()
+        second = orchestrator(database, tmp_path, transport()).run(mode="full")
         database.flush()
         assert second.state == "succeeded"
-        assert database.scalar(select(func.count()).select_from(Bill)) == 3
+        assert database.scalar(select(func.count()).select_from(Bill)) == 9
+        # The whole point: re-reading every current listing and every archived year changes
+        # nothing (HANDOFF 22, change tracking).
         assert database.scalar(select(func.count()).select_from(RecordChange)) == 0
         assert database.scalar(select(func.count()).select_from(ScrapeRun)) == 2
-        assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 3
+        # Presence is one observation per bill per published full run, so a second run adds a
+        # second round of observations rather than overwriting the first.
+        assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 18
 
 
 def test_new_document_budget_rolls_back_listing_publication(tmp_path) -> None:
@@ -126,7 +146,6 @@ def test_new_document_budget_rolls_back_listing_publication(tmp_path) -> None:
             fetcher=fetcher,
             blob_store=FilesystemBlobStore(tmp_path),
             budget=CrawlBudget(20, 1_000_000, 60, 0),
-            sleep=lambda _delay: None,
         )
         run = worker.run()
         database.flush()
@@ -152,7 +171,7 @@ def test_late_target_failure_withholds_all_domain_publication(tmp_path) -> None:
         assert run.publish_decision == "withheld"
         assert database.scalar(select(func.count()).select_from(Bill)) == 0
         assert database.scalar(select(func.count()).select_from(PresenceObservation)) == 0
-        assert database.scalar(select(func.count()).select_from(SourceSnapshot)) == 5
+        assert database.scalar(select(func.count()).select_from(SourceSnapshot)) == 7
 
 
 def test_changed_robots_stops_before_listings_and_raises_critical(tmp_path) -> None:

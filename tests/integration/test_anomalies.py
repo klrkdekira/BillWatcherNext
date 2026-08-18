@@ -36,7 +36,14 @@ REQUIRED_KINDS = {
 }
 
 # Kinds added beyond the minimum set as real upstream behaviour was observed.
-ADDITIONAL_KINDS = {"robots_absent", "listing_unavailable", "document_relation_proposed"}
+ADDITIONAL_KINDS = {
+    "robots_absent",
+    "listing_unavailable",
+    "document_relation_proposed",
+    # The archive tree can fail in two ways a column-shaped listing cannot (ADR-014).
+    "unmapped_detail_label",
+    "malformed_row",
+}
 
 
 @pytest.fixture

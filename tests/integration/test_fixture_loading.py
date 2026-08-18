@@ -36,10 +36,12 @@ def test_loading_fixtures_populates_a_browsable_site(session: Session, tmp_path)
     session.flush()
 
     assert report.targets == len(FIXTURE_TARGETS)
-    assert report.bills_inserted == 3
-    assert report.chamber_records_inserted == 4
+    # Three bills from the current listings and six more from the two archived years, which are
+    # real rows out of the 2024 Dewan Rakyat and 2011 Dewan Negara trees (ADR-014).
+    assert report.bills_inserted == 9
+    assert report.chamber_records_inserted == 10
     assert report.events_inserted > 0
-    assert report.documents_queued == 1
+    assert report.documents_queued == 7
 
     # One bill shared by both chambers, with two distinct chamber records.
     shared = session.scalars(select(Bill).where(Bill.identifier_normalized == "DR-15-2026")).one()
@@ -67,7 +69,7 @@ def test_loading_fixtures_populates_a_browsable_site(session: Session, tmp_path)
     assert all(target.state == "healthy" for target in targets)
     assert all(target.last_record_count for target in targets)
     assert session.scalar(select(func.count()).select_from(SearchUnit)) >= 3
-    assert session.scalar(select(func.count()).select_from(FetchQueueItem)) == 1
+    assert session.scalar(select(func.count()).select_from(FetchQueueItem)) == 7
 
 
 def test_a_first_load_records_only_genuine_changes(session: Session, tmp_path) -> None:

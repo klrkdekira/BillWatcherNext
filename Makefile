@@ -13,7 +13,7 @@ BLOB_BACKUP_DEST ?=
 RESTORE_PATH ?=
 BLOB_RESTORE_PATH ?=
 
-.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full scrape-archive status anomalies resolve-anomaly acknowledge-anomaly doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
 
 help: ## Show available targets
 	@echo "Start here:  make quickstart   (env + database + migrations + fixture data + server)"
@@ -100,8 +100,20 @@ migrate: ## Upgrade the configured database to Alembic head
 scrape: ## Explicitly run one approved live incremental crawl
 	$(UV) run billwatcher scrape --approve-live
 
-scrape-full: ## Explicitly run one approved live full crawl
+scrape-full: ## Explicitly run one approved live full crawl, archive included
 	$(UV) run billwatcher scrape --full --approve-live
+
+scrape-archive: ## Explicitly run one approved live archive-only crawl; ARGS=--archive-years=N
+	$(UV) run billwatcher scrape --archive --approve-live $(ARGS)
+
+anomalies: ## List unresolved anomalies with their ids; ARGS=--severity=critical
+	$(UV) run billwatcher anomalies $(ARGS)
+
+resolve-anomaly: ## Close a reviewed anomaly: ID=<id> BY=<name> NOTE="what was done"
+	$(UV) run billwatcher resolve-anomaly "$(ID)" --by "$(BY)" --note "$(NOTE)"
+
+acknowledge-anomaly: ## Stop a reviewed critical anomaly failing doctor: ID= BY= NOTE=
+	$(UV) run billwatcher acknowledge-anomaly "$(ID)" --by "$(BY)" --note "$(NOTE)"
 
 status: ## Print runtime coverage, queue, run, and pipeline status
 	$(UV) run billwatcher status
@@ -136,8 +148,8 @@ verify-storage: ## Verify every database blob reference on disk
 prune-blobs: ## Dry-run unreferenced blob pruning; pass ARGS=--apply
 	$(UV) run billwatcher prune-blobs $(ARGS)
 
-fixtures-refresh: ## Validate stored snapshots offline without crawling
-	$(UV) run billwatcher reparse
+fixtures-refresh: ## Regenerate fixtures from stored snapshots offline; ARGS=--apply to commit them
+	$(UV) run billwatcher refresh-fixtures $(ARGS)
 
 docker-build: ## Build the locked production image
 	$(COMPOSE) build --pull
