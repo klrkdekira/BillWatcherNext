@@ -115,6 +115,7 @@ class ScrapeOrchestrator:
         sleep: Callable[[float], None] = time.sleep,
         count_drop_abort_fraction: float = 0.30,
         absence_streak_alert: int = 3,
+        allow_missing_robots: bool = False,
     ) -> None:
         self.session = session
         self.fetcher = fetcher
@@ -123,6 +124,7 @@ class ScrapeOrchestrator:
         self.sleep = sleep
         self.count_drop_abort_fraction = count_drop_abort_fraction
         self.absence_streak_alert = absence_streak_alert
+        self.allow_missing_robots = allow_missing_robots
         self.breaker = CircuitBreaker()
 
     def run(self, *, mode: str = "incremental", trigger: str = "manual") -> ScrapeRun:
@@ -212,6 +214,32 @@ class ScrapeOrchestrator:
     def _preflight(self, run: ScrapeRun) -> None:
         url = "https://www.parlimen.gov.my/robots.txt"
         result = self._fetch(run, "robots", url)
+        # A response body is only a crawl policy when the server said it is one. Parsing a 404
+        # or a gateway error page yields an empty ruleset, which would read as "crawl anything"
+        # — the opposite of HANDOFF 5, which stops the run when policy cannot be established.
+        if result.status_code in {404, 410}:
+            if not self.allow_missing_robots:
+                raise ScrapeRefused(
+                    f"robots.txt returned {result.status_code}; no crawl policy is published. "
+                    "RFC 9309 would treat that as unrestricted, but assumption A13 requires a "
+                    "recorded decision first: review the site's terms, then set "
+                    "ROBOTS_MISSING_POLICY=allow to proceed."
+                )
+        elif result.status_code != 200:
+            raise ScrapeRefused(
+                f"robots.txt returned {result.status_code}; crawl policy could not be read"
+            )
+        if result.status_code != 200:
+            self._anomaly(
+                "robots_changed",
+                "critical",
+                None,
+                None,
+                {"status_code": result.status_code, "decision": "allowed by configuration"},
+                result.requested_at,
+                url=url,
+            )
+            return
         policy = parse_robots(result.body, fetched_url=result.final_url)
         previous = self.session.scalar(
             select(SourceSnapshot)

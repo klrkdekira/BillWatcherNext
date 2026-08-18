@@ -103,12 +103,33 @@ manual gate log in `docs/status.md` take its place.
 Live crawling is off by default and needs two separate opt-ins: `SCRAPE_ENABLED=true` and the
 explicit `--approve-live` flag that `make scrape` passes.
 
-Before the first crawl, complete the discovery gates in `docs/upstream.md`: fetch and record
-`robots.txt` and its hash, settle the archive request contract, sweep the bilingual column and
-status vocabulary, confirm TLS verification from the deployment host, and set a real contact
-address. The crawler defaults to one request at a time with a two-second delay, refuses to be
-less polite, verifies TLS strictly, allowlists only Parliament hosts, and revalidates every
-redirect.
+The crawler defaults to one request at a time with a two-second delay, refuses to be less
+polite, verifies TLS strictly, allowlists only Parliament hosts, and revalidates every redirect.
+
+Two upstream conditions currently stop a crawl before it starts, both recorded in
+`docs/upstream.md`:
+
+1. **The site serves an incomplete TLS certificate chain.** It sends its leaf certificate without
+   the intermediate that signs it, so verification fails. Browsers hide this by fetching the
+   intermediate themselves; Python does not. Supply the intermediate in a bundle and set
+   `UPSTREAM_CA_BUNDLE`. There is no setting that disables verification, and adding one is
+   forbidden by the specification.
+2. **The site publishes no `robots.txt`** — it returns 404. RFC 9309 would read that as
+   unrestricted, but this project requires the decision to be reviewed and recorded first. Once
+   you have checked the site's terms and logged the outcome in `docs/status.md`, set
+   `ROBOTS_MISSING_POLICY=allow`; every run then records an anomaly noting it crawled without a
+   published policy, so the decision stays visible.
+
+A failed run explains itself and prints a command for the full record:
+
+```
+$ make scrape
+FAIL: robots.txt returned 404; no crawl policy is published. ...
+Inspect the run with: uv run billwatcher run-report <run-id>
+```
+
+The remaining discovery gates in `docs/upstream.md` — the archive request contract, the bilingual
+column and status sweep, and a real contact address — are still open.
 
 ---
 

@@ -47,10 +47,37 @@ def transport(robots: bytes = b"User-agent: *\nAllow: /\n") -> httpx.MockTranspo
     return httpx.MockTransport(handler)
 
 
+def missing_robots(status_code: int = 404) -> httpx.MockTransport:
+    """A site that publishes no robots.txt, answering with an HTML error page."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(
+                status_code,
+                content=b"<html><head><title>404 Not Found</title></head><body>"
+                b"<h1>Not Found</h1></body></html>",
+                headers={"Content-Type": "text/html"},
+                request=request,
+            )
+        chamber = "dn" if request.url.params.get("uweb") == "dn" else "dr"
+        archived = request.url.params.get("arkib") == "yes"
+        name = f"{'archive' if archived else 'current'}_{chamber}_bm.html"
+        return httpx.Response(
+            200,
+            content=(FIXTURES / name).read_bytes(),
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            request=request,
+        )
+
+    return httpx.MockTransport(handler)
+
+
 def orchestrator(
     database: Session,
     tmp_path: Path,
     upstream: httpx.MockTransport,
+    *,
+    allow_missing_robots: bool = False,
 ) -> ScrapeOrchestrator:
     fetcher = Fetcher(POLICY, transport=upstream, sleep=lambda _delay: None)
     return ScrapeOrchestrator(
@@ -59,6 +86,7 @@ def orchestrator(
         blob_store=BlobStore(tmp_path),
         budget=CrawlBudget(20, 1_000_000, 60, 20),
         sleep=lambda _delay: None,
+        allow_missing_robots=allow_missing_robots,
     )
 
 
@@ -151,3 +179,50 @@ def test_robots_denial_stops_without_publishing(tmp_path) -> None:
         assert run.state == "failed"
         assert run.publish_decision == "withheld"
         assert database.scalar(select(func.count()).select_from(Bill)) == 0
+
+
+def test_an_error_page_is_never_mistaken_for_permission_to_crawl(tmp_path) -> None:
+    """A 404 body parses to an empty ruleset, which would read as "crawl anything"."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, missing_robots()).run()
+        assert run.state == "failed"
+        assert run.publish_decision == "withheld"
+        assert "robots.txt returned 404" in (run.publish_reason or "")
+        # Nothing was published from the listings behind that missing policy.
+        assert database.scalar(select(func.count()).select_from(Bill)) == 0
+
+
+def test_a_gateway_error_on_robots_also_stops_the_run(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, missing_robots(503)).run()
+        assert run.state == "failed"
+        assert "robots.txt returned 503" in (run.publish_reason or "")
+        assert database.scalar(select(func.count()).select_from(Bill)) == 0
+
+
+def test_a_gateway_error_is_not_excused_by_the_missing_robots_decision(tmp_path) -> None:
+    """Allowing an absent policy must not also excuse a server that is simply broken."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, missing_robots(503), allow_missing_robots=True).run()
+        assert run.state == "failed"
+        assert "robots.txt returned 503" in (run.publish_reason or "")
+
+
+def test_a_recorded_decision_permits_crawling_a_site_with_no_robots(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        run = orchestrator(database, tmp_path, missing_robots(), allow_missing_robots=True).run()
+        assert run.state == "succeeded"
+        assert database.scalar(select(func.count()).select_from(Bill)) > 0
+        # The decision is visible rather than silent.
+        anomaly = database.scalar(select(Anomaly).where(Anomaly.kind == "robots_changed"))
+        assert anomaly is not None
+        assert anomaly.severity == "critical"
+        assert anomaly.detail_json["status_code"] == 404

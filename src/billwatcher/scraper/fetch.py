@@ -56,7 +56,9 @@ class Fetcher:
         self.client = httpx.Client(
             transport=transport,
             follow_redirects=False,
-            verify=True,
+            # Verification is never disabled. A configured bundle only adds trust anchors so an
+            # upstream that serves an incomplete chain can still be verified (HANDOFF 5).
+            verify=str(policy.ca_bundle) if policy.ca_bundle else True,
             timeout=httpx.Timeout(30, connect=10),
             headers={"User-Agent": policy.user_agent, "Accept": "text/html,application/pdf;q=0.9"},
         )

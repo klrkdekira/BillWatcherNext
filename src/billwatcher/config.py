@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,13 @@ class Settings(BaseSettings):
     scrape_max_duration_seconds: int = 3600
     scrape_max_new_documents: int = Field(default=500, ge=0)
     document_max_bytes: int = 104_857_600
+    # An explicit trust store for upstream requests. Use it when the site serves an incomplete
+    # certificate chain: put the missing intermediate in a bundle and point this at it. There is
+    # deliberately no setting that disables verification (HANDOFF 5).
+    upstream_ca_bundle: Path | None = None
+    # What to do when the site publishes no robots.txt. RFC 9309 treats a 404 as unrestricted;
+    # assumption A13 requires a recorded decision instead, so the default refuses to crawl.
+    robots_missing_policy: Literal["refuse", "allow"] = "refuse"
     absence_streak_alert: int = 3
     count_drop_abort_fraction: float = 0.30
     fetch_attempt_retention_days: int = 180
@@ -48,6 +56,12 @@ class Settings(BaseSettings):
             values = (self.site_host, self.public_base_url, self.contact_email, self.database_url)
             if any("example.org" in value or "CHANGE_ME" in value for value in values):
                 raise ValueError("production configuration contains placeholder values")
+        return self
+
+    @model_validator(mode="after")
+    def reject_unreadable_ca_bundle(self) -> "Settings":
+        if self.upstream_ca_bundle is not None and not self.upstream_ca_bundle.is_file():
+            raise ValueError(f"UPSTREAM_CA_BUNDLE does not name a file: {self.upstream_ca_bundle}")
         return self
 
     @model_validator(mode="after")

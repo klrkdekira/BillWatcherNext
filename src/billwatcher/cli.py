@@ -16,9 +16,11 @@ from billwatcher.jobs.reextract import run_reextract
 from billwatcher.jobs.replay import run_reparse
 from billwatcher.jobs.retention import apply_retention
 from billwatcher.models import (
+    Anomaly,
     Blob,
     ChunkEmbedding,
     CoverageTarget,
+    FetchAttempt,
     FetchQueueItem,
     ScrapeRun,
 )
@@ -47,6 +49,7 @@ def policy() -> CrawlPolicy:
         delay_seconds=settings.scrape_delay_seconds,
         concurrency=settings.scrape_concurrency,
         max_response_bytes=settings.document_max_bytes,
+        ca_bundle=settings.upstream_ca_bundle,
     )
 
 
@@ -86,11 +89,127 @@ def scrape(
             budget=budget,
             count_drop_abort_fraction=settings.count_drop_abort_fraction,
             absence_streak_alert=settings.absence_streak_alert,
+            allow_missing_robots=settings.robots_missing_policy == "allow",
         ).run(mode="full" if full else "incremental")
         session.commit()
-        typer.echo(json.dumps({"run_id": run.id, "state": run.state}))
+        typer.echo(
+            json.dumps(
+                {
+                    "run_id": run.id,
+                    "state": run.state,
+                    "publish_decision": run.publish_decision,
+                    "reason": run.publish_reason,
+                    "fetched": run.fetched,
+                    "parsed": run.parsed,
+                    "inserted": run.inserted,
+                    "updated": run.updated,
+                }
+            )
+        )
         if run.state not in {"succeeded", "partial"}:
+            _explain_failed_run(run)
             raise typer.Exit(1)
+
+
+# Operator guidance for failures whose cause is not obvious from the message alone.
+_FAILURE_HINTS: dict[str, str] = {
+    "CERTIFICATE_VERIFY_FAILED": (
+        "The upstream TLS chain did not verify. This is usually an incomplete chain served by "
+        "the site (a missing intermediate certificate) rather than a problem with this host: "
+        "browsers hide it by fetching the intermediate themselves, and Python does not. "
+        "Check `openssl s_client -connect www.parlimen.gov.my:443 -servername "
+        "www.parlimen.gov.my`; if only one certificate is shown, add the missing intermediate "
+        "to a bundle and point UPSTREAM_CA_BUNDLE at it. See docs/upstream.md. "
+        "Never disable verification."
+    ),
+    "robots.txt": (
+        "Crawl policy could not be established. HANDOFF section 5 requires a readable "
+        "robots.txt before any crawl, so the run stopped and prior data is untouched."
+    ),
+}
+
+
+def _explain_failed_run(run: ScrapeRun) -> None:
+    detail = ""
+    if run.error_details:
+        detail = f"{run.error_details.get('class', '')}: {run.error_details.get('detail', '')}"
+    message = run.publish_reason or detail or "no reason recorded"
+    typer.echo(f"FAIL: {message}", err=True)
+    haystack = f"{message} {detail}"
+    for needle, hint in _FAILURE_HINTS.items():
+        if needle in haystack:
+            typer.echo(f"\n{hint}", err=True)
+            break
+    typer.echo(
+        f"\nInspect the run with: uv run billwatcher run-report {run.id}",
+        err=True,
+    )
+
+
+@app.command("run-report")
+def run_report(run_id: str) -> None:
+    """Print everything recorded about one scrape run, including why it stopped."""
+    with SessionLocal() as session:
+        run = session.get(ScrapeRun, run_id)
+        if run is None:
+            typer.echo(f"FAIL: no run with id {run_id}", err=True)
+            raise typer.Exit(2)
+        attempts = session.scalars(
+            select(FetchAttempt)
+            .where(FetchAttempt.run_id == run_id)
+            .order_by(FetchAttempt.attempted_at)
+        ).all()
+        anomalies = session.scalars(
+            select(Anomaly)
+            .where(Anomaly.resolved_at.is_(None))
+            .order_by(Anomaly.last_seen_at.desc())
+            .limit(20)
+        ).all()
+        typer.echo(
+            json.dumps(
+                {
+                    "run": {
+                        "id": run.id,
+                        "mode": run.mode,
+                        "trigger": run.trigger,
+                        "state": run.state,
+                        "started_at": run.started_at,
+                        "ended_at": run.ended_at,
+                        "publish_decision": run.publish_decision,
+                        "publish_reason": run.publish_reason,
+                        "error_details": run.error_details,
+                        "counts": {
+                            "fetched": run.fetched,
+                            "parsed": run.parsed,
+                            "inserted": run.inserted,
+                            "updated": run.updated,
+                            "failed": run.failed,
+                        },
+                    },
+                    "attempts": [
+                        {
+                            "url": attempt.url,
+                            "status_code": attempt.status_code,
+                            "error_class": attempt.error_class,
+                            "error_detail": attempt.error_detail,
+                            "bytes": attempt.bytes_received,
+                        }
+                        for attempt in attempts
+                    ],
+                    "open_anomalies": [
+                        {
+                            "kind": anomaly.kind,
+                            "severity": anomaly.severity,
+                            "occurrences": anomaly.occurrence_count,
+                            "detail": anomaly.detail_json,
+                        }
+                        for anomaly in anomalies
+                    ],
+                },
+                indent=2,
+                default=str,
+            )
+        )
 
 
 @app.command("worker")
@@ -117,6 +236,7 @@ def worker(poll_seconds: int = 60) -> None:
                         budget=budget,
                         count_drop_abort_fraction=settings.count_drop_abort_fraction,
                         absence_streak_alert=settings.absence_streak_alert,
+                        allow_missing_robots=settings.robots_missing_policy == "allow",
                     ).run()
                     session.commit()
                 interval = settings.scrape_interval_hours * 3600

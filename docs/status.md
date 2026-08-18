@@ -31,7 +31,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 | A10 | open | — | Document sample required |
 | A11 | open | — | ADR-003 proposed; only the unambiguous same-bytes case is handled (docs/data-model.md) |
 | A12 | open | — | First reviewed full crawl required |
-| A13 | open | — | robots.txt must be fetched before crawling |
+| A13 | refuted | 2026-08-18 | `https://www.parlimen.gov.my/robots.txt` returns 404: no policy is published. Not "permits crawling" — there is nothing to permit. See docs/upstream.md; crawling now needs a recorded decision via ROBOTS_MISSING_POLICY |
 | A14 | open | — | Rights review required |
 
 ## Decision index
@@ -53,6 +53,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 
 | Question | Raised by | Raised on | Owner | Needed by |
 | --- | --- | --- | --- | --- |
+| The site publishes no robots.txt; do its terms of use permit crawling? | A13 | 2026-08-18 | Service owner | C |
 | What exact request contract serves archived listings? | HANDOFF A3 | 2026-08-16 | Discovery owner | B/C |
 | What is the complete bilingual status vocabulary? | HANDOFF A9 | 2026-08-16 | Discovery owner | B/C |
 | Does a revised document normally retain its URL? | HANDOFF A11 | 2026-08-16 | Discovery owner | C |
@@ -62,6 +63,8 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 
 ## Manual gate log
 
+- 2026-08-18 — Claude — First live probe of `www.parlimen.gov.my`, limited to `robots.txt`. Two upstream facts recorded in `docs/upstream.md`: the site serves an incomplete TLS chain (leaf only, missing the Sectigo intermediate), and it publishes no robots.txt (404). Verification succeeds once the intermediate is supplied through `UPSTREAM_CA_BUNDLE`; TLS verification was never disabled. No listing page was fetched, and crawl approval remains outstanding.
+
 - 2026-08-17 — Codex — Fresh Compose rehearsal passed for database health, one-shot migration, app readiness, non-root UID, and read-only app blob mount; external TLS and restore were not covered.
 - 2026-08-17 — Codex — Isolated restore drill passed: PostgreSQL custom dump restored into a new database, seeded bill and blob reference verified, blob bytes restored and SHA-256 verified, and UID-10001 ownership confirmed. In-place destructive restore was not run.
 - 2026-08-18 — Claude — PostgreSQL 16 with pgvector 0.8.1: migrations 0001 to 0003 applied to an empty database and the full suite ran green (142 passed). This covers the weighted tsvector, `ts_rank_cd` ranking, escaped `ts_headline` snippets, the multi-megabyte index guard, pgvector cosine retrieval, and HNSW index creation. It does not cover a live crawl, external TLS, or a vulnerability review.
@@ -70,7 +73,7 @@ Last reconciled: 2026-08-18 (Asia/Kuala_Lumpur).
 - 2026-08-18 — Claude — `make evaluate` run against the development `deterministic` embedding provider. It fails the `no_answer_correct` threshold, as documented: the hashed projection has no semantics and is rejected in production. This is a harness check, **not** the Package G release gate. The gate requires a rerun against the chosen production model with the result recorded here.
 
 Still required before release: dependency review, container vulnerability review, external HTTPS
-validation, live crawl approval, rights review, and — only if Release 3 is to ship — an embedding
+validation, a crawl-permission decision now that no robots.txt exists (A13), live crawl approval, rights review, and — only if Release 3 is to ship — an embedding
 model decision, an answer provider decision, and an evaluation run that meets the thresholds in
 `docs/evals/README.md`.
 
