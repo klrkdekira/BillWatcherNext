@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -251,3 +252,104 @@ def test_snapshot_replay_is_offline_and_same_parser_is_noop(tmp_path) -> None:
         assert initial.bills_inserted == 1
         assert again.changes == 0
         assert database.scalar(select(func.count()).select_from(RecordChange)) == 0
+
+
+def test_replay_at_a_bumped_parser_attributes_changes_and_keeps_overrides(tmp_path) -> None:
+    """A corrected parser rewrites our record as a replay, and never clobbers an override."""
+    with session() as database:
+        store = BlobStore(tmp_path)
+        stored = store.put((FIXTURES / "current_dr_bm.html").read_bytes(), compress=True)
+        database.add(
+            Blob(
+                sha256=stored.sha256,
+                byte_size=stored.byte_size,
+                media_type="text/html",
+                storage_path=str(stored.path),
+                compression=stored.compression,
+                ref_count=1,
+            )
+        )
+        snapshot = SourceSnapshot(
+            id="snapshot",
+            run_id="original-run",
+            url=URL,
+            final_url=URL,
+            requested_at=NOW,
+            status_code=200,
+            blob_sha256=stored.sha256,
+            parser_version=PARSER_VERSION,
+            parse_status="succeeded",
+            records_parsed=1,
+            structure_fingerprint="a" * 64,
+            retention_class="permanent",
+        )
+        database.add(snapshot)
+        database.flush()
+        replay_snapshot(
+            database,
+            snapshot,
+            blob_store=store,
+            chamber="dewan_rakyat",
+            language="ms",
+            run_id="initial-replay",
+        )
+        database.flush()
+        bill = database.scalars(select(Bill)).one()
+        original_title = bill.title_bm
+        assert original_title
+
+        # An operator has corrected the presenter by hand; the bump must not undo it.
+        record = database.scalars(select(ChamberRecord)).one()
+        database.add(
+            FieldOverride(
+                entity_type="chamber_record",
+                entity_id=record.id,
+                field_path="presenter_raw",
+                value="Menteri Undang-Undang (corrected)",
+                reason="listing abbreviates the office",
+                actor="operator",
+                upstream_value_at_creation=record.presenter_raw,
+            )
+        )
+        database.flush()
+
+        bumped = _bump_parser(original_title)
+        with mock.patch("billwatcher.scraper.ingest.parse_listing", bumped):
+            counts = replay_snapshot(
+                database,
+                snapshot,
+                blob_store=store,
+                chamber="dewan_rakyat",
+                language="ms",
+                run_id="bumped-replay",
+            )
+        database.flush()
+
+        assert counts.changes >= 1
+        database.refresh(bill)
+        assert bill.title_bm == f"{original_title} (Pindaan)"
+        changes = database.scalars(select(RecordChange)).all()
+        assert changes
+        assert {change.change_source for change in changes} == {"replay"}
+        assert {change.run_id for change in changes} == {"bumped-replay"}
+        database.refresh(record)
+        assert record.presenter_raw == "Menteri Undang-Undang (corrected)"
+
+
+def _bump_parser(original_title: str):
+    """Stand in for a parser release that fixes a title it used to truncate."""
+    from dataclasses import replace
+
+    real = parse_listing
+
+    def corrected(body: str, *, source_url: str):
+        listing = real(body, source_url=source_url)
+        records = tuple(
+            replace(record, title=f"{original_title} (Pindaan)")
+            if record.title == original_title
+            else record
+            for record in listing.records
+        )
+        return replace(listing, records=records)
+
+    return corrected

@@ -16,6 +16,9 @@ _TRACKING_PARAMETERS = {
     "utm_term",
 }
 _IDENTIFIER_RE = re.compile(r"^\s*D\s*[.\-]?\s*([RN])\s*[.\-]?\s*(\d+)\s*/\s*(\d{4})\s*$", re.I)
+_IDENTIFIER_QUERY_RE = re.compile(
+    r"^\s*D\s*[.\-]?\s*([RN])\s*[.\-]?\s*(\d+)?\s*(?:/\s*(\d{4}))?\s*$", re.I
+)
 _MONTHS = {
     "januari": 1,
     "january": 1,
@@ -193,3 +196,28 @@ _STATUS_MAP = {
 
 def normalize_status(raw: str) -> str:
     return _STATUS_MAP.get(normalize_text(raw).casefold(), "unknown")
+
+
+@dataclass(frozen=True, slots=True)
+class IdentifierQuery:
+    """A user query interpreted as a whole or partial bill identifier."""
+
+    exact: str | None
+    prefix: str | None
+
+
+def parse_identifier_query(raw: str) -> IdentifierQuery:
+    """Interpret free text as a bill code so search can rank exact and prefix hits first."""
+    value = normalize_text(raw)
+    match = _IDENTIFIER_QUERY_RE.fullmatch(value)
+    if not match:
+        return IdentifierQuery(None, None)
+    chamber_code, number_text, year_text = match.groups()
+    prefix = f"D{chamber_code.upper()}"
+    if number_text is None:
+        return IdentifierQuery(None, prefix)
+    prefix = f"{prefix}-{int(number_text)}"
+    if year_text is None:
+        return IdentifierQuery(None, prefix)
+    exact = f"{prefix}-{int(year_text)}"
+    return IdentifierQuery(exact, exact)

@@ -9,6 +9,7 @@ from billwatcher.models import (
     Blob,
     Document,
     DocumentExtraction,
+    DocumentRelation,
     DocumentVersion,
 )
 from billwatcher.scraper.versioning import (
@@ -104,6 +105,9 @@ def persist_document_observation(
     if accepted:
         document.current_version_id = version.id
         document.last_changed_at = observation.checked_at
+
+    if accepted:
+        _propose_reissue_relations(session, document=document, blob_sha256=stored.sha256)
 
     if decision.action == VersionAction.ROLLBACK:
         _add_anomaly(
@@ -228,3 +232,53 @@ def persist_current_extraction(
     if result.status == "succeeded":
         index_document_extraction(session, document_version_id=version.id, pages=result.pages)
     return extraction
+
+
+def _propose_reissue_relations(session: Session, *, document: Document, blob_sha256: str) -> None:
+    """Handle the one unambiguous HANDOFF 9.2 case: identical bytes served at a new URL.
+
+    Documents are never auto-merged. A relation is *proposed* and an anomaly asks a human to
+    confirm it; broader revision heuristics wait on assumption A11 (HANDOFF 25.3).
+    """
+    siblings = session.scalars(
+        select(DocumentVersion)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(
+            DocumentVersion.blob_sha256 == blob_sha256,
+            DocumentVersion.document_id != document.id,
+            DocumentVersion.validation_status == "accepted",
+        )
+    ).all()
+    for sibling in siblings:
+        existing = session.scalar(
+            select(DocumentRelation).where(
+                DocumentRelation.from_document_id == document.id,
+                DocumentRelation.to_document_id == sibling.document_id,
+                DocumentRelation.relation == "reissue_of",
+            )
+        )
+        if existing is not None:
+            continue
+        session.add(
+            DocumentRelation(
+                from_document_id=document.id,
+                to_document_id=sibling.document_id,
+                relation="reissue_of",
+                confidence=0.5,
+                decided_by="heuristic",
+                created_at=document.last_checked_at,
+                note="Identical stored bytes were already served at another canonical URL.",
+            )
+        )
+        _add_anomaly(
+            session,
+            kind="document_relation_proposed",
+            severity="warn",
+            document=document,
+            now=document.last_checked_at,
+            detail={
+                "relation": "reissue_of",
+                "to_document_id": sibling.document_id,
+                "shared_blob": blob_sha256,
+            },
+        )

@@ -1,0 +1,70 @@
+{
+  "corpus_version": "1",
+  "note": "A small synthetic bilingual corpus. It is not Parliament data and must never be presented as such; it exists so retrieval behaviour can be measured offline.",
+  "bills": [
+    {
+      "identifier_normalized": "DR-15-2026",
+      "identifier_raw": "D.R.15/2026",
+      "number": 15,
+      "year": 2026,
+      "title_bm": "Rang Undang-Undang Perlindungan Saksi 2026",
+      "title_en": "Witness Protection Bill 2026",
+      "chambers": [
+        {"chamber": "dewan_rakyat", "status_raw": "Diluluskan", "status_normalized": "passed", "presenter_raw": "Menteri di Jabatan Perdana Menteri"},
+        {"chamber": "dewan_negara", "status_raw": "Bacaan Kali Kedua", "status_normalized": "second_read", "presenter_raw": "Menteri di Jabatan Perdana Menteri"}
+      ],
+      "documents": [
+        {
+          "kind": "bill_as_introduced",
+          "language": "ms",
+          "current": true,
+          "text": "--- Page 1 ---\nRANG UNDANG-UNDANG PERLINDUNGAN SAKSI 2026\n1. Akta ini memperuntukkan perlindungan bagi saksi dalam prosiding jenayah dan bagi perkara yang berkaitan dengannya.\n2. Menteri boleh menubuhkan suatu Program Perlindungan Saksi dan melantik pegawai perlindungan.\n3. Seseorang saksi yang dimasukkan ke dalam Program itu berhak mendapat tempat kediaman selamat dan identiti baharu.\n--- Page 2 ---\n4. Mana-mana orang yang mendedahkan identiti saksi yang dilindungi melakukan suatu kesalahan dan boleh didenda tidak melebihi lima ratus ribu ringgit.\n5. Menteri boleh membuat peraturan bagi melaksanakan Akta ini."
+        }
+      ]
+    },
+    {
+      "identifier_normalized": "DR-16-2026",
+      "identifier_raw": "D.R.16/2026",
+      "number": 16,
+      "year": 2026,
+      "title_bm": "Rang Undang-Undang Pengangkutan Jalan (Pindaan) 2026",
+      "title_en": "Road Transport (Amendment) Bill 2026",
+      "chambers": [
+        {"chamber": "dewan_rakyat", "status_raw": "Bacaan Kali Pertama", "status_normalized": "first_read", "presenter_raw": "Menteri Pengangkutan"}
+      ],
+      "documents": [
+        {
+          "kind": "bill_revised",
+          "language": "ms",
+          "current": false,
+          "text": "--- Page 1 ---\nRANG UNDANG-UNDANG PENGANGKUTAN JALAN (PINDAAN) 2026 - DERAF TERDAHULU\n1. Seksyen 44 Akta ibu dipinda dengan menggantikan kadar kompaun sebanyak satu ribu ringgit."
+        },
+        {
+          "kind": "bill_revised",
+          "language": "ms",
+          "current": true,
+          "text": "--- Page 1 ---\nRANG UNDANG-UNDANG PENGANGKUTAN JALAN (PINDAAN) 2026\n1. Seksyen 44 Akta ibu dipinda dengan menggantikan kadar kompaun sebanyak dua ribu ringgit bagi kesalahan memandu secara melulu.\n2. Pihak berkuasa boleh menggantung lesen memandu bagi tempoh tidak melebihi dua belas bulan.\n--- Page 2 ---\n3. Pindaan ini mula berkuat kuasa pada tarikh yang ditetapkan oleh Menteri."
+        }
+      ]
+    },
+    {
+      "identifier_normalized": "DN-2-2026",
+      "identifier_raw": "D.N.2/2026",
+      "number": 2,
+      "year": 2026,
+      "title_bm": "Rang Undang-Undang Perbendaharaan Negara 2026",
+      "title_en": "National Treasury Bill 2026",
+      "chambers": [
+        {"chamber": "dewan_negara", "status_raw": "Bacaan Kali Pertama", "status_normalized": "first_read", "presenter_raw": "Menteri Kewangan"}
+      ],
+      "documents": [
+        {
+          "kind": "bill_as_introduced",
+          "language": "en",
+          "current": true,
+          "text": "--- Page 1 ---\nNATIONAL TREASURY BILL 2026\n1. This Act establishes the National Treasury Council to oversee federal consolidated fund reporting.\n2. The Council shall publish quarterly statements of federal revenue and expenditure.\n--- Page 2 ---\n3. The Minister of Finance may prescribe the form of the quarterly statement."
+        }
+      ]
+    }
+  ]
+}

@@ -5,14 +5,27 @@ description = "A provenance-first searchable archive of Malaysian Parliament bil
 readme = "README.md"
 requires-python = ">=3.12.5,<3.14"
 dependencies = [
-  "alembic>=1.13", "fastapi>=0.115", "httpx>=0.27", "jinja2>=3.1",
-  "psycopg[binary]>=3.2", "pydantic-settings>=2.5", "pypdf>=5.0",
-  "python-multipart>=0.0.12", "sqlalchemy>=2.0", "structlog>=24.4",
-  "typer>=0.12", "uvicorn[standard]>=0.30",
+  "alembic>=1.13",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "jinja2>=3.1",
+  "pgvector>=0.5.0",
+  "psycopg[binary]>=3.2",
+  "pydantic-settings>=2.5",
+  "pypdf>=5.0",
+  "python-multipart>=0.0.12",
+  "sqlalchemy>=2.0",
+  "structlog>=24.4",
+  "typer>=0.12",
+  "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]
 billwatcher = "billwatcher.cli:app"
+
+[project.optional-dependencies]
+# Only needed to enable RAG answers; the site and search never import it.
+rag = ["anthropic>=0.40"]
 
 [dependency-groups]
 dev = ["mypy>=1.11", "pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.6"]
@@ -36,9 +49,17 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+# The answer provider is an optional extra; the package may be absent when type checking.
+module = ["anthropic", "anthropic.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not live'"
+markers = [
+  "live: opt-in, low-rate checks against the real Parliament site",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "src/billwatcher/web/app.py" = ["B008"]

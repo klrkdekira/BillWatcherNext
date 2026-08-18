@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from billwatcher.db import Base
-from billwatcher.models import Anomaly, Blob, Document, DocumentVersion
+from billwatcher.models import Anomaly, Blob, Document, DocumentRelation, DocumentVersion
 from billwatcher.scraper.service import persist_document_observation
 from billwatcher.scraper.versioning import DownloadObservation, VersionAction
 from billwatcher.storage.blobs import BlobStore
@@ -131,3 +131,39 @@ def test_304_only_advances_check_and_verification_times(tmp_path) -> None:
         assert item.last_checked_at == checked
         assert item.last_changed_at == changed_at
         assert current is not None and current.last_verified_at == checked
+
+
+def test_identical_bytes_at_a_new_url_propose_a_relation_and_never_auto_merge(tmp_path) -> None:
+    """HANDOFF 9.2: same bytes at a new URL is a distinct document sharing one blob."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    store = BlobStore(tmp_path)
+    with Session(engine) as session:
+        original = document()
+        reissued = document()
+        reissued.canonical_source_url = "https://www.parlimen.gov.my/a-pindaan.pdf"
+        reissued.source_url_raw = reissued.canonical_source_url
+        session.add_all([original, reissued])
+        session.flush()
+
+        for target in (original, reissued):
+            assert persist(session, target, store, PDF_A, NOW).action == VersionAction.CREATED
+        session.flush()
+
+        versions = session.scalars(select(DocumentVersion)).all()
+        assert len(versions) == 2
+        assert {version.document_id for version in versions} == {original.id, reissued.id}
+        assert len({version.blob_sha256 for version in versions}) == 1
+        blob = session.get(Blob, versions[0].blob_sha256)
+        assert blob is not None and blob.ref_count == 2
+
+        relation = session.scalars(select(DocumentRelation)).one()
+        assert relation.from_document_id == reissued.id
+        assert relation.to_document_id == original.id
+        assert relation.relation == "reissue_of"
+        assert relation.decided_by == "heuristic"
+        assert relation.confidence < 1.0
+        proposal = session.scalars(
+            select(Anomaly).where(Anomaly.kind == "document_relation_proposed")
+        ).one()
+        assert proposal.severity == "warn"

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Ask about a bill — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>Ask about a bill</h1>
+<p class="notice">Answers are generated from indexed parliamentary documents and are not legal advice. Every claim is cited to a specific document version and the date we retrieved it. Parliament's published record remains the authority.</p>
+<form action="/ask" method="post">
+  <label for="question">Your question</label>
+  <input id="question" name="question" value="{{ question }}" maxlength="500" required>
+  <button>Ask</button>
+</form>
+{% if answer %}
+<section aria-labelledby="answer-heading">
+  <h2 id="answer-heading">Answer</h2>
+  {% if answer.status == "answered" %}<p>{{ answer.text }}</p>
+  {% else %}<p class="warning">{{ answer.text }}</p>{% endif %}
+  {% for note in answer.notes %}<p class="warning">{{ note }}</p>{% endfor %}
+  {% if answer.citations %}<h3>Sources</h3><ol>{% for citation in answer.citations %}<li>[{{ citation.label }}] <a href="/bills/{{ citation.bill_slug }}">{{ citation.bill_identifier }}</a> — version {{ citation.document_version_no }}{% if citation.page_start %}, pages {{ citation.page_start }}–{{ citation.page_end }}{% endif %}; our copy retrieved {{ citation.document_retrieved_at }}{% if not citation.is_current_version %}. This version has since been superseded at its official URL{% endif %}. <a href="{{ citation.document_source_url }}" rel="external">Official document</a></li>{% endfor %}</ol>{% endif %}
+  {% if answer.passages and answer.status != "answered" %}<h3>Retrieved passages</h3><ul>{% for passage in answer.passages %}<li lang="ms">{{ passage.content[:300] }} <a href="/bills/{{ passage.bill_slug }}">{{ passage.bill_identifier }}</a></li>{% endfor %}</ul>{% endif %}
+  <p class="notice">{{ answer.disclaimer }}</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -112,3 +112,40 @@ def test_json_ld_escapes_script_breaking_title() -> None:
         assert detail.status_code == 200
         assert "</script><script>alert(1)" not in detail.text
         assert "\\u003c/script\\u003e\\u003cscript\\u003ealert(1)" in detail.text
+
+
+def test_changes_feed_separates_parliament_from_our_own_corrections() -> None:
+    with client() as browser:
+        page = browser.get("/changes")
+        assert page.status_code == 200
+        assert "does not mean Parliament changed its position" in page.text
+        assert '<label for="kind">Change type</label>' in page.text
+        assert '<label for="chamber">Chamber</label>' in page.text
+
+        assert browser.get("/changes", params={"kind": "record"}).status_code == 200
+        assert browser.get("/changes", params={"kind": "document_version"}).status_code == 200
+
+        bad_kind = browser.get("/changes", params={"kind": "everything"})
+        assert bad_kind.status_code == 400
+        assert "Unknown change type" in bad_kind.text
+        bad_chamber = browser.get("/changes", params={"chamber": "senate"})
+        assert bad_chamber.status_code == 400
+
+
+def test_search_results_carry_a_bounded_highlighted_passage() -> None:
+    with client() as browser:
+        results = browser.get("/search", params={"q": "Perlindungan"})
+        assert results.status_code == 200
+        assert "<mark>Perlindungan</mark>" in results.text
+        assert "From this bill’s listing metadata." in results.text
+
+
+def test_language_filter_is_applied_not_merely_validated() -> None:
+    with client() as browser:
+        malay = browser.get("/bills", params={"lang": "bm"})
+        assert malay.status_code == 200
+        assert "D.R.15/2026" in malay.text
+        english = browser.get("/bills", params={"lang": "en"})
+        assert english.status_code == 200
+        assert "D.R.15/2026" not in english.text
+        assert "No bills match these filters" in english.text

@@ -2,11 +2,13 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable, Generator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Form, Query, Request
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -20,7 +22,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from starlette.middleware.base import RequestResponseEndpoint
 
-from billwatcher.config import get_settings
+from billwatcher.config import Settings, get_settings
 from billwatcher.db import SessionLocal
 from billwatcher.models import (
     Anomaly,
@@ -31,13 +33,30 @@ from billwatcher.models import (
     ChamberRecord,
     CoverageTarget,
     Document,
+    DocumentExtraction,
+    DocumentRelation,
     DocumentVersion,
     FetchQueueItem,
     RecordChange,
     ScrapeRun,
 )
 from billwatcher.operations import evaluate_coverage
+from billwatcher.search.embeddings import (
+    EmbeddingProvider,
+    EmbeddingProviderUnavailable,
+    QueryEmbeddingCache,
+    build_provider,
+)
 from billwatcher.search.lexical import search_bills
+from billwatcher.search.rag import (
+    Answer,
+    AnswerProvider,
+    AnswerProviderUnavailable,
+    RagDisabled,
+    answer_question,
+    build_answer_provider,
+)
+from billwatcher.search.semantic import SemanticSearchDisabled, hybrid_search
 from billwatcher.version import (
     CHUNKER_VERSION,
     EXTRACTOR_VERSION,
@@ -45,6 +64,8 @@ from billwatcher.version import (
     PARSER_VERSION,
     __version__,
 )
+from billwatcher.web.feed import CHANGE_KINDS, CHANGES_PAGE_SIZE, recent_changes
+from billwatcher.web.limits import RateLimit, RateLimiter
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
@@ -65,9 +86,16 @@ STATUSES = {
 }
 
 
-def create_app(session_factory: Callable[[], Session] = SessionLocal) -> FastAPI:
+def create_app(
+    session_factory: Callable[[], Session] = SessionLocal,
+    settings: Settings | None = None,
+) -> FastAPI:
     app = FastAPI(title="BillWatcherNext", version=__version__)
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
+    config = settings or get_settings()
+    retrieval = build_retrieval(config)
+    search_limiter = RateLimiter(RateLimit(capacity=60, refill_per_second=1.0))
+    ask_limiter = RateLimiter(RateLimit(capacity=5, refill_per_second=1 / 12))
 
     def database() -> Generator[Session, None, None]:
         with session_factory() as session:
@@ -111,6 +139,7 @@ def create_app(session_factory: Callable[[], Session] = SessionLocal) -> FastAPI
         lang: str | None = None,
         include_superseded: bool = False,
         page: int = Query(default=1),
+        cursor: str | None = None,
         session: Session = Depends(database),
     ) -> Response:
         error, parsed_year = validate_filters(q, chamber, status, year, lang, page)
@@ -123,8 +152,10 @@ def create_app(session_factory: Callable[[], Session] = SessionLocal) -> FastAPI
                 chamber=chamber,
                 status=status,
                 year=parsed_year,
+                lang=lang,
                 page=page,
                 include_superseded=include_superseded,
+                cursor=cursor,
             )
         except ValueError as exc:
             return render(request, "error.html", {"message": str(exc)}, status_code=400)
@@ -215,11 +246,156 @@ def create_app(session_factory: Callable[[], Session] = SessionLocal) -> FastAPI
         return render(request, "about.html", {"contact": get_settings().contact_email})
 
     @app.get("/changes", response_class=HTMLResponse)
-    def changes(request: Request, session: Session = Depends(database)) -> Response:
-        rows = session.scalars(
-            select(RecordChange).order_by(RecordChange.changed_at.desc()).limit(100)
-        ).all()
-        return render(request, "changes.html", {"changes": rows})
+    def changes(
+        request: Request,
+        chamber: str | None = None,
+        kind: str = "all",
+        page: int = 1,
+        session: Session = Depends(database),
+    ) -> Response:
+        if chamber and chamber not in CHAMBERS:
+            return render(
+                request, "error.html", {"message": "Unknown chamber filter."}, status_code=400
+            )
+        if kind not in CHANGE_KINDS:
+            return render(
+                request, "error.html", {"message": "Unknown change type."}, status_code=400
+            )
+        if page < 1:
+            return render(
+                request, "error.html", {"message": "Page must be at least 1."}, status_code=400
+            )
+        entries, has_more = recent_changes(
+            session, chamber=chamber, kind=kind, page=page, page_size=CHANGES_PAGE_SIZE
+        )
+        return render(
+            request,
+            "changes.html",
+            {
+                "entries": entries,
+                "chamber": chamber or "",
+                "kind": kind,
+                "page": page,
+                "has_more": has_more,
+                "query_string": urlencode(
+                    {
+                        key: value
+                        for key, value in {"chamber": chamber, "kind": kind}.items()
+                        if value
+                    }
+                ),
+            },
+        )
+
+    @app.get("/semantic-search", response_class=HTMLResponse)
+    def semantic_search(
+        request: Request,
+        q: str = "",
+        chamber: str | None = None,
+        status: str | None = None,
+        year: str | None = None,
+        include_superseded: bool = False,
+        session: Session = Depends(database),
+    ) -> Response:
+        if retrieval.embedding_provider is None:
+            return render(
+                request,
+                "error.html",
+                {"message": "Semantic search is not enabled on this deployment."},
+                status_code=404,
+            )
+        if not search_limiter.allow(client_key(request)):
+            return render(request, "error.html", {"message": TOO_MANY}, status_code=429)
+        error, parsed_year = validate_filters(q, chamber, status, year, None, 1)
+        if error:
+            return render(request, "error.html", {"message": error}, status_code=400)
+        results = []
+        if q.strip():
+            try:
+                results = hybrid_search(
+                    session,
+                    query=q,
+                    settings=config,
+                    provider=retrieval.embedding_provider,
+                    cache=retrieval.cache,
+                    chamber=chamber,
+                    status=status,
+                    year=parsed_year,
+                    include_superseded=include_superseded,
+                )
+            except (ValueError, SemanticSearchDisabled) as exc:
+                return render(request, "error.html", {"message": str(exc)}, status_code=400)
+        return render(
+            request,
+            "semantic_search.html",
+            {
+                "results": results,
+                "q": q,
+                "chamber": chamber or "",
+                "status": status or "",
+                "year": year or "",
+                "include_superseded": include_superseded,
+            },
+        )
+
+    @app.get("/ask", response_class=HTMLResponse)
+    def ask_form(request: Request) -> Response:
+        if retrieval.answer_provider is None:
+            return render(
+                request,
+                "error.html",
+                {"message": "Generated answers are not enabled on this deployment."},
+                status_code=404,
+            )
+        return render(request, "ask.html", {"question": "", "answer": None})
+
+    @app.post("/ask", response_class=HTMLResponse)
+    def ask(
+        request: Request,
+        question: str = Form(default=""),
+        session: Session = Depends(database),
+    ) -> Response:
+        outcome = run_ask(request, session, question, config, retrieval, ask_limiter)
+        if isinstance(outcome, tuple):
+            message, code = outcome
+            return render(request, "error.html", {"message": message}, status_code=code)
+        return render(request, "ask.html", {"question": question, "answer": outcome})
+
+    @app.post("/api/v1/ask")
+    def api_ask(
+        request: Request,
+        payload: dict[str, Any],
+        session: Session = Depends(database),
+    ) -> Response:
+        question = str(payload.get("question", ""))
+        outcome = run_ask(request, session, question, config, retrieval, ask_limiter)
+        if isinstance(outcome, tuple):
+            message, code = outcome
+            return JSONResponse({"error": message}, status_code=code)
+        return JSONResponse(
+            {
+                "schema_version": "v1",
+                "status": outcome.status,
+                "answer": outcome.text,
+                "disclaimer": outcome.disclaimer,
+                "notes": list(outcome.notes),
+                "citations": [
+                    {
+                        "label": citation.label,
+                        "bill": citation.bill_identifier,
+                        "bill_url": f"/bills/{citation.bill_slug}",
+                        "official_document_url": citation.document_source_url,
+                        "document_version": citation.document_version_no,
+                        "our_copy_retrieved_at": citation.document_retrieved_at,
+                        "page_start": citation.page_start,
+                        "page_end": citation.page_end,
+                        "current_version": citation.is_current_version,
+                        "anchor": citation.anchor,
+                    }
+                    for citation in outcome.citations
+                ],
+            }
+        )
 
     @app.get("/health/live")
     def live() -> dict[str, str]:
@@ -355,8 +531,6 @@ def preserved_query(
     lang: str | None,
     include_superseded: bool = False,
 ) -> str:
-    from urllib.parse import urlencode
-
     return urlencode(
         {
             key: value
@@ -391,7 +565,26 @@ def bill_context(session: Session, bill: Bill) -> dict[str, Any]:
             .where(DocumentVersion.document_id == document.id)
             .order_by(DocumentVersion.version_no.desc())
         ).all()
-        documents.append({"link": link, "document": document, "versions": versions})
+        current = next((version for version in versions if version.is_current), None)
+        superseded = [version for version in versions if not version.is_current]
+        excerpt, extraction_note = document_excerpt(session, current)
+        relations = session.execute(
+            select(DocumentRelation, Document)
+            .join(Document, Document.id == DocumentRelation.to_document_id)
+            .where(DocumentRelation.from_document_id == document.id)
+        ).all()
+        documents.append(
+            {
+                "link": link,
+                "document": document,
+                "versions": versions,
+                "current": current,
+                "superseded": superseded,
+                "excerpt": excerpt,
+                "extraction_note": extraction_note,
+                "relations": relations,
+            }
+        )
     events = session.scalars(
         select(BillEvent).where(BillEvent.bill_id == bill.id).order_by(BillEvent.observed_at.desc())
     ).all()
@@ -407,6 +600,41 @@ def bill_context(session: Session, bill: Bill) -> dict[str, Any]:
         "events": events,
         "changes": changes,
     }
+
+
+EXCERPT_CHARS = 1_200
+
+
+def document_excerpt(
+    session: Session, version: DocumentVersion | None
+) -> tuple[str | None, str | None]:
+    """Return a bounded excerpt of our stored text, or an honest note about why there is none."""
+    if version is None:
+        return None, "We have not stored a copy of this document yet."
+    extraction = session.scalar(
+        select(DocumentExtraction)
+        .where(
+            DocumentExtraction.document_version_id == version.id,
+            DocumentExtraction.is_current.is_(True),
+        )
+        .order_by(DocumentExtraction.created_at.desc())
+        .limit(1)
+    )
+    if extraction is None:
+        return None, "Text extraction for this version is still pending."
+    if extraction.status == "empty":
+        return None, (
+            "This version yielded no machine-readable text; it is probably a scanned "
+            "document awaiting optical character recognition."
+        )
+    if extraction.status != "succeeded" or not extraction.extracted_text:
+        return None, "Text extraction for this version did not succeed."
+    text_value = extraction.extracted_text
+    excerpt = text_value[:EXCERPT_CHARS]
+    note = None
+    if len(text_value) > EXCERPT_CHARS:
+        note = "This is a short excerpt of our stored text. The official document is linked above."
+    return excerpt, note
 
 
 def legislation_json_ld(bill: Bill, chambers: list[ChamberRecord]) -> dict[str, Any]:
@@ -461,6 +689,69 @@ def pipeline_versions() -> dict[str, str]:
         "extractor": EXTRACTOR_VERSION,
         "chunker": CHUNKER_VERSION,
     }
+
+
+TOO_MANY = "Too many requests. Please slow down; ordinary browsing and search are unaffected."
+
+
+@dataclass(frozen=True, slots=True)
+class Retrieval:
+    """Provider handles resolved once per application, never inside a route handler."""
+
+    embedding_provider: EmbeddingProvider | None
+    answer_provider: AnswerProvider | None
+    cache: QueryEmbeddingCache
+
+
+def build_retrieval(settings: Settings) -> Retrieval:
+    embedding_provider: EmbeddingProvider | None = None
+    answer_provider: AnswerProvider | None = None
+    if settings.semantic_search_enabled:
+        try:
+            embedding_provider = build_provider(settings)
+        except EmbeddingProviderUnavailable:
+            embedding_provider = None
+    if settings.rag_enabled and embedding_provider is not None:
+        try:
+            answer_provider = build_answer_provider(settings)
+        except AnswerProviderUnavailable:
+            answer_provider = None
+    return Retrieval(
+        embedding_provider=embedding_provider,
+        answer_provider=answer_provider,
+        cache=QueryEmbeddingCache(settings.query_embedding_cache_size),
+    )
+
+
+def client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def run_ask(
+    request: Request,
+    session: Session,
+    question: str,
+    settings: Settings,
+    retrieval: Retrieval,
+    limiter: RateLimiter,
+) -> Answer | tuple[str, int]:
+    if retrieval.answer_provider is None or retrieval.embedding_provider is None:
+        return "Generated answers are not enabled on this deployment.", 404
+    if not limiter.allow(client_key(request)):
+        return TOO_MANY, 429
+    try:
+        return answer_question(
+            session,
+            question=question,
+            settings=settings,
+            embedding_provider=retrieval.embedding_provider,
+            answer_provider=retrieval.answer_provider,
+            cache=retrieval.cache,
+        )
+    except RagDisabled:
+        return "Generated answers are not enabled on this deployment.", 404
+    except ValueError as error:
+        return str(error), 400
 
 
 app = create_app()

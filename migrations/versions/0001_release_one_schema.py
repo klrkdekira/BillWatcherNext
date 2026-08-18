@@ -15,9 +15,12 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        # Extensions must exist before create_all, which declares a pgvector column.
+        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     Base.metadata.create_all(bind=bind)
     if bind.dialect.name == "postgresql":
-        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
         op.execute(
             "ALTER TABLE search_units ADD COLUMN IF NOT EXISTS tsv tsvector "
             "GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED"

@@ -6,7 +6,7 @@ BLOB_BACKUP_DEST ?=
 RESTORE_PATH ?=
 BLOB_RESTORE_PATH ?=
 
-.PHONY: help setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+.PHONY: help setup lock format lint typecheck test test-live check serve migrate scrape scrape-full status doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -59,11 +59,20 @@ reparse: ## Dry-run snapshot replay; pass ARGS=--apply to mutate
 reextract: ## Dry-run extraction backfill; pass ARGS=--apply to mutate
 	$(UV) run billwatcher reextract $(ARGS)
 
-rechunk: ## Dry-run Release 3 chunk backfill
+rechunk: ## Dry-run chunk rebuild at the current chunker version; ARGS=--apply
 	$(UV) run billwatcher rechunk $(ARGS)
 
-reembed: ## Dry-run Release 3 embedding backfill
+reembed: ## Dry-run embedding backfill for the configured model; ARGS=--apply
 	$(UV) run billwatcher reembed $(ARGS)
+
+evaluate: ## Score the versioned retrieval/answer evaluation set offline
+	$(UV) run billwatcher evaluate
+
+semantic-index: ## Build the pgvector HNSW index; pass ARGS=--apply
+	$(UV) run billwatcher semantic-index $(ARGS)
+
+retention: ## Dry-run retention (transport log rollup, extraction pruning); ARGS=--apply
+	$(UV) run billwatcher retention $(ARGS)
 
 verify-storage: ## Verify every database blob reference on disk
 	$(UV) run billwatcher verify-storage

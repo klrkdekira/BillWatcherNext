@@ -11,7 +11,7 @@ from billwatcher.models import (
     DocumentVersion,
     SearchUnit,
 )
-from billwatcher.search.indexer import index_document_extraction
+from billwatcher.search.indexer import MAX_UNIT_CHARS, index_document_extraction
 from billwatcher.search.lexical import search_bills
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
@@ -81,26 +81,34 @@ def test_document_pages_search_and_scale_guard() -> None:
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         bill, _document, version = seed(session)
-        huge_page = "peruntukan " + ("x" * 1_100_000)
-        assert (
-            index_document_extraction(
-                session,
-                document_version_id=version.id,
-                pages=("frasa undang undang unik", huge_page),
-            )
-            == 2
+        huge_page = "peruntukan " + " ".join("xylem" for _ in range(220_000))
+        assert len(huge_page) > 1_000_000
+        written = index_document_extraction(
+            session,
+            document_version_id=version.id,
+            pages=("frasa undang undang unik", huge_page),
         )
         session.flush()
         units = session.scalars(
             select(SearchUnit)
             .where(SearchUnit.unit_kind == "document_text")
-            .order_by(SearchUnit.page_from)
+            .order_by(SearchUnit.page_from, SearchUnit.part)
         ).all()
-        assert len(units) == 2
+        assert len(units) == written > 2
         assert units[0].page_from == units[0].page_to == 1
-        assert len(units[1].content) > 1_000_000
+        assert units[0].part == 1
+        # Every long page is split into units that stay inside the tsvector size limit.
+        long_page_units = [unit for unit in units if unit.page_from == 2]
+        assert len(long_page_units) > 1
+        assert [unit.part for unit in long_page_units] == list(range(1, len(long_page_units) + 1))
+        assert max(len(unit.content) for unit in units) <= MAX_UNIT_CHARS
+        assert sum(len(unit.content) for unit in long_page_units) >= len(huge_page) - len(
+            long_page_units
+        )
         result = search_bills(session, query="frasa undang undang unik")
         assert result.items == (bill,)
+        assert result.hits[0].passage is not None
+        assert "<mark>" in result.hits[0].passage.html
 
 
 def test_new_version_demotes_superseded_text_by_default() -> None:

@@ -22,6 +22,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from billwatcher.db import Base
+from billwatcher.search.vector_type import EmbeddingVector
+
+# The stored vector width is a schema fact, not a runtime setting: a model with a different
+# dimension needs its own migration and a recorded reembed job (HANDOFF 8, 9.1).
+EMBEDDING_DIMENSION = 1024
 
 
 def uuid4() -> str:
@@ -285,6 +290,22 @@ class DocumentVersion(Base):
     )
 
 
+class DocumentRelation(Base):
+    """Proposed or human-confirmed links between distinct documents (HANDOFF 8, R2)."""
+
+    __tablename__ = "document_relations"
+    __table_args__ = (UniqueConstraint("from_document_id", "to_document_id", "relation"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    from_document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"))
+    to_document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"))
+    relation: Mapped[str] = mapped_column(String(32))
+    confidence: Mapped[float] = mapped_column(Float)
+    decided_by: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    note: Mapped[str | None] = mapped_column(Text)
+
+
 class DocumentExtraction(Base):
     __tablename__ = "document_extractions"
     __table_args__ = (
@@ -415,6 +436,8 @@ class SearchUnit(Base):
     document_version_id: Mapped[str | None] = mapped_column(ForeignKey("document_versions.id"))
     page_from: Mapped[int | None] = mapped_column(Integer)
     page_to: Mapped[int | None] = mapped_column(Integer)
+    part: Mapped[int] = mapped_column(Integer, default=1)
+    content_a: Mapped[str | None] = mapped_column(Text)
     content: Mapped[str] = mapped_column(Text)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -431,3 +454,41 @@ class DailyFetchMetric(Base):
     count: Mapped[int] = mapped_column(Integer)
     bytes_received: Mapped[int] = mapped_column(BigInteger)
     mean_duration_ms: Mapped[float] = mapped_column(Float)
+
+
+class DocumentChunk(Base):
+    """Chunks hang off an immutable extraction, so a citation always resolves to stored bytes."""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("extraction_id", "chunker_version", "chunk_index"),
+        Index("ix_document_chunks_extraction", "extraction_id", "chunker_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    extraction_id: Mapped[str] = mapped_column(ForeignKey("document_extractions.id"))
+    chunker_version: Mapped[str] = mapped_column(String(32))
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    heading: Mapped[str | None] = mapped_column(Text)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChunkEmbedding(Base):
+    """One vector per chunk per model, so two models can coexist during a migration."""
+
+    __tablename__ = "chunk_embeddings"
+    __table_args__ = (UniqueConstraint("chunk_id", "embedding_model_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    chunk_id: Mapped[str] = mapped_column(ForeignKey("document_chunks.id"))
+    embedding_model_id: Mapped[str] = mapped_column(String(128))
+    model_dimension: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(EmbeddingVector(EMBEDDING_DIMENSION))
+    embedding_pipeline_version: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

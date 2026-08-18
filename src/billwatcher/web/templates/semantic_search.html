@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Semantic search — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>Semantic search</h1>
+<p class="notice">This ranks bills by meaning as well as wording. Exact bill codes always come first. Keyword search remains available at <a href="/search">/search</a> and does not depend on this feature.</p>
+<form action="/semantic-search" method="get">
+  <label for="q">Question or phrase</label><input id="q" name="q" value="{{ q }}" maxlength="200">
+  <label for="chamber">Chamber</label><select id="chamber" name="chamber"><option value="">All</option><option value="dewan_rakyat" {% if chamber == "dewan_rakyat" %}selected{% endif %}>Dewan Rakyat</option><option value="dewan_negara" {% if chamber == "dewan_negara" %}selected{% endif %}>Dewan Negara</option></select>
+  <label for="status">Status</label><input id="status" name="status" value="{{ status }}">
+  <label for="year">Year</label><input id="year" name="year" inputmode="numeric" value="{{ year }}">
+  <label><input type="checkbox" name="include_superseded" value="1" {% if include_superseded %}checked{% endif %}> Include superseded document versions</label>
+  <button>Search</button>
+</form>
+{% if results %}<ol class="bill-list">{% for result in results %}<li><a href="/bills/{{ result.bill.slug }}"><strong>{{ result.bill.identifier_raw }}</strong> <span lang="ms">{{ result.bill.title_bm or result.bill.title_en or "Title unavailable" }}</span></a>{% if result.exact_identifier %} <span class="origin upstream">Exact bill code</span>{% endif %}{% for chunk in result.chunks %}<p class="passage" lang="ms">{{ chunk.content[:320] }}</p><p class="passage-source">Version {{ chunk.document_version_no }}{% if chunk.page_start %}, page {{ chunk.page_start }}{% endif %} — our copy retrieved {{ chunk.document_retrieved_at }}{% if not chunk.is_current_version %} (superseded){% endif %}. <a href="{{ chunk.document_source_url }}" rel="external">Official document</a></p>{% endfor %}</li>{% endfor %}</ol>
+{% elif q %}<p>No bills matched. Try different wording, or use <a href="/search">keyword search</a>.</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,84 @@
+{
+  "set_version": "1",
+  "corpus_version": "1",
+  "thresholds": {
+    "recall_at_5": 0.8,
+    "no_answer_correct": 1.0,
+    "citation_validity": 1.0,
+    "version_pinned": 1.0
+  },
+  "cases": [
+    {
+      "id": "identifier-lookup-ms",
+      "kind": "identifier",
+      "language": "ms",
+      "question": "D.R.15/2026",
+      "expect_bill": "DR-15-2026"
+    },
+    {
+      "id": "identifier-lookup-spaced",
+      "kind": "identifier",
+      "language": "ms",
+      "question": "D.R. 15/2026",
+      "expect_bill": "DR-15-2026"
+    },
+    {
+      "id": "status-question-ms",
+      "kind": "status",
+      "language": "ms",
+      "question": "Apakah status Rang Undang-Undang Perlindungan Saksi di Dewan Rakyat?",
+      "expect_bill": "DR-15-2026"
+    },
+    {
+      "id": "status-question-en",
+      "kind": "status",
+      "language": "en",
+      "question": "What is the status of the National Treasury Bill?",
+      "expect_bill": "DN-2-2026"
+    },
+    {
+      "id": "cross-chamber-timeline",
+      "kind": "timeline",
+      "language": "en",
+      "question": "Which chambers have considered the Witness Protection Bill and when?",
+      "expect_bill": "DR-15-2026"
+    },
+    {
+      "id": "amendment-content-ms",
+      "kind": "amendment",
+      "language": "ms",
+      "question": "Berapakah kadar kompaun baharu bagi memandu secara melulu?",
+      "expect_bill": "DR-16-2026",
+      "expect_text": "dua ribu ringgit"
+    },
+    {
+      "id": "superseded-excluded-by-default",
+      "kind": "superseded",
+      "language": "ms",
+      "question": "kadar kompaun satu ribu ringgit deraf terdahulu",
+      "expect_bill": "DR-16-2026",
+      "expect_current_version_only": true
+    },
+    {
+      "id": "content-question-en",
+      "kind": "content",
+      "language": "en",
+      "question": "Who must publish quarterly statements of federal revenue?",
+      "expect_bill": "DN-2-2026"
+    },
+    {
+      "id": "no-answer-out-of-scope",
+      "kind": "no_answer",
+      "language": "en",
+      "question": "What is the corporate income tax rate in Singapore?",
+      "expect_no_answer": true
+    },
+    {
+      "id": "no-answer-unindexed-topic",
+      "kind": "no_answer",
+      "language": "ms",
+      "question": "Bilakah mesyuarat jawatankuasa perikanan laut dalam diadakan?",
+      "expect_no_answer": true
+    }
+  ]
+}

@@ -1,32 +1,35 @@
 import json
 import random
 from datetime import UTC, datetime
-from pathlib import Path
 
 import typer
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from billwatcher.config import get_settings
 from billwatcher.db import SessionLocal
-from billwatcher.jobs.placeholders import record_deferred_job
+from billwatcher.jobs.rechunk import run_rechunk
+from billwatcher.jobs.reembed import drop_superseded_model, run_reembed
 from billwatcher.jobs.reextract import run_reextract
 from billwatcher.jobs.replay import run_reparse
+from billwatcher.jobs.retention import apply_retention
 from billwatcher.models import (
-    Anomaly,
     Blob,
+    ChunkEmbedding,
     CoverageTarget,
-    DocumentVersion,
     FetchQueueItem,
     ScrapeRun,
 )
-from billwatcher.operations import evaluate_coverage
+from billwatcher.operations import diagnose, evaluate_coverage, prune_unreferenced_blobs
 from billwatcher.scraper.document_worker import process_one_document
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
 from billwatcher.scraper.queue import CrawlBudget
 from billwatcher.scraper.worker import ScrapeOrchestrator
+from billwatcher.search.embeddings import EmbeddingProviderUnavailable, build_provider
+from billwatcher.search.evaluation import evaluate
+from billwatcher.search.rag import AnswerProviderUnavailable, build_answer_provider
 from billwatcher.storage.blobs import BlobStore
 from billwatcher.version import PARSER_VERSION
 
@@ -186,36 +189,9 @@ def runtime_status() -> None:
 
 @app.command()
 def doctor() -> None:
-    failures: list[str] = []
     settings = get_settings()
     with SessionLocal() as session:
-        critical = (
-            session.scalar(
-                select(func.count())
-                .select_from(Anomaly)
-                .where(
-                    Anomaly.severity == "critical",
-                    Anomaly.resolved_at.is_(None),
-                    Anomaly.acknowledged_at.is_(None),
-                )
-            )
-            or 0
-        )
-        if critical:
-            failures.append(f"{critical} unresolved critical anomalies")
-        missing_current = session.scalars(
-            select(DocumentVersion).where(
-                DocumentVersion.is_current.is_(True),
-                DocumentVersion.validation_status != "accepted",
-            )
-        ).all()
-        if missing_current:
-            failures.append("a current document version is not accepted")
-        for blob in session.scalars(select(Blob)):
-            if not BlobStore(settings.blob_storage_root).verify(
-                blob.sha256, compression=blob.compression
-            ):
-                failures.append(f"blob missing or corrupt: {blob.sha256}")
+        failures = diagnose(session, blob_store=BlobStore(settings.blob_storage_root))
     for failure in failures:
         typer.echo(f"FAIL: {failure}", err=True)
     if failures:
@@ -248,30 +224,28 @@ def prune_blobs(apply: bool = typer.Option(False, "--apply")) -> None:
     settings = get_settings()
     store = BlobStore(settings.blob_storage_root)
     with SessionLocal() as session:
-        candidates = list(session.scalars(select(Blob).where(Blob.ref_count == 0)).all())
-        referenced = set(session.scalars(select(Blob.sha256)))
-        orphaned = store.stored_digests() - referenced
-        typer.echo(
-            json.dumps(
-                {
-                    "database_candidates": len(candidates),
-                    "orphans": len(orphaned),
-                    "dry_run": not apply,
-                }
-            )
+        try:
+            report = prune_unreferenced_blobs(session, blob_store=store, dry_run=not apply)
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from None
+        if apply:
+            session.commit()
+        typer.echo(json.dumps(report.as_counts()))
+
+
+@app.command("retention")
+def retention(apply: bool = typer.Option(False, "--apply")) -> None:
+    """Aggregate expiring transport logs and release prunable blob references (HANDOFF 16.4)."""
+    settings = get_settings()
+    with SessionLocal() as session:
+        report = apply_retention(
+            session,
+            fetch_attempt_retention_days=settings.fetch_attempt_retention_days,
+            dry_run=not apply,
         )
         if apply:
-            for blob in candidates:
-                path = Path(blob.storage_path)
-                try:
-                    path.resolve().relative_to(settings.blob_storage_root.resolve())
-                except ValueError:
-                    raise typer.BadParameter("recorded blob path escapes storage root") from None
-                path.unlink(missing_ok=True)
-                session.delete(blob)
-            for digest in orphaned:
-                store.path_for(digest).unlink(missing_ok=True)
             session.commit()
+        typer.echo(json.dumps(report.as_counts()))
 
 
 @app.command("reparse")
@@ -301,23 +275,110 @@ def reextract(apply: bool = typer.Option(False, "--apply"), limit: int = 100) ->
 
 
 @app.command("rechunk")
-def rechunk(apply: bool = typer.Option(False, "--apply")) -> None:
+def rechunk(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
+    """Rebuild chunk sets at the current chunker version; older sets are demoted, not deleted."""
     with SessionLocal() as session:
-        job = record_deferred_job(session, kind="rechunk", dry_run=not apply)
-        session.commit()
+        job = run_rechunk(session, dry_run=not apply, limit=limit)
+        if apply:
+            session.commit()
         typer.echo(json.dumps(job.counts))
         if job.state == "failed":
             raise typer.Exit(1)
 
 
 @app.command("reembed")
-def reembed(apply: bool = typer.Option(False, "--apply")) -> None:
+def reembed(apply: bool = typer.Option(False, "--apply"), limit: int = 200) -> None:
+    """Backfill vectors for the configured model alongside any previous model's vectors."""
+    try:
+        provider = build_provider(get_settings())
+    except EmbeddingProviderUnavailable as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
     with SessionLocal() as session:
-        job = record_deferred_job(session, kind="reembed", dry_run=not apply)
-        session.commit()
+        job = run_reembed(session, provider=provider, dry_run=not apply, limit=limit)
+        if apply:
+            session.commit()
         typer.echo(json.dumps(job.counts))
         if job.state == "failed":
             raise typer.Exit(1)
+
+
+@app.command("semantic-index")
+def semantic_index(
+    apply: bool = typer.Option(False, "--apply"),
+    lists: int = typer.Option(0, help="Unused; HNSW is built with m/ef_construction defaults."),
+) -> None:
+    """Build the HNSW cosine index once representative vectors exist (HANDOFF 12.3)."""
+    with SessionLocal() as session:
+        if session.get_bind().dialect.name != "postgresql":
+            typer.echo("FAIL: a vector index requires PostgreSQL", err=True)
+            raise typer.Exit(2)
+        rows = session.scalar(select(func.count()).select_from(ChunkEmbedding)) or 0
+        typer.echo(json.dumps({"vectors": rows, "dry_run": not apply}))
+        if not apply:
+            return
+        if rows == 0:
+            typer.echo("FAIL: refusing to build an index before any vectors exist", err=True)
+            raise typer.Exit(1)
+        session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_chunk_embeddings_hnsw ON chunk_embeddings "
+                "USING hnsw (embedding vector_cosine_ops)"
+            )
+        )
+        session.commit()
+        typer.echo("OK")
+
+
+@app.command("evaluate")
+def evaluate_retrieval(as_json: bool = typer.Option(False, "--json")) -> None:
+    """Score the versioned retrieval/answer evaluation set (HANDOFF 13) offline."""
+    settings = get_settings()
+    try:
+        embedding_provider = build_provider(settings)
+    except EmbeddingProviderUnavailable as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
+    answer_provider = None
+    if settings.rag_enabled:
+        try:
+            answer_provider = build_answer_provider(settings)
+        except AnswerProviderUnavailable as error:
+            typer.echo(f"WARN: {error}; scoring retrieval only", err=True)
+    report = evaluate(
+        settings=settings,
+        embedding_provider=embedding_provider,
+        answer_provider=answer_provider,
+    )
+    if as_json:
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+    else:
+        typer.echo(
+            f"set {report.set_version} / corpus {report.corpus_version} "
+            f"/ embeddings {report.embedding_model}"
+        )
+        for name, value in report.metrics.items():
+            threshold = report.thresholds.get(name)
+            mark = "ok " if threshold is None or value >= threshold else "LOW"
+            typer.echo(f"  {mark} {name}: {value} (threshold {threshold})")
+        for case in report.cases:
+            if not case.passed:
+                typer.echo(f"  failed: {case.case_id} — {case.detail}")
+    if not report.met_thresholds:
+        typer.echo(
+            "Thresholds not met. Record this before enabling semantic search or RAG.", err=True
+        )
+        raise typer.Exit(1)
+
+
+@app.command("drop-embedding-model")
+def drop_embedding_model(model_id: str, apply: bool = typer.Option(False, "--apply")) -> None:
+    """Remove a superseded model's vectors after its replacement has been validated."""
+    with SessionLocal() as session:
+        removed = drop_superseded_model(session, model_id=model_id, dry_run=not apply)
+        if apply:
+            session.commit()
+        typer.echo(json.dumps({"model_id": model_id, "vectors": removed, "dry_run": not apply}))
 
 
 if __name__ == "__main__":

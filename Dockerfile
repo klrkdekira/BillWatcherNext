@@ -16,6 +16,8 @@ WORKDIR /app
 COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 alembic.ini ./
 COPY --chown=10001:10001 migrations ./migrations
+# The versioned evaluation set is an operator gate, so it ships with the image.
+COPY --chown=10001:10001 docs/evals ./docs/evals
 USER 10001:10001
 EXPOSE 8000
 STOPSIGNAL SIGTERM

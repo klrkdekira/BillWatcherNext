@@ -1,3 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Recent corrections — {{ site_name }}{% endblock %}
-{% block content %}<h1>Recent changes to our record</h1><p>These are changes in this index and do not necessarily mean Parliament changed its position.</p>{% if changes %}<ol>{% for change in changes %}<li>{{ change.changed_at }}: {{ change.entity_type }} {{ change.field_path }} ({{ change.change_source }})</li>{% endfor %}</ol>{% else %}<p>No corrections recorded.</p>{% endif %}{% endblock %}
+{% block title %}Recent changes — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>Recent changes</h1>
+<p>Two different kinds of fact appear below and are labelled separately: what Parliament published, and what this index corrected about its own record. A correction here does not mean Parliament changed its position.</p>
+<form action="/changes" method="get">
+  <label for="kind">Change type</label><select id="kind" name="kind"><option value="all" {% if kind == "all" %}selected{% endif %}>All</option><option value="record" {% if kind == "record" %}selected{% endif %}>Bill record fields</option><option value="document_version" {% if kind == "document_version" %}selected{% endif %}>Document versions</option></select>
+  <label for="chamber">Chamber</label><select id="chamber" name="chamber"><option value="">All</option><option value="dewan_rakyat" {% if chamber == "dewan_rakyat" %}selected{% endif %}>Dewan Rakyat</option><option value="dewan_negara" {% if chamber == "dewan_negara" %}selected{% endif %}>Dewan Negara</option></select>
+  <button>Apply filters</button>
+</form>
+{% if entries %}<ol class="change-list">{% for entry in entries %}<li><span class="origin {{ entry.origin }}">{% if entry.origin == "upstream" %}Parliament{% else %}Our record{% endif %}</span> {{ entry.changed_at }} — {% if entry.bill_slug %}<a href="/bills/{{ entry.bill_slug }}">{{ entry.bill_identifier }}</a>{% endif %} {{ entry.summary }}{% if entry.chamber %} ({{ "Dewan Rakyat" if entry.chamber == "dewan_rakyat" else "Dewan Negara" }}){% endif %}<div>{{ entry.detail }}</div></li>{% endfor %}</ol>
+{% else %}<p>No changes recorded for these filters.</p>{% endif %}
+<nav aria-label="Pagination">{% if page > 1 %}<a href="?{{ query_string }}&amp;page={{ page - 1 }}">Previous</a>{% endif %}{% if has_more %}<a href="?{{ query_string }}&amp;page={{ page + 1 }}">Next</a>{% endif %}</nav>
+{% endblock %}

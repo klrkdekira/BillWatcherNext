@@ -10,7 +10,11 @@ from billwatcher.db import Base
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+# A caller (for example the PostgreSQL test fixture) may point this run at another database.
+_override = config.attributes.get("connection_url")
+config.set_main_option(
+    "sqlalchemy.url", str(_override or get_settings().database_url).replace("%", "%%")
+)
 target_metadata = Base.metadata
 
 
