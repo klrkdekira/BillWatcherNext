@@ -158,9 +158,10 @@ on is a sequence of recorded decisions, not a configuration flip:
 4. Once representative vectors exist, build the index: `make semantic-index ARGS=--apply`. It
    refuses to build before any vectors exist.
 5. Set `SEMANTIC_SEARCH_ENABLED=true`. `/semantic-search` appears; `/search` is unchanged.
-6. For answers, record the provider decision against ADR-009, install the optional `rag`
-   dependency group, set `RAG_PROVIDER`, `RAG_MODEL_ID`, and credentials, and set
-   `RAG_ENABLED=true`.
+6. For answers, run a vLLM OpenAI-compatible server, set
+   `RAG_PROVIDER=openai_compatible`, `RAG_MODEL_ID`, `RAG_BASE_URL`, and the optional
+   `RAG_API_KEY`, then set `RAG_ENABLED=true`. The base URL includes `/v1`, for example
+   `http://vllm:8000/v1`.
 
 Switching models later: `make reembed ARGS=--apply` backfills the new model alongside the old
 one, and `uv run billwatcher drop-embedding-model <old-id> --apply` removes the superseded vectors
@@ -352,4 +353,3 @@ Two findings came out of the rehearsal, and both were real:
 2. **HSTS was not being sent**, because Caddy adds it only for a publicly trusted certificate. It is
    now an application setting, `HSTS_MAX_AGE_SECONDS`, defaulted to off for the reason HANDOFF 17
    gives.
-

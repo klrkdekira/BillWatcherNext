@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -76,22 +76,14 @@ class Settings(BaseSettings):
     rag_enabled: bool = False
     rag_provider: str = ""
     rag_model_id: str = ""
+    # OpenAI-compatible answer servers (including vLLM) are configured explicitly. The API key is
+    # optional because a self-hosted endpoint may be reachable only on a private network.
+    rag_base_url: str = ""
+    rag_api_key: str = ""
     rag_max_context_chunks: int = Field(default=8, ge=1, le=32)
     rag_max_question_chars: int = Field(default=500, ge=1)
     rag_min_retrieval_score: float = Field(default=0.05, ge=0.0)
     rag_timeout_seconds: float = Field(default=30.0, gt=0)
-    # `/ask` tells the reader their question is not stored. That is only true if the provider does
-    # not store it either, and with Anthropic that means a zero-data-retention arrangement, which is
-    # negotiated per organization and cannot be detected from inside the process (ADR-009). An
-    # operator asserts it here; until then RAG refuses to start in production rather than making a
-    # promise it cannot keep. The models that require 30-day retention are refused outright.
-    rag_zero_retention_confirmed: bool = False
-
-    # Claude Fable 5 and Claude Mythos 5 require 30-day data retention and are not available under
-    # zero data retention (verified 2026-08-18, see ADR-009).
-    RETENTION_REQUIRING_MODELS: ClassVar[frozenset[str]] = frozenset(
-        {"claude-fable-5", "claude-mythos-5", "claude-mythos-preview"}
-    )
 
     @model_validator(mode="after")
     def reject_production_placeholders(self) -> "Settings":
@@ -144,25 +136,16 @@ class Settings(BaseSettings):
             raise ValueError("RAG_ENABLED requires SEMANTIC_SEARCH_ENABLED")
         if self.rag_enabled and not (self.rag_provider and self.rag_model_id):
             raise ValueError("RAG_ENABLED requires RAG_PROVIDER and RAG_MODEL_ID")
+        if (
+            self.rag_enabled
+            and self.rag_provider == "openai_compatible"
+            and not self.rag_base_url
+        ):
+            raise ValueError("RAG_PROVIDER=openai_compatible requires RAG_BASE_URL")
         if self.environment == "production" and self.embedding_provider == "deterministic":
             raise ValueError("the deterministic embedding provider is for development only")
         if self.environment == "production" and self.rag_provider == "echo":
             raise ValueError("the echo answer provider is for development only")
-        if self.rag_enabled and self.rag_model_id in self.RETENTION_REQUIRING_MODELS:
-            raise ValueError(
-                f"{self.rag_model_id} requires 30-day data retention and cannot be used under a "
-                "zero-data-retention arrangement; /ask promises questions are not stored (ADR-009)"
-            )
-        if (
-            self.rag_enabled
-            and self.environment == "production"
-            and not self.rag_zero_retention_confirmed
-        ):
-            raise ValueError(
-                "RAG_ENABLED in production requires RAG_ZERO_RETENTION_CONFIRMED=true, asserting "
-                "that the answer provider has a zero-data-retention arrangement for this "
-                "organization; see ADR-009"
-            )
         return self
 
 

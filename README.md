@@ -270,10 +270,10 @@ Semantic search and generated answers sit behind `SEMANTIC_SEARCH_ENABLED` and `
 both off. With them off, `/semantic-search`, `/ask`, and `/api/v1/ask` return 404 and nothing
 else changes.
 
-Neither can start without an explicitly configured model. **No embedding model or answer provider
-is chosen or defaulted here**, because that decision has not been made — see
-`docs/decisions/ADR-008` and `ADR-009`. The `deterministic` and `echo` providers exist for
-development and are rejected in production configuration.
+Neither can start without an explicitly configured model. **No embedding or answer model is
+chosen or defaulted here.** ADR-009 selects a self-hosted vLLM OpenAI-compatible endpoint for
+answers; ADR-008 leaves the embedding model decision open. The `deterministic` and `echo`
+providers exist for development and are rejected in production configuration.
 
 Before either flag goes on, `make evaluate` must meet the thresholds in `docs/evals/README.md`
 against the real model, and the result must be recorded in `docs/status.md`.

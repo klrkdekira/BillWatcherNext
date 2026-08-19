@@ -24,8 +24,6 @@ dependencies = [
 billwatcher = "billwatcher.cli:app"
 
 [project.optional-dependencies]
-# Only needed to enable RAG answers; the site and search never import it.
-rag = ["anthropic>=0.40"]
 s3 = [
     "boto3>=1.43.73",
 ]
@@ -53,8 +51,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-# The answer provider is an optional extra; the package may be absent when type checking.
-module = ["anthropic", "anthropic.*", "boto3", "boto3.*", "botocore", "botocore.*"]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

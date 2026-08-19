@@ -37,11 +37,11 @@ it, and refuses to run before any vectors exist, per HANDOFF 12.3.
 Recorded 2026-08-18 so that "deferred" does not mean "unexamined". Two constraints narrow the
 field before any benchmark:
 
-1. **The answer provider cannot supply the embeddings.** Anthropic publishes no embeddings
-   endpoint — the Claude API surface is Messages, Token Counting, Batches, Files, and Models. So
-   the embedding vendor is a second, independent choice, and ADR-009's retention reasoning does not
-   carry over to it. If the embedding provider is a hosted API, every indexed chunk *and* every
-   user query is sent to a third party.
+1. **The embedding model remains a separate choice.** The vLLM server selected by ADR-009 can
+   expose an OpenAI-compatible embeddings endpoint when it serves an embedding model, but the
+   answer model itself does not produce the 1024-wide vectors required by this schema. If the
+   embedding provider is a hosted API, every indexed chunk *and* every user query is sent to a
+   third party.
 2. **The stored width is 1024** (`EMBEDDING_DIMENSION`, migration 0003). Any model of another width
    is a migration plus a `reembed`, so a 1024-wide model is materially cheaper to adopt.
 

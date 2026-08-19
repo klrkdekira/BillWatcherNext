@@ -65,18 +65,15 @@ which is the only option consistent with a site that makes no third-party reques
       exactly this reason.
 - [ ] Only then `SEMANTIC_SEARCH_ENABLED=true`.
 
-### 1.4 Arrange zero data retention, if `/ask` ships (ADR-009) — *service owner, commercial*
+### 1.4 Select and evaluate the vLLM answer model, if `/ask` ships (ADR-009) — *service owner*
 
-Answered otherwise: Anthropic's published terms permit exactly what `/ask` promises, for the surface
-this service uses — Messages, Citations, token counting, prompt caching. ZDR is enabled **per
-organization** by arrangement, and cannot be switched on from this repository.
+The provider decision is made: a self-hosted vLLM OpenAI-compatible endpoint. There is no
+third-party retention arrangement or provider SDK.
 
-- [ ] Enable ZDR for the organization whose API key this service will use.
-- [ ] Record it in the gate log and set `RAG_ZERO_RETENTION_CONFIRMED=true`. Production refuses to
-      start with RAG on and this unset.
-- [ ] Note the constraints the code already enforces: no Batches (29-day retention), no code
-      execution, and **Claude Fable 5 / Mythos 5 are refused outright** because they require 30-day
-      retention.
+- [ ] Choose the answer model and run `make evaluate` against it.
+- [ ] Record the evaluation in the gate log.
+- [ ] Set `RAG_MODEL_ID`, `RAG_BASE_URL`, and an optional `RAG_API_KEY`, then enable
+      `RAG_ENABLED`. Keep the endpoint private and disable request-body logging at vLLM's proxy.
 
 ### 1.5 Decide whether the 22 scanned bills should be searchable — *service owner*
 

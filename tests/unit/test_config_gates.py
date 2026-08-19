@@ -1,4 +1,4 @@
-"""The retention promise on /ask is enforced by configuration, not only documented (ADR-009)."""
+"""Production configuration gates that protect operator decisions."""
 
 import pytest
 
@@ -14,32 +14,21 @@ BASE = dict(
     embedding_provider="bge",
     embedding_model_id="bge-m3",
     rag_enabled=True,
-    rag_provider="anthropic",
+    rag_provider="openai_compatible",
 )
 
 
-def test_production_rag_requires_the_retention_arrangement_to_be_asserted() -> None:
-    with pytest.raises(ValueError, match="RAG_ZERO_RETENTION_CONFIRMED"):
-        Settings(**BASE, rag_model_id="claude-opus-5")
+def test_openai_compatible_rag_requires_an_endpoint() -> None:
+    with pytest.raises(ValueError, match="RAG_BASE_URL"):
+        Settings(**BASE, rag_model_id="local-instruct")
 
-    ok = Settings(**BASE, rag_model_id="claude-opus-5", rag_zero_retention_confirmed=True)
-    assert ok.rag_enabled
-
-
-@pytest.mark.parametrize("model", ["claude-fable-5", "claude-mythos-5"])
-def test_a_model_that_requires_retention_is_refused_outright(model: str) -> None:
-    """Not even an operator assertion may enable it: the model itself forbids zero retention."""
-    with pytest.raises(ValueError, match="30-day data retention"):
-        Settings(**BASE, rag_model_id=model, rag_zero_retention_confirmed=True)
-
-
-def test_development_does_not_need_the_assertion() -> None:
     settings = Settings(
-        **{**BASE, "environment": "development"},
-        rag_model_id="claude-opus-5",
+        **BASE,
+        rag_model_id="local-instruct",
+        rag_base_url="http://vllm:8000/v1",
     )
     assert settings.rag_enabled
-    assert settings.rag_zero_retention_confirmed is False
+    assert settings.rag_base_url == "http://vllm:8000/v1"
 
 
 def test_publishing_stored_documents_in_production_requires_the_rights_review() -> None:

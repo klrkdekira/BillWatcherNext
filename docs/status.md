@@ -17,7 +17,7 @@ what closing it takes. When the two disagree, this file is right, because it car
 | E operations/deploy | in_review | Claude | main | 2026-08-17 | 2026-08-18 | image/Compose health, PostgreSQL search, database+blob restore drill, UID/mount checks, `make check`, retention job with rollup and pruning tests; dependency, container, and CSP review completed and recorded in docs/operations.md; base image pinned by digest, Python 3.12.13, security updates applied; the CSP is now the application's and is asserted by tests | A publicly trusted certificate, public DNS, and one hand-verification of the external nginx (ADR-015) |
 | F JSON-LD/discovery | done | Codex | worktree | 2026-08-17 | 2026-08-17 | current, passed, bilingual and malicious JSON-LD tests; canonical, Open Graph, and sitemap | — |
 | G semantic search | in_review | Claude | main | 2026-08-18 | 2026-08-18 | chunker, provider interface, migration 0003, `rechunk`/`reembed` backfills, hybrid RRF retrieval, pgvector cosine retrieval and HNSW index proven on PostgreSQL, versioned evaluation set | No production embedding model chosen (ADR-008); evaluation gate not run against a real model |
-| H RAG | in_review | Claude | main | 2026-08-18 | 2026-08-18 | bounded answer service, injection isolation, citation verifier, no-answer and outage fallbacks, kill switch, rate limits, `/ask` and `/api/v1/ask` | Depends on Package G gate; provider and retention decision not recorded (ADR-009) |
+| H RAG | in_review | Claude | main | 2026-08-18 | 2026-08-19 | bounded answer service, injection isolation, citation verifier, no-answer and outage fallbacks, kill switch, rate limits, `/ask` and `/api/v1/ask`; self-hosted vLLM OpenAI-compatible provider wired by ADR-009 | Depends on Package G gate and production answer-model evaluation |
 
 ## Assumption status
 
@@ -138,6 +138,12 @@ ADR-013 is accepted for the storage gateway. Its public-serving half remains a p
   **HSTS was not being sent**, because Caddy only adds it for a publicly trusted certificate. Both
   fixed, and a static test now compares the documented configuration against the image's dependency
   set. A publicly trusted certificate and public DNS remain the only untested part.
+
+- 2026-08-19 — Codex — **ADR-009 corrected to the owner's actual deployment:** RAG uses a
+  self-hosted vLLM OpenAI-compatible Chat Completions endpoint, not Claude. The Anthropic SDK,
+  commercial ZDR assertion, and Claude-specific model blacklist are removed. The application still
+  stores only operational metrics and a non-reversible query fingerprint; raw questions and
+  answers are not persisted.
 
 - 2026-08-18 — Claude — **The two deferred provider decisions are researched rather than merely
   deferred.** ADR-009 is now answered against Anthropic's published terms, read on 2026-08-18: zero

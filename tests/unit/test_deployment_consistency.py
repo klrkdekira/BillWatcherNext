@@ -24,7 +24,7 @@ def documented(name: str) -> str | None:
 
 def test_the_image_installs_the_extras_the_documented_configuration_needs() -> None:
     extras = set(PYPROJECT["project"]["optional-dependencies"])
-    assert extras == {"rag", "s3"}, "a new extra needs a decision about whether it ships"
+    assert extras == {"s3"}, "a new extra needs a decision about whether it ships"
 
     sync = re.search(r"uv sync[^\n]*", DOCKERFILE)
     assert sync is not None
@@ -32,9 +32,8 @@ def test_the_image_installs_the_extras_the_documented_configuration_needs() -> N
 
     if documented("BLOB_STORAGE_BACKEND") == "s3":
         assert "s3" in installed, ".env.example selects the s3 backend; the image must install it"
-    # RAG is off by default, so its SDK deliberately stays out of the image.
+    # RAG is off by default and its OpenAI-compatible adapter uses the base HTTP dependency.
     assert documented("RAG_ENABLED") == "false"
-    assert "rag" not in installed
 
 
 def test_the_locked_dependencies_are_installed_from_the_lockfile() -> None:

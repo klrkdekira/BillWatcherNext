@@ -1,7 +1,9 @@
 """Package H: bounded, cited answers with a working kill switch (HANDOFF 13)."""
 
+import json
 from collections.abc import Iterator, Sequence
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -13,6 +15,7 @@ from billwatcher.search.embeddings import DeterministicEmbeddingProvider, QueryE
 from billwatcher.search.rag import (
     SYSTEM_PROMPT,
     AnswerProviderUnavailable,
+    OpenAICompatibleAnswerProvider,
     PromptSource,
     ProviderAnswer,
     RagDisabled,
@@ -98,6 +101,58 @@ def test_unconfigured_answer_model_is_refused_not_invented() -> None:
         build_answer_provider(Settings())
     with pytest.raises(AnswerProviderUnavailable, match="unknown answer provider"):
         build_answer_provider(rag_settings(rag_provider="oracle"))
+
+
+def test_openai_compatible_provider_calls_chat_completions(session: Session) -> None:
+    prepared(session)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Perlindungan saksi disebut dalam dokumen [S1].",
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 41, "completion_tokens": 9},
+            },
+        )
+
+    provider = OpenAICompatibleAnswerProvider(
+        "local-instruct",
+        "http://vllm:8000/v1/",
+        "secret",
+        transport=httpx.MockTransport(handler),
+    )
+    answer = ask(session, provider, "Apakah perlindungan saksi?")
+
+    assert answer.status == "answered"
+    assert seen[0].url == "http://vllm:8000/v1/chat/completions"
+    assert seen[0].headers["authorization"] == "Bearer secret"
+    payload = json.loads(seen[0].content)
+    assert payload["model"] == "local-instruct"
+    assert payload["messages"][0]["role"] == "system"
+    assert "<source id=\"S1\"" in payload["messages"][1]["content"]
+
+
+def test_openai_compatible_invalid_response_uses_the_outage_fallback(session: Session) -> None:
+    prepared(session)
+    provider = OpenAICompatibleAnswerProvider(
+        "local-instruct",
+        "http://vllm:8000/v1",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+    )
+
+    answer = ask(session, provider, "Apakah perlindungan saksi?")
+
+    assert answer.status == "provider_unavailable"
+    assert answer.passages
 
 
 def test_a_cited_answer_is_pinned_to_a_document_version(session: Session) -> None:

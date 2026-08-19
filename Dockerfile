@@ -12,8 +12,8 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 # The `s3` extra is part of the production runtime, not an option: `.env.example` and
 # `compose.yaml` both configure the VersityGW gateway as the archive backend (ADR-013), and without
-# boto3 the app refuses to start with its own documented configuration. `rag` is deliberately left
-# out — it is off by default and would put an answer-provider SDK in every image.
+# boto3 the app refuses to start with its own documented configuration. RAG uses the existing
+# HTTP client directly against an OpenAI-compatible endpoint and needs no provider SDK.
 RUN uv sync --locked --no-dev --no-editable --extra s3
 
 FROM python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2 AS runtime
