@@ -1,0 +1,17 @@
+{#
+  The provision tree, recursive. `item.paragraphs` is empty unless the deployment publishes full
+  text, and it is empty because the handler never put the text in the context — this template has
+  no conditional to get wrong.
+#}
+{% macro provisions(items, language) %}
+<ol class="bill-list">
+  {% for item in items %}
+  <li class="bill-card">
+    {% if item.href %}<a class="bill-link" href="{{ item.href }}"><span class="bill-code">{{ item.label }}</span>{% if item.heading %} <span class="bill-title" lang="{{ language }}">{{ item.heading }}</span>{% endif %}</a>
+    {% else %}<span class="bill-code">{{ item.label }}</span>{% if item.heading %} <span class="bill-title" lang="{{ language }}">{{ item.heading }}</span>{% endif %}{% endif %}
+    {% for paragraph in item.paragraphs %}<p lang="{{ language }}">{{ paragraph }}</p>{% endfor %}
+    {% if item.children %}{{ provisions(item.children, language) }}{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endmacro %}

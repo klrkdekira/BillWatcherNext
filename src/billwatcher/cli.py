@@ -9,13 +9,18 @@ from sqlalchemy import func, select, text
 
 from billwatcher.config import get_settings
 from billwatcher.db import SessionLocal
+from billwatcher.jobs.audit_rebuild import check_audit_tree, rebuild_documents
 from billwatcher.jobs.fixture_refresh import refresh_fixtures
 from billwatcher.jobs.fixtures import load_fixture_listings
+from billwatcher.jobs.mineru_extract import run_mineru_extract
 from billwatcher.jobs.rechunk import run_rechunk
 from billwatcher.jobs.reembed import drop_superseded_model, run_reembed
 from billwatcher.jobs.reextract import run_reextract
 from billwatcher.jobs.replay import run_reparse
+from billwatcher.jobs.restructure import run_restructure
 from billwatcher.jobs.retention import apply_retention
+from billwatcher.mineru.client import MarkdownExtractorUnavailable
+from billwatcher.mineru.client import build_extractor as build_mineru_extractor
 from billwatcher.models import (
     Anomaly,
     Blob,
@@ -25,11 +30,18 @@ from billwatcher.models import (
     FetchQueueItem,
     ScrapeRun,
 )
-from billwatcher.operations import diagnose, evaluate_coverage, prune_unreferenced_blobs
+from billwatcher.operations import (
+    diagnose,
+    evaluate_coverage,
+    find_bill_number_gaps,
+    prune_unreferenced_blobs,
+)
+from billwatcher.pipeline.cli import app as pipeline_app
 from billwatcher.scraper.document_worker import (
     close_document_run,
     open_document_run,
     process_one_document,
+    run_fetch_documents_step,
 )
 from billwatcher.scraper.fetch import Fetcher
 from billwatcher.scraper.policy import CrawlPolicy
@@ -39,9 +51,19 @@ from billwatcher.search.embeddings import EmbeddingProviderUnavailable, build_pr
 from billwatcher.search.evaluation import evaluate
 from billwatcher.search.rag import AnswerProviderUnavailable, build_answer_provider
 from billwatcher.storage import build_blob_store
+from billwatcher.storage.audit_tree import AuditTree
 from billwatcher.version import PARSER_VERSION
 
+
+def audit_tree_store() -> AuditTree:
+    return AuditTree(get_settings().audit_tree_root)
+
+
 app = typer.Typer(no_args_is_help=True, help="BillWatcherNext operator commands.")
+# The file-first pipeline (listings -> bills -> documents, no database, no object store) is a
+# self-contained sub-app: it never imports billwatcher.db/models, only the Postgres-backed
+# commands above do.
+app.add_typer(pipeline_app, name="pipeline")
 
 
 def policy() -> CrawlPolicy:
@@ -420,6 +442,37 @@ def document_worker(once: bool = True, limit: int = 1) -> None:
         typer.echo("continuous scheduling is provided by the container worker loop")
 
 
+@app.command("fetch-documents")
+def fetch_documents(
+    limit: int = typer.Option(
+        5000, "--limit", help="Safety cap on items drained in one process, not a live-crawl budget"
+    ),
+    approve_live: bool = typer.Option(False, "--approve-live"),
+) -> None:
+    """Step S3 (HANDOFF 27.1): drain the document queue, writing PDFs + sidecars to the audit tree.
+
+    Unlike `document-worker`, this is the auditable pipeline step: it runs until the queue is
+    empty (or the safety cap is hit) and materialises every accepted or quarantined download into
+    `03-documents/` as it downloads it, one manifest per run. It issues live HTTP requests to the
+    same allowlisted hosts as `scrape`, so it is gated the same way.
+    """
+    settings = get_settings()
+    if not (settings.scrape_enabled or approve_live):
+        raise typer.BadParameter(
+            "live document fetch is disabled; set SCRAPE_ENABLED=true or pass --approve-live"
+        )
+    with SessionLocal() as session, Fetcher(policy()) as fetcher:
+        manifest = run_fetch_documents_step(
+            session,
+            fetcher=fetcher,
+            blob_store=build_blob_store(settings),
+            audit_tree=audit_tree_store(),
+            trigger="manual",
+            limit=limit,
+        )
+    typer.echo(json.dumps(manifest, default=str))
+
+
 @app.command("load-fixtures")
 def load_fixtures(
     confirm_production: bool = typer.Option(
@@ -506,6 +559,39 @@ def runtime_status() -> None:
     )
 
 
+@app.command("completeness")
+def completeness() -> None:
+    """Report candidate bill-numbering gaps in closed archive years.
+
+    A heuristic, not a gate: nothing confirms Parliament numbers bills with no gaps at all, so a
+    reported gap means "worth checking the archive by hand," never "a bug." Restricted to years
+    whose archive coverage target is closed (HANDOFF 10.4) — the current or a partially-crawled
+    year is still growing, and a hole there is just a bill not yet fetched.
+    """
+    with SessionLocal() as session:
+        gaps = find_bill_number_gaps(session)
+    typer.echo(
+        json.dumps(
+            [
+                {
+                    "chamber": gap.chamber,
+                    "year": gap.year,
+                    "range": [gap.lowest, gap.highest],
+                    "missing_numbers": gap.missing_numbers,
+                }
+                for gap in gaps
+            ],
+            indent=2,
+        )
+    )
+    if gaps:
+        typer.echo(
+            f"\n{len(gaps)} chamber-year group(s) with candidate gaps — for review, not a "
+            "failure; make doctor does not fail on this.",
+            err=True,
+        )
+
+
 @app.command()
 def doctor() -> None:
     settings = get_settings()
@@ -536,6 +622,45 @@ def verify_storage() -> None:
     typer.echo(json.dumps({"failures": failures, "orphans": orphaned}))
     if failures or orphaned:
         raise typer.Exit(1)
+
+
+@app.command("verify-audit")
+def verify_audit() -> None:
+    """Re-hash the audit tree against the database and exit non-zero on any divergence.
+
+    Scoped to `03-documents/` today (Package K): the listing and processing tiers are not built
+    yet. A clean result here does not certify a tier this command does not check.
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
+        issues = check_audit_tree(
+            session,
+            audit_tree=audit_tree_store(),
+            blob_store=build_blob_store(settings),
+            now=datetime.now(UTC),
+        )
+        session.commit()
+    for issue in issues:
+        typer.echo(issue, err=True)
+    typer.echo(json.dumps({"issues": len(issues)}))
+    if issues:
+        raise typer.Exit(1)
+
+
+@app.command("audit-rebuild")
+def audit_rebuild() -> None:
+    """Regenerate the audit tree from the database and blob store.
+
+    Byte-identical and a no-op over an already-correct tree (HANDOFF 27.4): every write goes
+    through the write-if-changed rule, so this is also the recovery path after deleting the
+    tree and the backfill path after a sidecar schema bump. Scoped to `03-documents/` today.
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
+        report = rebuild_documents(
+            session, blob_store=build_blob_store(settings), audit_tree=audit_tree_store()
+        )
+    typer.echo(json.dumps(report))
 
 
 @app.command("prune-blobs")
@@ -598,6 +723,57 @@ def rechunk(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> N
     """Rebuild chunk sets at the current chunker version; older sets are demoted, not deleted."""
     with SessionLocal() as session:
         job = run_rechunk(session, dry_run=not apply, limit=limit)
+        if apply:
+            session.commit()
+        typer.echo(json.dumps(job.counts))
+        if job.state == "failed":
+            raise typer.Exit(1)
+
+
+@app.command("restructure")
+def restructure(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
+    """Read structure from stored bytes and record each document's Gate L1 verdict.
+
+    Offline: it never contacts Parliament. A reading that fails the gate is stored for review
+    and is not promoted, so nothing downstream builds on an unvalidated tree (HANDOFF 26.3).
+    """
+    with SessionLocal() as session:
+        job = run_restructure(
+            session, blob_store=build_blob_store(get_settings()), dry_run=not apply, limit=limit
+        )
+        if apply:
+            session.commit()
+        typer.echo(json.dumps(job.counts))
+        if job.state == "failed":
+            raise typer.Exit(1)
+
+
+@app.command("mineru-extract")
+def mineru_extract(apply: bool = typer.Option(False, "--apply"), limit: int = 50) -> None:
+    """A second, independently versioned markdown reading of stored PDFs via MinerU.
+
+    Never contacts Parliament, but does call the configured MinerU endpoint over the network for
+    each eligible document. Written only as a local file artifact under `data/04-text/` — never
+    into `document_extractions` (HANDOFF 27.7). Eligibility is decided by what markdown already
+    exists on disk, so re-running costs nothing for a document already processed.
+    """
+    settings = get_settings()
+    try:
+        extractor = build_mineru_extractor(settings)
+    except MarkdownExtractorUnavailable as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
+    with SessionLocal() as session:
+        job = run_mineru_extract(
+            session,
+            blob_store=build_blob_store(settings),
+            audit_tree=audit_tree_store(),
+            extractor=extractor,
+            render_dpi=settings.mineru_render_dpi,
+            mineru_base_url=settings.mineru_base_url,
+            dry_run=not apply,
+            limit=limit,
+        )
         if apply:
             session.commit()
         typer.echo(json.dumps(job.counts))

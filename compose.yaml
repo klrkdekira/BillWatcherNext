@@ -60,6 +60,12 @@ services:
     volumes:
       # Still mounted read-only as a fallback when BLOB_STORAGE_BACKEND=filesystem.
       - blobs:/var/lib/billwatcher/blobs:ro
+      # The file-first pipeline's store (PIPELINE_DATA_ROOT) *is* the record for the legislation
+      # corpus, not a projection of the database (ADR-021). Read-only: the app serves the corpus
+      # (ADR-018) and never writes it — the pipeline steps do, and they are run deliberately, not
+      # by a long-lived service. Without this mount a corpus route would serve an empty store on a
+      # container that is `read_only: true` anyway, which fails as a 404 rather than as an error.
+      - pipeline_data:/var/lib/billwatcher/pipeline-data:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 15s
@@ -86,6 +92,10 @@ services:
       blobs: {condition: service_started}
     volumes:
       - blobs:/var/lib/billwatcher/blobs
+      # The audit tree (HANDOFF 27) is a derived projection, not the archive: losing this volume
+      # loses nothing `audit-rebuild` cannot regenerate, so it is deliberately not in the backup
+      # contract.
+      - audit:/var/lib/billwatcher/audit
     restart: unless-stopped
     stop_grace_period: 30s
     # The worker crawls Parliament, so it needs outbound access. On an internal-only network it
@@ -107,3 +117,10 @@ volumes:
   postgres_data:
   blobs:
   blob_iam:
+  audit:
+  # Unlike `audit`, this one is not rebuildable from anything in the stack: it holds the pipeline's
+  # own listings, bills, documents and derived AKN/ELI files, and no service here writes it. A
+  # deployment populates it with a deliberate one-shot run — `docker compose run --rm --volume
+  # pipeline_data:/var/lib/billwatcher/pipeline-data app billwatcher pipeline …` — so it belongs in
+  # the backup contract, and no service gets standing write access to it.
+  pipeline_data:

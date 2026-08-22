@@ -546,3 +546,74 @@ becoming invisible configuration.
 Note the earlier code defect this uncovered: the preflight parsed the response body without
 checking the status code, and an HTML error page parses to an empty ruleset, which reads as
 "crawl anything". That is now fixed and covered by tests.
+
+## 2026-08-20 — AGC discovery spike (`lom.agc.gov.my`): TLS clean, robots.txt errors, terms found
+
+A one-time, read-only discovery pass — not a crawl — settling the questions HANDOFF 26.7 raised
+about a second publisher. Eight GET requests total, honestly identified
+(`BillWatcherNext-discovery-spike/0.1 (research; one-time reconnaissance; contact:
+cheeleong@tuxuri.com)`), spaced several seconds apart: the portal root, `robots.txt` (twice, to
+rule out a transient error), `tnc.php`, `faq.php`, and one `robots.txt` check against
+`www.agc.gov.my` for context. Nothing was downloaded beyond these HTML pages; no legislation
+document was fetched.
+
+**TLS chain is complete**, unlike parlimen.gov.my's. `openssl`/`curl` verify cleanly against the
+system CA bundle alone: leaf `CN=*.agc.gov.my`, issued by DigiCert Global G3 TLS ECC SHA384 2020
+CA1, expiring 2027-02-07. No `UPSTREAM_CA_BUNDLE` equivalent would be needed for this host.
+
+**`robots.txt` returns HTTP 500, not 404.** `https://lom.agc.gov.my/robots.txt` consistently
+returns a 170-byte nginx `500 Internal Server Error` body, on two separate requests. This is not
+the same fact as parlimen.gov.my's clean 404: a 500 does not read as RFC 9309 "no restrictions"
+the way a 4xx does; it reads as the endpoint being broken or misconfigured, which is a different
+condition and needs its own recorded decision rather than reusing `ROBOTS_MISSING_POLICY`'s
+reasoning by analogy. (For contrast, `https://www.agc.gov.my/robots.txt` — a different subdomain,
+checked only for context — returns a clean 404.)
+
+**Terms & Conditions (`tnc.php`) and FAQ (`faq.php`) were read in full.** Both are public, no
+login, and carry substantive text rather than boilerplate:
+
+- The s.61 Interpretation Acts 1948/1967 disclaimer HANDOFF 26.7 already cited is confirmed
+  verbatim from the live source (T&C clauses 9–10; FAQ 3): a printout from the portal is *not* a
+  copy of the Gazette printed by PNMB for the purposes of proving the law in court.
+- **FAQ 3 also says more than parlimen.gov.my's policy pages ever did**: "The legislation can be
+  downloaded and printed from this portal **for purposes of reference**." This is not a blanket
+  licence — it says nothing about redistribution, mirroring, or building a derivative structured
+  database, which is what this pipeline would do — but it is materially more permissive language
+  than exists anywhere on parlimen.gov.my, where the only copyright statement is "all rights
+  reserved" with no mention of any permitted use at all. Whether "for purposes of reference"
+  covers this project's intended use is a legal judgement, not a fact this spike can settle, and
+  is not decided here.
+- **FAQ 4 raises a legal nuance a lawyer should read, not resolved here**: subsection 18(4) of the
+  Interpretation Acts is quoted as making "the date of publication of the Gazette... the date the
+  Gazette is first published in any form," and the FAQ states that from 26 April 2011 the portal
+  "shall be the first official Gazette published to the public." Read together with the s.61
+  disclaimer about *printouts*, this suggests the portal's *online* publication may carry
+  different evidentiary status from a *printed copy* of it — a distinction this project is not
+  qualified to interpret and which HANDOFF 26.7's legal sign-off item exists for.
+- **The pre-2011 coverage boundary is now confirmed from AGC's own FAQ, not inferred**: "Principal
+  legislation made prior to 26 April 2011 can be obtained from the Attorney General's Chambers'
+  portal (www.agc.gov.my) and Percetakan Nasional Malaysia Berhad's (PNMB) portal
+  (www.lawnet.com.my)... Printed copies... can be purchased from PNMB." This matches HANDOFF's
+  Stage 0 sources table exactly, now with a primary citation rather than an assumption. It also
+  reconfirms `lawnet.com.my` sits outside `lom.agc.gov.my` entirely, consistent with TODO.md 1.6
+  treating it as a separate, paid-subscription risk class.
+- Coverage start dates are reconfirmed exactly: subsidiary legislation (P.U.(A)/P.U.(B), out of
+  this project's scope) from 26 April 2011; Principal and Amending Acts passed by Parliament from
+  March 2011, published on the portal from 2 June 2011.
+- The copyright year is inconsistent on the site itself: the T&C body text says "Copyright 2023",
+  the page footer says "Copyrights © 2026" — a real observation, not a transcription error here,
+  noted because this project's own discipline (A9, A7) is to record what a source actually
+  publishes rather than smooth over its inconsistencies.
+- The site sets a `language=BI` cookie by default on first visit; the nav offers a BM/ENG toggle.
+  What "BI" denotes in this specific site's own vocabulary was not confirmed — noted rather than
+  guessed, matching the standing rule against designing a vocabulary from a handful of samples.
+
+**What this settles and what it does not.** A16 (§4) moves from *unresolved, no request ever
+issued* to *partially observed*: the TLS half is answered cleanly (no chain fix needed), and
+whether reprints state an "incorporating amendments up to" date is still unconfirmed — no
+document listing or reprint page was fetched, since that would start to be a listing crawl rather
+than a policy discovery, and stays out of scope for a read-only reconnaissance pass. **No decision
+to crawl AGC has been made here.** The `robots.txt` 500 needs its own recorded decision distinct
+from `ROBOTS_MISSING_POLICY`'s absent-policy reasoning; the "for purposes of reference" language
+and the online-Gazette-status nuance are legal questions for the service owner and, per HANDOFF
+26.7, a lawyer — not something this spike resolves by finding favourable-sounding text.

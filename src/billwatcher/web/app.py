@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 
 from billwatcher.config import Settings, get_settings
 from billwatcher.db import SessionLocal
+from billwatcher.pipeline.store import build_pipeline_store
 from billwatcher.version import __version__
+from billwatcher.web.corpus import register_corpus_routes
 from billwatcher.web.retrieval import build_retrieval
 from billwatcher.web.routes import register_routes
 from billwatcher.web.security_headers import install_security_headers
@@ -34,6 +36,9 @@ def create_app(
         config=config,
         retrieval=build_retrieval(config),
     )
+    # Registered even when SERVE_LEGISLATION_CORPUS is off: the routes answer with the publication
+    # policy rather than a bare 404, so a reader following a citation is told why (ADR-018).
+    register_corpus_routes(app, store=build_pipeline_store(config), config=config)
     return app
 
 

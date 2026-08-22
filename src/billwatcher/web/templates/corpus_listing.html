@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p class="notice">{{ lead }}</p>
+{% if entries %}
+<ol class="bill-list">
+  {% for entry in entries %}
+  <li class="bill-card">
+    <a class="bill-link" href="{{ entry.href }}"><span class="bill-code">{{ entry.label }}</span></a>
+    {% if entry.note %}<p class="bill-meta">{{ entry.note }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="empty">We hold no reading at this level yet. The path is part of the identifier scheme and stays valid; nothing has been published under it.</p>
+{% endif %}
+{% include "corpus_disclaimer.html" %}
+{% endblock %}

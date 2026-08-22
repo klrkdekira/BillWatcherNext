@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ identifier }} — {{ site_name }}{% endblock %}
+{% block content %}
+<h1>{{ identifier }}</h1>
+<p class="notice">One Work, and each language we hold a reading in. The Malay and English readings of one document are two Expressions of the same Work, which is what makes a citation resolvable across languages.</p>
+<dl><dt>Work identifier</dt><dd><code>{{ work_uri }}</code></dd></dl>
+<h2>Expressions</h2>
+{% for expression in expressions %}
+<section>
+  <h3><a href="{{ expression.href }}">{{ expression.language_label }}</a></h3>
+  {% if expression.title %}<p lang="{{ expression.title.language }}">{{ expression.title.text }}</p>{% endif %}
+  <p class="bill-meta">Machine representations: {% for item in expression.representations %}<a href="{{ item.href }}" rel="nofollow"><code>{{ item.href.rsplit("/", 1)[-1] }}</code></a> ({{ item.media_type }}){% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% if expression.document %}
+  <p class="bill-meta">Read from {% if expression.document.source_url %}<a href="{{ expression.document.source_url }}" rel="external nofollow">the official document</a>{% else %}a document whose URL was not recorded{% endif %}{% if expression.document.gate %}; fidelity gate P1 <strong>{{ expression.document.gate.status }}</strong>{% if expression.document.gate.coverage %}, accounting for {{ expression.document.gate.coverage }} of its distinct words{% endif %}{% endif %}. Each language is read from its own document, so each has its own provenance.</p>
+  {% endif %}
+</section>
+{% endfor %}
+<p><a href="/bills/{{ bill_slug }}">This document's listing record</a>, with the official links and everything Parliament published about it.</p>
+{% include "corpus_disclaimer.html" %}
+{% endblock %}

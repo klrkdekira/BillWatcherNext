@@ -28,6 +28,7 @@ REQUIRED_KINDS = {
     "document_rollback",
     "document_gone",
     "extraction_failure_spike",
+    "structure_gate_failure_spike",
     "override_conflict",
     "robots_changed",
     "target_stale",

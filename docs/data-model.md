@@ -86,3 +86,66 @@ heuristics wait on assumption A11.
 See ADR-010. In short: transport logs are aggregated then deleted, old extractions are pruned to
 the current version plus one, and document versions, their blobs, record changes, bill events, and
 presence observations are never pruned by any job.
+
+## Structural readings and provision nodes
+
+`document_structures` and `provision_nodes` hold Stage L1's output (HANDOFF 26.3). Three things
+about them are conventions the columns alone do not show.
+
+**A structural reading is not an extraction.** It deliberately does not live in
+`document_extractions`, even though it is derived from the same bytes by a named, versioned
+extractor. Two shipped code paths assume that table has exactly one meaningful writer:
+`persist_current_extraction` demotes every `is_current` row for a version regardless of
+`extractor_name`, and retention keeps two rows per version without partitioning by extractor. Both
+are correct today and become data loss when a second tier writes there. Separate tables avoid the
+question rather than answering it; the answer is owed before the OCR worker lands (`TODO.md` §2.4).
+
+**Both readings are stored, not just the verdict.** Each structure holds the arrangement tree *and*
+the body tree, distinguished by `provision_nodes.source`. Gate L1's verdict is only reviewable if
+what it compared is on the record, and a reviewer's first question is always "what did it think the
+body said?"
+
+**`eid` is present and `wid` is absent, on purpose.** `eid` is the identifier in this reading, built
+by joining ancestors with a double underscore (`part_II__sec_3__subsec_1`). `wId` — the identifier a
+provision carried when first created, which survives renumbering — is *not* stored here because
+nothing in a single document establishes it. Writing `wid = eid` would make a renumbered provision
+look like a new one, which is precisely the failure `wId` exists to prevent. Stage L2 assigns it,
+where a work's expressions are related to one another.
+
+## The audit tree is a projection, not a table
+
+`storage/audit_tree.py` and `jobs/audit_rebuild.py` (HANDOFF 27, ADR-019) write and verify a
+human-legible directory tree under `AUDIT_TREE_ROOT`, scoped today to one document version's raw
+PDF beside a `metadata.json` sidecar per bill it is linked from. Nothing here is a data-model
+concept: no table reads from the tree, and no tree file is ever parsed back into a row. It exists
+only so a person with a file browser and no database access can audit what was downloaded, from
+where, and when.
+
+Two things worth knowing before touching either file:
+
+- **A version's tree artifact can go stale.** `process_one_document` writes only the version it
+  just downloaded; when a second version supersedes the first, the first version's sidecar keeps
+  saying `is_current: true` until something re-derives it. This is not a bug to fix in the live
+  write path — `verify_documents` is *supposed* to catch it, and `audit-rebuild` is the fix. The
+  live path staying cheap and the projection staying honest are two different jobs, on purpose.
+- **`verify_documents` proves itself by rebuilding into a scratch directory and diffing**, rather
+  than re-deriving each expected sidecar inline and trusting the two code paths agree. Any future
+  change to the sidecar contract only has to be correct in `rebuild_documents`; `verify_documents`
+  inherits it for free.
+
+`billwatcher.jobs.mineru_extract` (HANDOFF 27.7, ADR-020) uses the same tree machinery for a
+second, independently versioned reading — a hosted MinerU vision-language model's markdown output
+— under `04-text/.../mineru@<version>/`. It has no database presence at all, not even its own
+table: eligibility is decided by whether `document.md` already exists on disk, which is possible
+only because this reading needs nothing from the database except the document version's bytes and
+its bill links. `document_extractions` remains untouched; a second writer there would silently
+demote the native `pypdf` extraction's `is_current` row (TODO 2.4).
+
+`is_current` on a structure means "this reading may be built on", which is narrower than "this is
+the newest reading". A reading that fails Gate L1 is stored, is never current, and does **not**
+demote a reading that passed — otherwise a parser regression would silently withdraw a good tree
+from everything downstream.
+
+Neither table is touched by any retention job. They are derived and rebuildable from stored bytes
+by `make restructure`, so they are prunable in principle; nothing prunes them yet, and a growth
+policy is owed once the corpus-wide run has actually been measured.

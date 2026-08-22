@@ -152,3 +152,18 @@ def test_language_filter_is_applied_not_merely_validated() -> None:
         assert english.status_code == 200
         assert "D.R.15/2026" not in english.text
         assert "No bills match these filters" in english.text
+
+
+def test_status_shows_gate_l1_standing_and_says_so_when_nothing_has_been_read() -> None:
+    """Stage L1 has to be visible to an operator, or it is a pipeline nobody can supervise."""
+    with client() as browser:
+        status = browser.get("/status")
+        assert status.status_code == 200
+        assert "Structural readings (Gate L1)" in status.text
+        # Nothing is read in the fixture corpus, and an empty state must say that rather than
+        # report a flattering 100% pass rate over zero documents.
+        assert "No document has been read for structure yet" in status.text
+        assert "100.0%" not in status.text
+        # The versions that produced those rows are named, as every derived artifact's are.
+        assert "layout extractor" in status.text
+        assert "structure" in status.text

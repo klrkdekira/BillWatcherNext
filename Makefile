@@ -13,7 +13,7 @@ BLOB_BACKUP_DEST ?=
 RESTORE_PATH ?=
 BLOB_RESTORE_PATH ?=
 
-.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full scrape-archive status anomalies resolve-anomaly acknowledge-anomaly doctor reparse reextract rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs
+.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full scrape-archive fetch-documents verify-audit audit-rebuild status completeness anomalies resolve-anomaly acknowledge-anomaly doctor reparse reextract mineru-extract restructure rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs pipeline-fetch-listings pipeline-parse-listings pipeline-fetch-documents pipeline-import-markdown pipeline-convert-to-akn pipeline-generate-semantic pipeline-verify
 
 help: ## Show available targets
 	@echo "Start here:  make quickstart   (env + database + migrations + fixture data + server)"
@@ -106,6 +106,38 @@ scrape-full: ## Explicitly run one approved live full crawl, archive included
 scrape-archive: ## Explicitly run one approved live archive-only crawl; ARGS=--archive-years=N
 	$(UV) run billwatcher scrape --archive --approve-live $(ARGS)
 
+fetch-documents: ## Step S3 (HANDOFF 27): drain the document queue into the audit tree; live, needs --approve-live
+	$(UV) run billwatcher fetch-documents --approve-live $(ARGS)
+
+verify-audit: ## Re-hash the audit tree against the database; non-zero on divergence (HANDOFF 27.4)
+	$(UV) run billwatcher verify-audit
+
+# --- File-first pipeline: no database, no object store (PipelineStore/FileStore) ---
+
+pipeline-fetch-listings: ## File-first step 1: fetch listings to PIPELINE_DATA_ROOT; live, needs --approve-live; ARGS=--archive-years=N
+	$(UV) run billwatcher pipeline fetch-listings --approve-live $(ARGS)
+
+pipeline-parse-listings: ## File-first step 2: offline, parse stored listings into bills/*/bill.json
+	$(UV) run billwatcher pipeline parse-listings
+
+pipeline-fetch-documents: ## File-first step 3: download document PDFs found in bills/*/bill.json; live, needs --approve-live
+	$(UV) run billwatcher pipeline fetch-documents --approve-live $(ARGS)
+
+pipeline-import-markdown: ## File-first step 4: record markdown produced elsewhere; SRC=path LANG=ms TOOL=name
+	$(UV) run billwatcher pipeline import-markdown --source "$(SRC)" --language "$(LANG)" --tool "$(TOOL)" $(ARGS)
+
+pipeline-convert-to-akn: ## File-first step 5: vLLM-assisted markdown -> Akoma Ntoso XML; needs AKN_LLM_ENABLED=true
+	$(UV) run billwatcher pipeline convert-to-akn
+
+pipeline-generate-semantic: ## File-first step 6: offline, Akoma Ntoso -> ELI JSON-LD + RDF N-Quads
+	$(UV) run billwatcher pipeline generate-semantic
+
+pipeline-verify: ## Re-hash the file-first corpus against its sidecars, provenance and gate verdicts; ARGS=--strict
+	$(UV) run billwatcher pipeline verify $(ARGS)
+
+audit-rebuild: ## Regenerate the audit tree from the database and blob store; byte-identical if already correct
+	$(UV) run billwatcher audit-rebuild
+
 anomalies: ## List unresolved anomalies with their ids; ARGS=--severity=critical
 	$(UV) run billwatcher anomalies $(ARGS)
 
@@ -118,6 +150,9 @@ acknowledge-anomaly: ## Stop a reviewed critical anomaly failing doctor: ID= BY=
 status: ## Print runtime coverage, queue, run, and pipeline status
 	$(UV) run billwatcher status
 
+completeness: ## Report candidate bill-numbering gaps in closed archive years (heuristic, not a gate)
+	$(UV) run billwatcher completeness
+
 doctor: ## Fail on critical anomalies or invariant/storage failures
 	$(UV) run billwatcher doctor
 
@@ -126,6 +161,12 @@ reparse: ## Dry-run snapshot replay; pass ARGS=--apply to mutate
 
 reextract: ## Dry-run extraction backfill; pass ARGS=--apply to mutate
 	$(UV) run billwatcher reextract $(ARGS)
+
+mineru-extract: ## Dry-run MinerU markdown reading, written to data/04-text/; ARGS=--apply; needs MINERU_ENABLED=true
+	$(UV) run billwatcher mineru-extract $(ARGS)
+
+restructure: ## Dry-run structural parse of stored documents (Gate L1); ARGS=--apply
+	$(UV) run billwatcher restructure $(ARGS)
 
 rechunk: ## Dry-run chunk rebuild at the current chunker version; ARGS=--apply
 	$(UV) run billwatcher rechunk $(ARGS)

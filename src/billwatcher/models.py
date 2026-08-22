@@ -492,3 +492,73 @@ class ChunkEmbedding(Base):
     embedding: Mapped[list[float]] = mapped_column(EmbeddingVector(EMBEDDING_DIMENSION))
     embedding_pipeline_version: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentStructure(Base):
+    """One structural reading of one document version, with its Gate L1 outcome (HANDOFF 26.3).
+
+    Additive, exactly like `document_extractions`: a newer structure parser writes a new row and
+    supersedes the old one rather than overwriting it, so a parser fix can be replayed from
+    stored bytes and the previous reading stays inspectable.
+    """
+
+    __tablename__ = "document_structures"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id", "extractor_name", "extractor_version", "structure_version"
+        ),
+        Index("ix_document_structures_gate", "gate_status", "is_current"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    document_version_id: Mapped[str] = mapped_column(ForeignKey("document_versions.id"))
+    extractor_name: Mapped[str] = mapped_column(String(64))
+    extractor_version: Mapped[str] = mapped_column(String(32))
+    structure_version: Mapped[str] = mapped_column(String(32))
+    # `section` for an Act, `clause` for a bill. A clause becomes a section on enactment, and
+    # recording which was read is what keeps that a rename rather than a reparse.
+    unit: Mapped[str] = mapped_column(String(16))
+    language: Mapped[str | None] = mapped_column(String(16))
+    gate_status: Mapped[str] = mapped_column(String(24))
+    arrangement_count: Mapped[int] = mapped_column(Integer, default=0)
+    body_count: Mapped[int] = mapped_column(Integer, default=0)
+    difference_count: Mapped[int] = mapped_column(Integer, default=0)
+    blocking_count: Mapped[int] = mapped_column(Integer, default=0)
+    detail_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ProvisionNode(Base):
+    """One provision as read from one document region (HANDOFF 26.2).
+
+    Both regions are stored — the Arrangement of Sections and the body — because Gate L1's
+    verdict is only reviewable if the two readings it compared are both on the record.
+
+    `eid` is the identifier in *this* reading. `wid`, the identifier the provision carried when
+    it was first created, is deliberately absent: nothing in a single document establishes it,
+    and Stage 2 assigns it when a work's expressions are related to one another. Storing a
+    guess here would make a renumbering look like a new provision.
+    """
+
+    __tablename__ = "provision_nodes"
+    __table_args__ = (
+        UniqueConstraint("structure_id", "source", "eid"),
+        Index("ix_provision_nodes_structure", "structure_id", "source", "ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    structure_id: Mapped[str] = mapped_column(ForeignKey("document_structures.id"))
+    # `arrangement` or `body`.
+    source: Mapped[str] = mapped_column(String(16))
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("provision_nodes.id"))
+    node_type: Mapped[str] = mapped_column(String(24))
+    num: Mapped[str] = mapped_column(String(16))
+    heading: Mapped[str | None] = mapped_column(Text)
+    eid: Mapped[str] = mapped_column(Text)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    page_from: Mapped[int | None] = mapped_column(Integer)

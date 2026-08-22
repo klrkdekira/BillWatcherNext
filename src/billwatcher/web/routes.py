@@ -30,6 +30,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 
 from billwatcher.config import Settings, get_settings
 from billwatcher.domain.vocabulary import CHAMBERS, NORMALIZED_STATUSES
+from billwatcher.legislation.persistence import structure_summary
 from billwatcher.models import (
     Anomaly,
     Bill,
@@ -733,6 +734,7 @@ def status_context(session: Session) -> dict[str, Any]:
         "runs": session.scalars(
             select(ScrapeRun).order_by(ScrapeRun.started_at.desc()).limit(10)
         ).all(),
+        "structures": structure_summary(session),
         "versions": pipeline_versions(),
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         # Overridden to False by the first server-rendered page, which is not streaming yet.

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "corpus_tree.html" import provisions as provision_tree %}
+{% block title %}{{ identifier }} ({{ language_label }}) — {{ site_name }}{% endblock %}
+{#
+  The alternates are the same tuple the `Link` header carries, rendered a second time for a browser
+  that reads the head rather than the headers (ADR-018). No canonical link to Parliament's PDF here:
+  the header states which document is authoritative, and this page is our own derived work.
+#}
+{% block head %}{% for item in alternates %}<link rel="alternate" type="{{ item.media_type }}" href="{{ item.href }}">{% endfor %}{% endblock %}
+{% block content %}
+<h1>{{ identifier }}{% if title %} — <span lang="{{ title.language }}">{{ title.text }}</span>{% endif %}</h1>
+<dl>
+  <dt>Expression identifier</dt><dd><code>{{ expression_uri }}</code> ({{ language_label }})</dd>
+  <dt>Work identifier</dt><dd><a href="{{ work_uri }}"><code>{{ work_uri }}</code></a></dd>
+</dl>
+<p class="bill-meta">Also available as {% for item in alternates %}<a href="{{ item.href }}" rel="nofollow"><code>{{ item.href.rsplit("/", 1)[-1] }}</code></a> ({{ item.media_type }}){% if not loop.last %}, {% endif %}{% endfor %}.</p>
+<h2>Provisions</h2>
+{% if provisions %}{{ provision_tree(provisions, language) }}{% else %}<p class="empty">This reading contains no numbered provisions.</p>{% endif %}
+<p><a href="/bills/{{ bill_slug }}">This document's listing record</a>, with the official links and everything Parliament published about it.</p>
+{% include "corpus_disclaimer.html" %}
+{% endblock %}

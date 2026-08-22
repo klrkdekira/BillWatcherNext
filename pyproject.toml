@@ -9,15 +9,20 @@ dependencies = [
   "fastapi>=0.115",
   "httpx>=0.27",
   "jinja2>=3.1",
+  "mineru-vl-utils>=1.2.1",
+  "pdfminer.six>=20240706",
   "pgvector>=0.5.0",
   "psycopg[binary]>=3.2",
   "pydantic-settings>=2.5",
   "pypdf>=5.0",
+  "pypdfium2>=5.13.0",
   "python-multipart>=0.0.12",
+  "rdflib>=7.1",
   "sqlalchemy>=2.0",
   "structlog>=24.4",
   "typer>=0.12",
   "uvicorn[standard]>=0.30",
+  "xmlschema>=4.1",
 ]
 
 [project.scripts]
@@ -54,6 +59,10 @@ plugins = ["pydantic.mypy"]
 module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["mineru_vl_utils", "mineru_vl_utils.*", "pypdfium2", "pypdfium2.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -m 'not live'"
@@ -63,3 +72,6 @@ markers = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/billwatcher/web/routes.py" = ["B008"]
+# `typer.Option(...)` in a default is how Typer declares a CLI option; B008 is about mutable
+# defaults, which these are not.
+"src/billwatcher/pipeline/cli.py" = ["B008"]

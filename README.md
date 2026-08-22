@@ -93,6 +93,7 @@ in [`docs/status.md`](docs/status.md).
 | `anomalies` / `resolve-anomaly` / `acknowledge-anomaly` | The `doctor` work list, and the two ways to close an item with a name and a reason attached |
 | `fixtures-refresh` | Regenerate the committed fixtures from stored snapshots, offline |
 | `reparse` / `reextract` | Replay stored bytes at a newer parser or extractor; dry run by default |
+| `restructure` | Read structure from stored bytes and record each document's Gate L1 verdict |
 | `retention` | Roll transport logs into daily counters and prune old extractions; never deletes archive data |
 | `verify-storage` / `prune-blobs` | Check every blob reference; delete only unreferenced bytes |
 | `backup` / `backup-blobs` / `restore` / `restore-blobs` | Guarded database and blob-store operations |
@@ -237,6 +238,55 @@ withheld — and each response carries the content hash as an `ETag`, an immutab
 a canonical `Link` to the official URL, and `X-Robots-Tag: noindex`, because our copy is a
 preservation artifact rather than the authoritative record.
 
+### Serving the legislation corpus
+
+A second pipeline reads each bill's structure and publishes it as Akoma Ntoso XML, ELI JSON-LD and
+RDF N-Quads on permanent, truncatable identifiers — a Work, one Expression per language, one
+Manifestation per format, and a dereferenceable IRI for every provision:
+
+```text
+/akn/my/bill/dr/2026/15                        the bill, in any language
+/akn/my/bill/dr/2026/15/msa@                   the Malay reading;  …/eng@ is the English one
+/akn/my/bill/dr/2026/15/msa@.xml               .jsonld and .nq are the other formats
+/akn/my/bill/dr/2026/15/msa@/~cl_5__subsec_1   one provision of it
+```
+
+**It is off by default and every one of those paths returns 404** (`SERVE_LEGISLATION_CORPUS`), and
+even when it is on, **what is published is structure only**: the FRBR identifiers, the provision
+numbering, the headings, and the graph of what contains what. Every provision's body text is removed
+at the serving boundary — the store holds it, the response does not — because republishing the
+drafter's words is the same rights question that keeps stored PDFs private (`ADR-004`, assumption
+A14). Publishing text is a separate flag with a separate confirmation, deliberately: gating the
+lower-risk artifact while leaving the higher-risk one open would be backwards (`ADR-018`, `ADR-027`).
+
+Provision **headings** are published in structure-only mode. That is a recorded judgement, not an
+oversight: a heading is the same kind of short fragment as a bill's title, which this site already
+publishes everywhere. One constant (`redact.KEEP_HEADINGS`) reverses it if a rights review says so.
+
+"Short" is enforced rather than assumed, and it took a review to notice that it wasn't. Amendment
+bills often print no heading at all and run the whole provision in after its number, so without a
+bound the "heading" was the provision — published in full, in every format, at default settings.
+Two independent layers now apply the same test, one where the tree is parsed and one where the
+response is built, and a provision printed without its own heading is shown without one rather than
+with the first eighty characters of its text.
+
+Turning it on, in order:
+
+1. Build the corpus: `make pipeline-fetch-listings`, `pipeline-parse-listings`,
+   `pipeline-fetch-documents`, then `billwatcher pipeline import-markdown` per document,
+   `make pipeline-convert-to-akn` and `make pipeline-generate-semantic`.
+2. Check it: `billwatcher pipeline verify` — every artifact re-hashed against the record of what it
+   was built from, with nothing unexplained in the store.
+3. Record the rights decision in the `docs/status.md` gate log, then set
+   `SERVE_LEGISLATION_CORPUS=true` **and** `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true`. Production
+   refuses to start with the first without the second.
+4. Only for full text, and only after the A14 review: `LEGISLATION_PUBLICATION_MODE=full`, which
+   additionally requires `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true`.
+
+Nothing has been built from real data yet. No listing or document has been fetched into the
+pipeline's store, so the corpus is proven against constructed fixtures and one end-to-end run, and
+the fidelity gate's pass rate over Parliament's real typesetting is unmeasured.
+
 ## Frontend
 
 Server-rendered HTML with a small amount of progressive enhancement. **Every page is complete
@@ -281,15 +331,64 @@ against the real model, and the result must be recorded in `docs/status.md`.
 
 ---
 
+## Reading the documents themselves
+
+Everything above indexes what Parliament *published about* a bill. A separate pipeline reads what
+those documents *say*: a layout-aware structural reading of each stored PDF, validated against the
+Arrangement of Sections the document carries on its own contents page.
+
+That check — Gate L1 — is the point. Malaysian legislative typography puts structure in position:
+section numbers hang at the left margin and **a marginal note sits in the right margin on the same
+baseline as the provision it annotates**, so a reader that joins a baseline into one line splices
+an annotation into the middle of the legal text and produces something that still looks
+well-formed. Reading geometry rather than characters is what avoids that, and comparing the parsed
+body against the drafter's own table of contents is what proves it worked. A dropped page, a failed
+extraction, or a mis-detected hierarchy shows up as a difference between two independent readings
+of one document.
+
+```bash
+make restructure            # dry run over stored bytes; ARGS=--apply to write
+```
+
+A reading that fails the gate is **stored and never promoted** — it is a review item, not a
+discard — and a newer parser that fails cannot withdraw a reading that passed. Scans are recorded
+as `no_text` rather than quietly filed as "no contents page", because the 22 documents with no
+extractable text are the ones most likely to be wrong.
+
+**This is Stage 1 of a larger specification.** HANDOFF §26 specifies the rest — Akoma Ntoso 3.0,
+amendment extraction, point-in-time consolidation, and an ELI linked-data graph. The Akoma Ntoso and
+ELI half of it now exists for **bills**, in a second, file-only pipeline that keeps its whole record
+in a directory tree rather than the database (HANDOFF §28) and whose output is what "Serving the
+legislation corpus" above describes. Amendment extraction and consolidation remain unstarted, and
+§26.7 records why: Acts and the AGC reprints that would validate a consolidation live on a host this
+project has never contacted, and publishing consolidated law asserts what the law *is*, which needs
+legal sign-off rather than only a rights answer. Nothing consolidated is served, and the gate for it
+is deliberately higher than the one for mirroring bytes.
+
+```bash
+make pipeline-convert-to-akn      # markdown -> Akoma Ntoso, behind a fidelity gate
+make pipeline-generate-semantic   # Akoma Ntoso -> ELI JSON-LD + RDF N-Quads, offline
+```
+
+Structure here is read with a language model, because an Arrangement of Clauses entry is textually
+identical to the provision it lists and markdown carries no page geometry to separate them. That is
+also why nothing it produces is published unchecked: a deterministic gate asks whether the tree
+accounts for the words that were on the page — every provision numbered, numbered once, in sequence
+— and a reading that cannot is kept for review rather than promoted or discarded.
+
 ## Project state
 
 `HANDOFF.md` is the normative specification; every "must" in it is a release gate.
 `docs/status.md` is the live ledger of what is done, what is blocked, and what evidence exists.
 
 Releases 1 and 2 are implemented and covered by automated tests. Release 3 is implemented and
-feature-flagged off pending model decisions. Still open, and not resolvable in code: approval for
-a live crawl, external HTTPS verification from another network, the document republication rights
-review, and the dependency and container vulnerability reviews.
+feature-flagged off pending model decisions. Release 4 (§26) is implemented as far as Stage L1 and
+is proven against constructed fixtures only — the corpus-wide pass rate is not yet measured. The
+file-first pipeline (§28) is implemented end to end and has never been run against real data: its
+store is empty, so its gate's pass rate is unmeasured too, and its publication surface is off.
+Still open, and not resolvable in code: approval for a live crawl, external HTTPS verification from
+another network, the document and corpus republication rights reviews, and the dependency and
+container vulnerability reviews.
 
 ## Documentation
 

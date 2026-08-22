@@ -78,3 +78,52 @@ def test_the_crawler_can_reach_the_internet() -> None:
     worker = COMPOSE[COMPOSE.index("  worker:") :]
     worker = worker[: worker.index("\nnetworks:")]
     assert "egress" in worker, "the worker crawls Parliament and needs outbound access"
+
+
+def test_the_shipped_template_cannot_drift_into_an_on_by_default_corpus() -> None:
+    """A mirrored corpus cannot be withdrawn (ADR-018), so the shipped default is the decision.
+
+    The validator in `config.py` catches an operator who enables serving without the rights
+    confirmation. It cannot catch a template that hands them a configuration already enabling it,
+    because they would then have both — which is why this is asserted against the file itself.
+    """
+    assert documented("SERVE_LEGISLATION_CORPUS") == "false"
+    assert documented("LEGISLATION_PUBLICATION_MODE") == "metadata"
+    assert documented("LEGISLATION_CORPUS_RIGHTS_CONFIRMED") == "false"
+
+
+def test_the_app_can_read_the_pipeline_store_it_is_configured_to_serve() -> None:
+    """`PIPELINE_DATA_ROOT` is the corpus's only copy; without a mount the app serves nothing.
+
+    Nothing in the test suite would notice: every pipeline test builds its store under `tmp_path`.
+    The container is `read_only: true`, so an unmounted path is not even a directory the app could
+    fall back to creating — the corpus routes would answer 404 for a corpus that exists on disk.
+    """
+    app = COMPOSE[COMPOSE.index("  app:") : COMPOSE.index("  worker:")]
+    root = documented("PIPELINE_DATA_ROOT")
+    assert root, ".env.example must document where the pipeline store lives"
+    # Read-only, because the app serves the corpus (ADR-018) and never writes it: a writable mount
+    # would let a request path reach the one store in the stack that nothing can rebuild.
+    assert f"pipeline_data:{root}:ro" in app, "the app must mount the pipeline store, read-only"
+    # Declared as a named volume, or compose refuses to start the stack at all.
+    assert re.search(r"^volumes:$.*^  pipeline_data:$", COMPOSE, re.M | re.S)
+
+
+def test_the_vendored_akn_schemas_ship_inside_the_package() -> None:
+    """The runtime stage copies only the virtualenv, so anything outside `src/billwatcher` is gone.
+
+    `pipeline.akn_schema` validates every emitted document against these files and raises when it
+    cannot. Kept vendored rather than fetched: validation must not depend on an OASIS host being up,
+    and the digests in the README are what makes "schema-valid" mean a specific schema.
+    """
+    schemas = Path("src/billwatcher/pipeline/schemas")
+    assert (schemas / "akomantoso30.xsd").is_file()
+    # akomantoso30.xsd imports the XML namespace schema; without it the build fails at import time.
+    assert (schemas / "xml.xsd").is_file()
+    assert (schemas / "README.md").is_file(), "a vendored copy needs its provenance and digests"
+
+    packaged = PYPROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+    assert packaged == ["src/billwatcher"]
+    # The runtime image installs the wheel and copies nothing else from the source tree.
+    assert "COPY --from=builder" in DOCKERFILE
+    assert not re.search(r"^COPY[^\n]*\bsrc\b", DOCKERFILE[DOCKERFILE.index("AS runtime") :], re.M)

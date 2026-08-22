@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     contact_email: str = "operator@example.org"
     database_url: str = "postgresql+psycopg://billwatcher:billwatcher@localhost/billwatcher"
     blob_storage_root: Path = Path("var/blobs")
+    # The human-legible audit tree (HANDOFF 27): a derived, rebuildable projection of the
+    # database and blob store, never a second source of truth. Safe to delete; `audit-rebuild`
+    # regenerates it. Belongs to the Postgres-backed pipeline, currently dormant.
+    audit_tree_root: Path = Path("data")
+    # Where the file-first pipeline (`billwatcher.pipeline`) keeps its own state: listings,
+    # bills, and documents, as plain files. This *is* the record for that pipeline today, not a
+    # projection of anything else — a database/object-store backend is a later, additive
+    # extension behind the same `PipelineStore` interface, not a replacement for these files.
+    pipeline_data_root: Path = Path("pipeline-data")
     # `filesystem` writes files directly; `s3` talks to any S3-compatible service, which in this
     # deployment is VersityGW over the same archive volume (ADR-013).
     blob_storage_backend: Literal["filesystem", "s3"] = "filesystem"
@@ -84,6 +93,58 @@ class Settings(BaseSettings):
     rag_max_question_chars: int = Field(default=500, ge=1)
     rag_min_retrieval_score: float = Field(default=0.05, ge=0.0)
     rag_timeout_seconds: float = Field(default=30.0, gt=0)
+    # A second, independently versioned reading of stored PDFs via a hosted MinerU
+    # vision-language model (HANDOFF 27.7, ADR-020). Off by default: sending official document
+    # images to a third-party endpoint is a data-handling decision, not a default.
+    mineru_enabled: bool = False
+    mineru_base_url: str = ""
+    # Empty defers to the server's single served model, checked once at client construction.
+    mineru_model_name: str = ""
+    mineru_api_key: str = ""
+    mineru_render_dpi: int = Field(default=150, ge=72, le=400)
+    mineru_timeout_seconds: float = Field(default=120.0, gt=0)
+    # The file-first pipeline's Akoma Ntoso conversion step (HANDOFF 28) reads a document's
+    # provision structure with the help of an OpenAI-compatible vLLM endpoint, at the operator's
+    # direction, rather than by regex alone. A separate setting from RAG_*/MINERU_*: a different
+    # endpoint, for a different pipeline that does not touch the Postgres-backed one.
+    akn_llm_enabled: bool = False
+    akn_llm_base_url: str = ""
+    akn_llm_model_id: str = ""
+    akn_llm_api_key: str = ""
+    akn_llm_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Gate P1's one statistical threshold: the fraction of the source markdown's distinct words
+    # that must appear somewhere in the provision tree read out of it. Configurable rather than
+    # hard-coded because the real corpus is unmeasured (A15) — exact where exactness is defensible,
+    # configurable where it is a judgement.
+    akn_gate_min_text_coverage: float = Field(default=0.95, ge=0.0, le=1.0)
+    # The file-first pipeline's corpus — Akoma Ntoso XML, ELI JSON-LD, N-Quads — served on
+    # truncatable ELI paths by this application rather than built into a static tree (ADR-018).
+    # Off by default and, in production, refused without an explicit rights confirmation: a
+    # mirrored corpus cannot be withdrawn, so the control is at least as hard as the one guarding
+    # the lower-risk archived bytes.
+    serve_legislation_corpus: bool = False
+    # `metadata` publishes structure only — FRBR IRIs, provision numbers, headings, and the
+    # relationships between them — republishing none of the source document's body text, which is
+    # what makes it publishable while A14 is open. `full` adds the text and is a separate,
+    # separately confirmed rights decision. An enumeration rather than a boolean so the safe value
+    # is the default rather than the negation of a flag.
+    legislation_publication_mode: Literal["metadata", "full"] = "metadata"
+    # ADR-018 asks for the same hard control SERVE_ARCHIVED_DOCUMENTS has. A separate field from
+    # ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED on purpose: TODO 1.7 records that publishing a reading of
+    # the law is a higher bar than republishing stored bytes and must not be folded into A14.
+    legislation_corpus_rights_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def require_mineru_configuration(self) -> "Settings":
+        if self.mineru_enabled and not self.mineru_base_url:
+            raise ValueError("MINERU_ENABLED requires MINERU_BASE_URL")
+        return self
+
+    @model_validator(mode="after")
+    def require_akn_llm_configuration(self) -> "Settings":
+        if self.akn_llm_enabled and not (self.akn_llm_base_url and self.akn_llm_model_id):
+            raise ValueError("AKN_LLM_ENABLED requires AKN_LLM_BASE_URL and AKN_LLM_MODEL_ID")
+        return self
 
     @model_validator(mode="after")
     def reject_production_placeholders(self) -> "Settings":
@@ -108,6 +169,27 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def require_the_rights_review_before_publishing_the_legislation_corpus(self) -> "Settings":
+        if self.serve_legislation_corpus and self.environment == "production":
+            if not self.legislation_corpus_rights_confirmed:
+                raise ValueError(
+                    "SERVE_LEGISLATION_CORPUS=true in production requires "
+                    "LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true, asserting that the rights review "
+                    "has concluded and been recorded in the manual gate log; see ADR-018 and "
+                    "ADR-004"
+                )
+            if self.legislation_publication_mode == "full" and (
+                not self.archived_document_rights_confirmed
+            ):
+                raise ValueError(
+                    "LEGISLATION_PUBLICATION_MODE=full in production requires "
+                    "ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true: publishing provision text "
+                    "republishes the source document's own words, which is the A14 question; "
+                    "see ADR-004 and ADR-018"
+                )
+        return self
+
+    @model_validator(mode="after")
     def require_s3_configuration(self) -> "Settings":
         if self.blob_storage_backend == "s3" and not (
             self.s3_endpoint_url and self.s3_access_key_id and self.s3_secret_access_key
@@ -117,6 +199,35 @@ class Settings(BaseSettings):
                 "and S3_SECRET_ACCESS_KEY"
             )
         return self
+
+    @field_validator("public_base_url", mode="before")
+    @classmethod
+    def strip_the_trailing_slash_from_the_public_base(cls, value: object) -> object:
+        """`PUBLIC_BASE_URL=https://host/` must not mint `https://host//akn/...`.
+
+        This setting is the base of every published FRBR IRI (ADR-018, ADR-023). A trailing slash
+        produced an IRI with a doubled separator that does not dereference to the path the
+        application actually serves — and unlike a broken page, a published N-Quads file cannot be
+        recalled. Normalising here fixes it once for every consumer instead of at each call site.
+        """
+        if isinstance(value, str):
+            return value.rstrip("/")
+        return value
+
+    @field_validator("upstream_ca_bundle", mode="before")
+    @classmethod
+    def treat_an_empty_variable_as_unset(cls, value: object) -> object:
+        """`UPSTREAM_CA_BUNDLE=` means "no bundle", not "a bundle at the empty path".
+
+        `.env.development` ships the variable empty, because it names a decision an operator has
+        to make rather than a default. Without this, pydantic reads the empty string as `Path("")`
+        — which normalises to `.` — and `reject_unreadable_ca_bundle` then refuses to load *any*
+        configuration, so `make env` produced a `.env` that broke every command after it,
+        `make quickstart` included.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def reject_unreadable_ca_bundle(self) -> "Settings":
@@ -136,11 +247,7 @@ class Settings(BaseSettings):
             raise ValueError("RAG_ENABLED requires SEMANTIC_SEARCH_ENABLED")
         if self.rag_enabled and not (self.rag_provider and self.rag_model_id):
             raise ValueError("RAG_ENABLED requires RAG_PROVIDER and RAG_MODEL_ID")
-        if (
-            self.rag_enabled
-            and self.rag_provider == "openai_compatible"
-            and not self.rag_base_url
-        ):
+        if self.rag_enabled and self.rag_provider == "openai_compatible" and not self.rag_base_url:
             raise ValueError("RAG_PROVIDER=openai_compatible requires RAG_BASE_URL")
         if self.environment == "production" and self.embedding_provider == "deterministic":
             raise ValueError("the deterministic embedding provider is for development only")

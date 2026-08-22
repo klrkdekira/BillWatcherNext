@@ -4,6 +4,14 @@ The vector width here is a schema decision. A model whose dimension differs need
 migration plus a recorded `reembed` backfill; dimensions are never silently mixed (HANDOFF 8).
 The HNSW index is deliberately not created here — HANDOFF 12.3 builds it only once
 representative data exists, through `billwatcher semantic-index`.
+
+Every foreign-key column below states its type explicitly. `sa.Column("x", sa.ForeignKey(...))`
+alone compiles to `NullType` inside a migration — Alembic builds each table in its own metadata,
+so there is no referenced column to infer from — which raises `CompileError` at upgrade time. It
+went uncaught here because migration 0001 runs `Base.metadata.create_all()`, so a fresh database
+already has these tables and this body only ever runs against one that reached 0002 first
+(`docs/status.md`, 2026-08-19 gate log; see migration 0004 for the same defect, found and fixed
+first).
 """
 
 from collections.abc import Sequence
@@ -26,7 +34,12 @@ def upgrade() -> None:
         op.create_table(
             "document_chunks",
             sa.Column("id", sa.String(36), primary_key=True),
-            sa.Column("extraction_id", sa.ForeignKey("document_extractions.id"), nullable=False),
+            sa.Column(
+                "extraction_id",
+                sa.String(36),
+                sa.ForeignKey("document_extractions.id"),
+                nullable=False,
+            ),
             sa.Column("chunker_version", sa.String(32), nullable=False),
             sa.Column("chunk_index", sa.Integer(), nullable=False),
             sa.Column("heading", sa.Text(), nullable=True),
@@ -54,7 +67,7 @@ def upgrade() -> None:
     op.create_table(
         "chunk_embeddings",
         sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("chunk_id", sa.ForeignKey("document_chunks.id"), nullable=False),
+        sa.Column("chunk_id", sa.String(36), sa.ForeignKey("document_chunks.id"), nullable=False),
         sa.Column("embedding_model_id", sa.String(128), nullable=False),
         sa.Column("model_dimension", sa.Integer(), nullable=False),
         embedding_column,

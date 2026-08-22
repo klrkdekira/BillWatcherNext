@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from billwatcher.models import Anomaly, Blob, CoverageTarget, DocumentVersion
+from billwatcher.models import Anomaly, Bill, Blob, CoverageTarget, DocumentVersion
 from billwatcher.storage.blobs import BlobStore
 
 
@@ -135,6 +135,63 @@ def _open_staleness(session: Session, target: CoverageTarget) -> Anomaly | None:
             Anomaly.resolved_at.is_(None),
         )
     )
+
+
+@dataclass(frozen=True, slots=True)
+class IdentifierGap:
+    """A candidate hole in one chamber's bill numbering for one year.
+
+    "Candidate" is the operative word: nothing in the assumption register (HANDOFF 4) claims
+    Parliament numbers bills with no gaps at all, so this is a signal for a human to check
+    against the archive, never an enforced completeness gate.
+    """
+
+    chamber: str
+    year: int
+    missing_numbers: list[int]
+    lowest: int
+    highest: int
+
+
+def find_bill_number_gaps(session: Session) -> list[IdentifierGap]:
+    """Candidate gaps in a chamber-year's bill numbering, restricted to closed archive years.
+
+    A year is only checked once its archive coverage target reports `expected_interval_hours ==
+    0` (HANDOFF 10.4's "closed" state): that is the one signal already in this system meaning
+    "this year's listing has been read in full and cannot change," so a hole found there is
+    worth a human's attention. The current year and any year that has never finished a full
+    archive read are still growing, and a "gap" in an incomplete read is just a bill nobody has
+    fetched yet — reporting it as a defect would be exactly the guessing HANDOFF 4 forbids.
+    """
+    closed_years: set[int] = set()
+    for scope_key in session.scalars(
+        select(CoverageTarget.scope_key).where(
+            CoverageTarget.listing_kind == "archive",
+            CoverageTarget.expected_interval_hours == 0,
+        )
+    ):
+        if scope_key.isdigit():
+            closed_years.add(int(scope_key))
+    if not closed_years:
+        return []
+
+    by_group: dict[tuple[str, int], set[int]] = {}
+    for chamber, year, number in session.execute(
+        select(Bill.originating_chamber, Bill.year, Bill.number).where(
+            Bill.year.in_(closed_years),
+            Bill.number.is_not(None),
+            Bill.originating_chamber.is_not(None),
+        )
+    ).all():
+        by_group.setdefault((chamber, year), set()).add(number)
+
+    gaps: list[IdentifierGap] = []
+    for (chamber, year), numbers in sorted(by_group.items()):
+        lowest, highest = min(numbers), max(numbers)
+        missing = sorted(set(range(lowest, highest + 1)) - numbers)
+        if missing:
+            gaps.append(IdentifierGap(chamber, year, missing, lowest, highest))
+    return gaps
 
 
 def diagnose(session: Session, *, blob_store: BlobStore) -> list[str]:

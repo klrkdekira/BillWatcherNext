@@ -14,3 +14,14 @@ backups/
 
 # Staging output of `make fixtures-refresh`; a regenerated fixture is committed only after review.
 tests/fixtures/parliament/regenerated/
+
+# Audit tree (HANDOFF 27): a derived, rebuildable projection of the database and blob store.
+# Belongs to the Postgres-backed pipeline, currently dormant.
+data/
+
+# The file-first pipeline's own state (billwatcher.pipeline): listings, bills, and documents,
+# as plain files. This *is* the record for that pipeline, not a derived projection.
+pipeline-data/
+
+# pi goal/loop tooling state
+.pi-glla/

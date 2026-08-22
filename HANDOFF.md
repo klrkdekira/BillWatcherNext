@@ -1,6 +1,6 @@
 # BillWatcherNext implementation handoff
 
-Document version: 1.3 — 2026-08-18 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
+Document version: 1.12 — 2026-08-22 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
 Status: implementation-ready specification  
 Repository state at handoff: no application code and no commits; `HANDOFF.md`, `README.md`, `main.py`, `pyproject.toml`, and `.python-version` exist as an unbuilt `uv init` skeleton.
 
@@ -82,6 +82,24 @@ Release 1 is done only when all of the following are true:
 - When evidence is absent or retrieval confidence is insufficient, the answer says so and links to search results; it does not improvise.
 - RAG can be disabled without affecting indexing, lexical search, bill pages, or deployments.
 
+### Release 4: legislation pipeline, Stage L1
+
+Release 4 reads what the stored documents *say*, rather than what Parliament published about
+them. It is specified in full in §26 and deliberately scoped to Stage L1 — a layout-aware
+structural reading of the existing bills corpus, validated by Gate L1 against each document's own
+Arrangement of Sections. Stages L2–L6 (Akoma Ntoso, amendment extraction, consolidation, ELI) are
+specified there and blocked on decisions no code can make (§26.7).
+
+- Every current, accepted document version has a structural reading, recorded additively and
+  replayable offline from stored bytes at a named extractor and structure version.
+- Gate L1's verdict is stored per document together with both trees it compared; a reading that
+  fails is preserved for review and is never promoted.
+- A parser regression cannot withdraw a reading that passed.
+- Scans are recorded as `no_text` and are distinguishable from documents that legitimately have
+  no contents page.
+- The corpus-wide Gate L1 pass rate is measured against the real stored PDFs and recorded in the
+  `docs/status.md` gate log.
+
 ### Explicit non-goals for the first release
 
 - Scraping unrelated parliamentary material such as Hansard, questions, member profiles, or committee records.
@@ -144,6 +162,8 @@ Version 1.0 presented indexed-search observations as evidence for the data model
 | A12 | Total corpus is on the order of low thousands of bills and low tens of gigabytes of PDFs. | Low | Measure after the first full crawl; record actuals in `docs/operations.md`. | Storage/backup sizing |
 | A13 | `robots.txt` permits crawling these listing paths. **Refuted on 2026-08-18**: the site publishes no robots.txt (HTTP 404); crawl permission is now an explicit recorded decision, not a robot directive (see §25.4). | Unknown | Fetch and record it, with its SHA-256, before any crawl. | All crawling |
 | A14 | Republication of PDF bytes is not clearly permitted. | Unknown | Rights review. | Public document serving |
+| A15 | Every Malaysian federal Act and bill opens with an Arrangement of Sections or of Clauses that matches its body, making Gate L1 a valid oracle. | Medium | Measure the `no_arrangement` and pass rates over the real stored corpus (§26.7, §26.8). | Gate L1's validity as a check, §26.3 |
+| A16 | `lom.agc.gov.my` can be crawled under a recordable policy, and its reprints state the date to which amendments are incorporated, making Gate L3 possible. | Low | TLS and terms-of-use are read (2026-08-20, `docs/upstream.md`); `robots.txt` returns an unexplained 500 rather than a clean absence; reprint dating convention is still unconfirmed — no listing or document page has been fetched. | Stages L3-L4, Gate L3 |
 
 Rules: an assumption may be *used* while unverified only if the code fails loudly when it is wrong (for example, a date parser that raises on an unrecognized format rather than silently producing `NULL`). An assumption marked "blocks" may not be assumed away — it gates the listed work.
 
@@ -259,7 +279,8 @@ The scaffold agent should create this shape unless a short architecture decision
 ├── migrations/
 ├── src/billwatcher/
 │   ├── __init__.py
-│   ├── version.py          # PARSER_VERSION, NORMALIZER_VERSION, EXTRACTOR_VERSION, CHUNKER_VERSION
+│   ├── version.py          # PARSER_VERSION, NORMALIZER_VERSION, EXTRACTOR_VERSION,
+│   │                       # LAYOUT_EXTRACTOR_VERSION, STRUCTURE_VERSION, CHUNKER_VERSION
 │   ├── config.py
 │   ├── db.py
 │   ├── models.py
@@ -267,7 +288,8 @@ The scaffold agent should create this shape unless a short architecture decision
 │   ├── logging.py
 │   ├── domain/
 │   ├── storage/
-│   │   └── blobs.py        # content-addressed put/get/verify; no business logic
+│   │   ├── blobs.py        # content-addressed put/get/verify; no business logic
+│   │   └── audit_tree.py   # audit-tree paths, sidecar serialization (§27)
 │   ├── scraper/
 │   │   ├── fetch.py
 │   │   ├── policy.py
@@ -278,9 +300,16 @@ The scaffold agent should create this shape unless a short architecture decision
 │   │   ├── versioning.py   # document version promotion/supersession (§9)
 │   │   ├── changes.py      # field diffing and record_changes writes (§10)
 │   │   └── service.py
+│   ├── mineru/              # MinerU vision-language markdown reading (§27.7, ADR-020)
+│   │   ├── render.py       # PDF page -> image (pypdfium2)
+│   │   ├── client.py       # PageBlockExtractor protocol + vendor client wrapper
+│   │   ├── markdown.py     # ContentBlock list -> markdown
+│   │   └── service.py      # render + extract + assemble, one document at a time
 │   ├── jobs/
+│   │   ├── audit_rebuild.py  # verify/rebuild the document tier of the audit tree (§27.4)
 │   │   ├── replay.py       # re-parse stored snapshots
 │   │   ├── reextract.py
+│   │   ├── mineru_extract.py  # the MinerU reading, as a local file artifact only (§27.7)
 │   │   ├── rechunk.py
 │   │   └── reembed.py
 │   ├── search/
@@ -306,7 +335,8 @@ The scaffold agent should create this shape unless a short architecture decision
 │   ├── status.md           # project tracking ledger (§20)
 │   ├── decisions/
 │   └── evals/
-└── var/                    # ignored local snapshots only
+├── var/                    # ignored local snapshots only
+└── data/                   # ignored audit tree (§27); default AUDIT_TREE_ROOT in development
 ```
 
 Application code may not import from `tests`. Parsing functions must accept bytes/text plus source metadata so fixture tests do not need network access. Version constants live in exactly one module (`version.py`) and are written into every derived row.
@@ -460,6 +490,28 @@ Chunks hang off an extraction, which hangs off a version. A citation therefore a
 - `id`, `chunk_id`, `embedding_model_id`, `model_dimension`, `embedding` vector, `embedding_pipeline_version`, `created_at`.
 - Unique on `(chunk_id, embedding_model_id)`.
 
+### `document_structures` — R4 (§26.3)
+
+- `id`, `document_version_id`, `extractor_name`, `extractor_version`, `structure_version`, `unit` (`section` or `clause`), `language`.
+- `gate_status` (`passed`, `mismatch`, `no_arrangement`, `empty_body`, `no_text`, `failed`), `arrangement_count`, `body_count`, `difference_count`, `blocking_count`, `detail_json`, `page_count`, `error`.
+- `is_current` boolean, `created_at`, `duration_ms`.
+- Unique on `(document_version_id, extractor_name, extractor_version, structure_version)`.
+
+A structural reading, additive exactly like `document_extractions`, and deliberately not stored in
+that table: two shipped code paths (`persist_current_extraction`'s demotion and retention's
+pruning) assume one writer for `document_extractions`, and a second tier would trip both. Only
+`is_current = true` may be built on; a reading Gate L1 fails is kept for review and never promoted.
+
+### `provision_nodes` — R4 (§26.3)
+
+- `id`, `structure_id`, `source` (`arrangement` or `body`), `parent_id` (self-referential), `node_type`, `num`, `heading`, `eid`, `ordinal`, `depth`, `page_from`.
+- Unique on `(structure_id, source, eid)`.
+
+Both the Arrangement-of-Sections tree and the body tree are stored, because Gate L1's verdict is
+reviewable only if what it compared is on the record. `wid` is deliberately absent — nothing in a
+single document establishes the identifier a provision carried when first created, which is Stage
+L2's job, once a work's expressions can be related to one another.
+
 **Correction to v1.0:** the embedding was a nullable column on the chunk, so switching models meant mutating chunk rows and no two models could coexist during a migration. A separate table lets a new model backfill alongside the old one and lets the old vectors be dropped only after the new set is validated. Embedding dimension belongs in a migration and must match the configured model; a model change is a versioned re-embedding job, never a silent mix.
 
 ### `record_changes` — R1
@@ -604,6 +656,8 @@ Until the rights review (A14) concludes, expose version *metadata* and short exc
 
 Storing snapshots is pointless without a way to reuse them. All four backfills run offline, take the backfill advisory lock, default to `--dry-run`, accept a batch limit and a filter, and record a `backfill_jobs` row.
 
+A fifth backfill, `restructure` (§26.3), has the same shape: offline, dry-run by default, and it records a `backfill_jobs` row. It differs in one way — a document that fails Gate L1 is kept and marked not current rather than being reprocessed to a single output, because the point of the backfill is the verdict, not just the derived text.
+
 | Job | Input | Output | Writes to `record_changes` as |
 | --- | --- | --- | --- |
 | `reparse` | `source_snapshots` blobs | corrected bills/chamber records/events | `change_source = replay` |
@@ -654,6 +708,7 @@ Per-target rather than global:
 - `/status` shows every target, its state, last success, record count, and last change; plus queue depth, dead-letter count, open anomalies by severity, oldest pending document extraction, and current pipeline versions.
 - The homepage freshness line reports the *oldest* healthy-target success time, not the newest. Reporting the newest lets a working current-listing crawl mask a six-week-stale archive.
 - Staleness thresholds are configuration, and a stale target is an anomaly.
+- `make completeness` reports candidate holes in a chamber-year's bill-number sequence, restricted to years whose archive coverage target is closed (`expected_interval_hours == 0`) — the one signal already in this model meaning "this year's listing has been read in full." It is a heuristic for a human to check against the archive, not an enforced gate: no assumption register entry claims Parliament numbers bills with no gaps at all, and a partially-crawled or still-open year is deliberately excluded, since a hole there is just a bill not yet fetched.
 
 ### 10.5 Anomaly taxonomy
 
@@ -673,6 +728,8 @@ Minimum set, each with a defined severity, an owner action, and a test that prov
 | `document_rollback` | warn | Bytes matched an older non-current version |
 | `document_gone` | warn | Absence streak threshold reached |
 | `extraction_failure_spike` | warn | Extraction failure rate above baseline |
+| `structure_gate_failure_spike` | warn | Gate L1 blocking-failure rate above baseline (§26.3) |
+| `audit_tree_divergence` | critical | A tree artifact, its sidecar, and the database disagree (§27.4) |
 | `override_conflict` | warn | Upstream changed a field under an active override |
 | `robots_changed` | critical | `robots.txt` hash changed |
 | `target_stale` | warn | Coverage target past its expected interval |
@@ -966,6 +1023,7 @@ POSTGRES_PASSWORD=CHANGE_ME
 PUBLIC_BASE_URL=https://bills.example.org
 CONTACT_EMAIL=operator@example.org
 BLOB_STORAGE_ROOT=/var/lib/billwatcher/blobs
+AUDIT_TREE_ROOT=/var/lib/billwatcher/audit
 SCRAPE_ENABLED=false
 SCRAPE_INTERVAL_HOURS=12
 SCRAPE_DELAY_SECONDS=2
@@ -979,9 +1037,24 @@ COUNT_DROP_ABORT_FRACTION=0.30
 FETCH_ATTEMPT_RETENTION_DAYS=180
 SEMANTIC_SEARCH_ENABLED=false
 RAG_ENABLED=false
+MINERU_ENABLED=false
+MINERU_BASE_URL=
+PIPELINE_DATA_ROOT=/var/lib/billwatcher/pipeline-data
+AKN_LLM_ENABLED=false
+AKN_LLM_BASE_URL=
+AKN_LLM_MODEL_ID=
+AKN_GATE_MIN_TEXT_COVERAGE=0.95
+SERVE_LEGISLATION_CORPUS=false
+LEGISLATION_PUBLICATION_MODE=metadata
+LEGISLATION_CORPUS_RIGHTS_CONFIRMED=false
 ```
 
-The application should reject placeholder secrets in production mode.
+The application should reject placeholder secrets in production mode. It must also **refuse to
+boot** rather than warn when a publication flag is set without its recorded rights confirmation:
+`SERVE_ARCHIVED_DOCUMENTS` needs `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED` (ADR-013, ADR-004),
+`SERVE_LEGISLATION_CORPUS` needs `LEGISLATION_CORPUS_RIGHTS_CONFIRMED`, and
+`LEGISLATION_PUBLICATION_MODE=full` needs both (§28.10, ADR-027). Development is ungated, because a
+refusal there would only teach an operator to work around it.
 
 ### 16.3 `Makefile`
 
@@ -1000,12 +1073,22 @@ Targets are the human and agent interface. Use tabs correctly, declare phony tar
 | `check` | lint + typecheck + test |
 | `serve` | Local development web server |
 | `migrate` | Upgrade database to head |
-| `scrape` | One incremental run |
+| `scrape` | One incremental run: the explicit aggregate of `fetch-listings` → `parse-listings` → `fetch-documents` (§27.1) |
 | `scrape-full` | Explicit full archive run |
+| `fetch-listings` | Step S1: fetch listing/archive pages, snapshot them, write `01-listings/` to the audit tree (§27) |
+| `parse-listings` | Step S2: parse stored snapshots into bills/records/events, write `02-bills/`; offline |
+| `fetch-documents` | Step S3: drain the document queue, write raw PDFs + sidecars to `03-documents/` |
+| `pipeline` | Explicit aggregate S1→S6 in order; live steps keep their approval gate (§27.1) |
+| `verify-audit` | Re-hash every tree artifact against its sidecar and the database; non-zero on divergence (§27.4) |
+| `audit-rebuild` | Regenerate the whole audit tree from the database and blob store; byte-identical when already correct (§27.4) |
+| `pipeline-*` | The file-first pipeline's steps, one target each, specified in §28.2 and nowhere else. A separate pipeline with its own store; its live steps keep the same `SCRAPE_ENABLED`/`--approve-live` gate the targets above use |
 | `status` | Print run history, coverage/freshness, queue depth, pipeline versions |
+| `completeness` | Report candidate bill-numbering gaps in closed archive years; a heuristic for review, never a gate (§10.4) |
 | `doctor` | Evaluate anomalies and invariants; non-zero exit on unresolved critical findings |
 | `reparse` | Replay stored snapshots at the current parser version; `--dry-run` default |
 | `reextract` | Re-extract document versions below the current extractor version; `--dry-run` default |
+| `mineru-extract` | A second, MinerU vision-language markdown reading, written to `04-text/`; `--dry-run` default; live, needs `MINERU_ENABLED`/`MINERU_BASE_URL` (§27.7) |
+| `restructure` | Read Gate L1 structure from stored bytes at the current versions; `--dry-run` default (§26.3) |
 | `rechunk` | Rebuild chunk sets at the current chunker version; `--dry-run` default |
 | `reembed` | Backfill embeddings for a named model; `--dry-run` default |
 | `verify-storage` | Verify blob hashes against the database; report orphans and missing blobs |
@@ -1030,6 +1113,8 @@ No default target may crawl the live Parliament site or delete data. Every destr
 - `chunk_embeddings`: keep the current model; a superseded model's vectors are dropped only by explicit job after the replacement is validated.
 - `record_changes`, `bill_events`, `presence_observations`: retained indefinitely.
 - Blob deletion is only ever performed by `prune-blobs` with a reference check, never inline by application code.
+- The audit tree (§27) is a derived projection and is **not** part of the backup contract: `make audit-rebuild` regenerates it from the database and blob store, and deleting it loses nothing they cannot regenerate.
+- `PIPELINE_DATA_ROOT` (§28) is the opposite case and must not be confused with it: it is the *record* for the file-first pipeline, not a projection of anything, so nothing can rebuild it. Losing it means re-crawling and re-extracting. Whether it is backed up is a deployment decision; treating it as derived because it looks like a directory tree is a mistake.
 
 ### 16.5 Public deployment runbook
 
@@ -1175,6 +1260,57 @@ Inputs: Package G retrieval evaluation is acceptable.
 Outputs: bounded answer service, prompt-injection controls, version-pinned citation verifier, rate/cost controls, no-answer behavior, RAG evaluations.  
 Acceptance: all cited chunks were retrieved and name their document version; provider outage falls back to passages; kill switch leaves core site healthy.
 
+### Package I — legislation Stage L1
+
+Inputs: §26.1–§26.3, Package C's stored document versions.  
+Outputs: `billwatcher.legislation` (layout reading, structural vocabulary, both tree parsers, the
+Gate L1 comparator), `document_structures` and `provision_nodes` with their migration, the
+`restructure` backfill and Make target, `structure_gate_failure_spike`, ADR-016 and ADR-017.  
+Acceptance: a marginal note is never spliced into the provision sharing its baseline; a dropped
+section fails Gate L1 and names what is missing; a bill reads as clauses and an Act as sections;
+a schedule does not renumber the Act; a failing re-read does not withdraw a reading that passed;
+the corpus-wide pass rate is measured against the real stored PDFs and recorded.
+
+### Package J — legislation Stages L2 onward
+
+Inputs: Package I green on the real corpus, **and** the §26.7 decisions concluded.  
+Outputs: as specified in §26.4 and §26.5.  
+Acceptance: per gate, §26.6. This package must not start before §26.7 concludes; it is listed so
+the sequence is visible, not so it can be picked up.
+
+### Package K — auditable step pipeline
+
+Inputs: §27, ADR-019, Package C's ingestion service and stored corpus.  
+Outputs: the S1–S3 step decomposition of the scrape CLI with `scrape` kept as their aggregate; the
+audit-tree writer and deterministic sidecar serializer (`storage/audit_tree.py`); tree output wired
+into S4–S7's existing jobs; per-run manifests; `verify-audit` and `audit-rebuild` with their Make
+targets and the `pipeline` aggregate; the `audit_tree_divergence` anomaly kind and its test;
+`AUDIT_TREE_ROOT` configuration; `docs/operations.md` and `docs/data-model.md` updated.  
+Acceptance: §27.6 in full — each step runs alone by its target and leaves a manifest; a
+fixture-mode `make pipeline` populates the tree with hash-matching sidecars and a second run
+writes nothing; `audit-rebuild` is byte-identical over a correct tree; `verify-audit` is clean and
+catches a single tampered byte; the stored corpus is materialised where the blob store lives, with
+counts recorded in the gate log.
+
+### Package L — file-first pipeline (current priority)
+
+Inputs: §28, ADR-021 through ADR-028. Depends on nothing in Packages A–K: it shares
+`billwatcher.scraper`'s pure fetch/parse/normalise modules and `storage.audit_tree`'s deterministic
+writers, and imports no database model, session, or job.  
+Outputs: `billwatcher.pipeline` — the `PipelineStore` protocol and its `FileStore` implementation;
+steps 1–5 plus `import-markdown` and `verify` with their CLI commands and `pipeline-*` Make targets;
+`pipeline.frbr` as the single owner of published IRIs; Gate P1 and Akoma Ntoso schema validation
+against a vendored XSD; per-artifact provenance and per-run manifests; `pipeline.redact` and the four
+publication settings of §28.10; ADR-024 through ADR-028.  
+Acceptance: every step runs alone by its command and leaves a manifest; a second run over an
+unchanged store writes **nothing**, proven by hash *and* mtime; a rendered document validates against
+the vendored schema, and a document that fails Gate P1 leaves a verdict and a rejected render but no
+promoted XML; a bill record missing a chamber, year, number or language produces no IRI at all; a
+malformed request segment resolves to a 404 rather than a filesystem path; `verify` reports a tampered
+byte, a stale artifact and an unexpected file; production refuses to boot with either publication flag
+set and its rights confirmation absent. Not in the acceptance list, and deliberately: a corpus-wide
+Gate P1 pass rate, which needs the corpus access §26.7 blocks.
+
 ### Integration sequence
 
 ```text
@@ -1182,8 +1318,14 @@ A scaffold ──────┬──────────────> E de
                  ├─> D web/search ─> F JSON-LD
 B model/discovery┼─> C scraper ─────> E deployment
                  └─> D web/search
+C scraper ────────────────> K audit pipeline (§27)
 C extraction + D search ─> G semantic ─> H RAG
+C extraction ─────────────> I Stage L1 ─> J Stages L2+ (blocked, §26.7)
+(nothing) ────────────────> L file-first pipeline (current priority, §28)
 ```
+
+Package L hangs off nothing on purpose. It is a parallel pipeline, not a stage of the one above, and
+the day it needs a row from the database is the day it has stopped being what §28.1 describes.
 
 The integrator owns migration conflict resolution, lockfile changes, the acceptance walkthrough, `docs/status.md` reconciliation, and updating this handoff when an upstream assumption changes.
 
@@ -1193,7 +1335,7 @@ Implementation progress is tracked in `docs/status.md`, created by Package A and
 
 ### Required sections of `docs/status.md`
 
-**Package ledger.** One row per package A–H:
+**Package ledger.** One row per package A–L:
 
 | Package | State | Owner/agent | Branch | Started | Last update | Evidence | Blockers |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1231,7 +1373,28 @@ Create short ADRs under `docs/decisions/` for:
 - embedding model, dimension, license, multilingual evaluation, and operating cost;
 - RAG provider/data-retention policy;
 - alert delivery mechanism given there is no CI (anomaly table plus `make doctor` plus `/status`, and whether any push channel is added);
-- production hostname and hosting/backup arrangement, including where blob backups live.
+- production hostname and hosting/backup arrangement, including where blob backups live;
+- the layout-aware PDF reader for §26.1, measured against the marginal-note case, and the
+  dependency cost it carries (ADR-016);
+- what Gate L1 blocks on versus merely reports, and why the heading half is not blocking
+  (ADR-017);
+- whether the legislation corpus is served or statically built, and how mirrorability is
+  delivered instead (ADR-018);
+- crawl policy and rights for `lom.agc.gov.my`, as a publisher distinct from parlimen.gov.my,
+  and separately for `lawnet.com.my`, which is a paid subscription service governed by a
+  contract rather than by a public policy (§26.7);
+- legal sign-off on the consolidation methodology and on the disclaimers that accompany a
+  consolidated statement of law, which is a higher bar than the A14 rights question (§26.7);
+- the scheme of every published identifier, since an IRI is permanent and a change to one is a
+  change to every citation of it (§28.7, ADR-024);
+- what a gate over a *model's* output blocks on, which of its checks are exact, and why the one
+  threshold is configuration rather than a constant (§28.8, ADR-025);
+- what makes a derived artifact stale, since a wrong answer there leaves a corpus that silently
+  disagrees with the code claiming to have produced it (§28.9, ADR-026);
+- what is published from a corpus whose rights question is open, which flags gate it, and any
+  fragment of source text the metadata-only surface deliberately keeps — **including the bound on
+  that fragment**, since "we publish only bounded excerpts" is an empty statement until something
+  enforces the bound (§28.10, ADR-027).
 
 Unknown values do not block scaffolding. Use safe defaults and feature flags, but do not fake a deployment domain, contact address, crawl permission, rights determination, or model choice.
 
@@ -1256,6 +1419,12 @@ Status and evidence links live in `docs/status.md`; this table defines what coun
 | Docker deployment | non-root `Dockerfile`, healthy fresh `compose.yaml` rehearsal, persistent data |
 | Makefile | documented targets execute the development and operations gates |
 | No GitHub CI | repository audit confirms no `.github/workflows`; manual gate log in `docs/status.md` |
+| Legislation Stage L1 | Gate L1 fixtures covering the marginal-note splice, a dropped section, a bill's clauses, a schedule's numbering, and an overlapping letter list; migration to head on PostgreSQL; a measured corpus-wide pass rate in the gate log |
+| Layout extractor choice | A dated measurement of each candidate against the same-baseline marginal note, and a re-run dependency audit recording the packages added (ADR-016) |
+| Published identifiers | A Work resolving with both language Expressions and every manifestation extension; a malformed request segment answering 404; a bill record missing a chamber, year, number or language producing no IRI at all (§28.7) |
+| Gate P1 and schema validity | A rendered document validating against the vendored OASIS XSD; a document with a duplicate eId, a missing number, a broken sequence and low coverage each rejected with its verdict and rejected render kept; a measured corpus-wide pass rate and finding distribution in the gate log (§28.8) |
+| Provenance and idempotence | A second run over an unchanged store writing nothing, proven by hash and mtime; a code-version bump regenerating exactly the affected artifact; `pipeline verify` reporting a tampered byte, a stale artifact and an unexpected file (§28.9) |
+| Corpus publication | Production refusing to boot with either publication flag set and its rights confirmation absent; every corpus path 404 while serving is off; a metadata-mode response carrying no provision text, checked by a reader independent of the redactor; and a provision whose body text runs in after its number publishing no more of that text than the heading bound allows (§28.10) |
 | Operable public service | database and blob backup/restore drill, `verify-storage` clean, external TLS check, health/freshness monitoring, `make doctor` clean |
 
 ## 23. First implementer checklist
@@ -1297,6 +1466,14 @@ These links informed the handoff and should be rechecked because upstream pages 
 | 1.2 | 2026-08-17 | Resolved document-version hash uniqueness conflict: rollback observations create monotonic rows sharing an existing blob (ADR-005). |
 | 1.3 | 2026-08-18 | Recorded refuted assumptions A2 (as stated) and A13, and the A9 passage-phrase correction, against dated evidence in `docs/upstream.md` (§25.4). No contract changes. |
 | 1.4 | 2026-08-18 | Recorded the archive request contract as observed (§25.6): the archive is a year-indexed XML tree, not the `carian.html` search form. Then downloaded the whole document corpus and read every policy page the site publishes. Closes A3, A7, A8, A9, A10 and A12; A5 and A11 partially; A13's reading is now complete. No contract in §8-§14 changes; §11.3 step 4, §11.4 and §11.7 gain the observed shape. |
+| 1.5 | 2026-08-19 | Incorporated the Malaysian legislation pipeline as §26 and Release 4, scoped to Stage L1 over the existing bills corpus. Adds `document_structures` and `provision_nodes` (migration 0004), Gate L1, the `structure_gate_failure_spike` anomaly kind, packages I and J, and ADR-016/017/018. Rejects the source specification's static-build publication architecture while adopting its data model unchanged (§25.7). |
+| 1.6 | 2026-08-21 | Added the auditable step pipeline and audit tree as §27 (ADR-019), at the commissioner's direction and prioritised ahead of all other open work: every pipeline step is one Make target, and every step materialises a human-legible local directory holding the raw downloaded PDF beside a JSON sidecar carrying source, URL, language, and full provenance — a mandatory projection of the database, byte-reproducible from it. Adds `fetch-listings`/`parse-listings`/`fetch-documents`/`pipeline`/`verify-audit`/`audit-rebuild` to §16.3, `AUDIT_TREE_ROOT` to §16.2, the `audit_tree_divergence` anomaly kind to §10.5, and Package K to §19 (§25.8). |
+| 1.7 | 2026-08-21 | Added `make completeness` (§10.4, §16.3): a heuristic report of candidate bill-numbering gaps within a chamber-year, restricted to closed archive coverage targets so an open or partially-crawled year cannot produce a false gap. Not a gate — no anomaly kind, no `doctor` interaction — and not a claim that Parliament numbers bills with no gaps at all; a reported gap is a pointer for a human to check against the archive. No other contract changes. |
+| 1.8 | 2026-08-21 | Added §27.7, a MinerU vision-language markdown reading of stored PDFs via a hosted endpoint (`https://mineru.loqasi.io`), at the commissioner's direction. Written only as a local file artifact under `04-text/` (extending the §27.2 layout already specified, not previously built) — never into `document_extractions`, sidestepping the single-writer landmine TODO 2.4 documents (ADR-020). Adds `mineru-extract` to §16.3, `MINERU_*` settings to §16.2, and the `billwatcher.mineru` package. No schema change. |
+| 1.9 | 2026-08-21 | Added §28, a parallel file-first pipeline (`billwatcher.pipeline`) built behind a `PipelineStore` interface, at the commissioner's direction: "database and object store are for later... the pipeline should work with interface of input, such as file and also from db or object store" (ADR-021). `FileStore` is the only implementation. The entire Postgres-backed system (§6-§26, Packages A-K) is left in place, untouched, dormant — nothing in the new package imports it. PDF parsing/extraction is explicitly out of scope: the operator's own vLLM endpoint handles that, separately. No existing contract changes. |
+| 1.10 | 2026-08-21 | Added §28.5, a fourth pipeline step converting markdown to Akoma Ntoso (OASIS LegalDocML) XML, at the commissioner's direction ("next up for pipeline after markdown conversion is conversion to the oasis format"). Structure extraction reads with the help of a vLLM endpoint, per a follow-up direction ("should use the help of the vllm server"), behind a `MarkdownStructureExtractor` protocol; eId assignment and XML serialisation stay fully deterministic (ADR-022). Still file-only: `AKN_LLM_*` configuration added, no database or object-store code anywhere in `billwatcher.pipeline`. |
+| 1.11 | 2026-08-21 | Added §28.6, a fifth pipeline step generating ELI-style JSON-LD and RDF N-Quads from the stored Akoma Ntoso XML, at the commissioner's direction ("after akn, then it should be to the semantic files such as jsonld and rfg" — read as RDF, flagged as an interpretation). Fully offline: reads `document.akn.xml` back into a tree, builds one JSON-LD graph, and derives the N-Quads from that same graph so the two representations cannot disagree (ADR-023). No database, no object store, no network or LLM call. |
+| 1.12 | 2026-08-22 | Made the file-first pipeline publication-ready and recorded the four decisions it rests on: permanent FRBR identifiers built from published facts (§28.7, ADR-024), Gate P1 plus Akoma Ntoso schema validation (§28.8, ADR-025), provenance-gated regeneration with per-run manifests and `pipeline verify` (§28.9, ADR-026), and metadata-only publication redacted at the serving boundary behind two flags (§28.10, ADR-027), with step 5 rebuilt on rdflib and SHACL deferred (ADR-028). Adds `AKN_GATE_MIN_TEXT_COVERAGE`, `SERVE_LEGISLATION_CORPUS`, `LEGISLATION_PUBLICATION_MODE` and `LEGISLATION_CORPUS_RIGHTS_CONFIRMED` to §16.2, `import-markdown` and `verify` to §28.2, and Package L to §19. Withdraws the URL-hash public identifier and the `infer_unit` language default recorded in 1.10 (§25.10). |
 
 ### 25.2 Defects corrected in 1.1
 
@@ -1382,3 +1559,914 @@ These record upstream facts observed on 2026-08-18 from a full sweep of the arch
 17. **§7 and §16.2 specify Caddy, and this deployment does not use it.** TLS is terminated by an nginx deployed separately, so the `Caddyfile` and the `caddy` service are removed and the stack publishes one loopback origin for an external proxy (ADR-015). Two consequences the contract should carry: the response security headers must live in the **application**, because it is the only component the repository controls, and §17's caution about HSTS becomes a defaulted-off setting rather than proxy configuration. What the contract loses is certificate automation as a property of the stack, and the ability to rehearse the TLS path from the repository at all.
 
 18. **A long crawl loses connections, and §11.7's resumption rules must cover transport failures.** The first live archive attempt died after 59 of 136 requests on a server-closed keep-alive and published nothing. Retrying an unanswered GET is safe and necessary at this length, and an archived year that still cannot be read must degrade that year alone — 66 years of closed history are not withheld because 2007 timed out.
+
+
+### 25.7 Corrections and decisions recorded in 1.5
+
+These record the incorporation of an externally supplied *Malaysian Legislation Pipeline* handoff
+as §26. That document specifies a bilingual BM/EN corpus from source PDF to Akoma Ntoso and ELI
+linked data, with seven quality gates. It is adopted, with three departures, each recorded as an
+ADR because §0 rule 2 requires it.
+
+1. **The publication architecture is rejected; the data model is adopted unchanged (ADR-018).**
+   The source specification prescribes a static `dist/` tree with client-side SQLite/FTS5 over
+   HTTP Range and edge-function content negotiation. This service is server-rendered FastAPI over
+   PostgreSQL (ADR-007, ADR-012, ADR-013, ADR-015); adopting the static build would contradict
+   four accepted decisions to buy mirrorability, which an N-Quads dump provides on its own. AKN
+   3.0, ELI, FRBR, `eId`/`wId`, and the Gate L5 SHACL shapes are adopted exactly as specified.
+
+2. **Gate L1 is narrowed to structure, and is per document rather than per language pair
+   (ADR-017).** The source specification's "same numbers, same order, same headings, for both BM
+   and EN" is two different checks with two different inputs. Heading differences are usually a
+   typographic fact — AGC reprints print a section's heading as an abbreviated marginal note —
+   so blocking on them would fire on almost every document and train an operator to clear the
+   queue without reading it. The bilingual half is Gate L4, and is blocked on document
+   classification that does not exist (§26.7).
+
+3. **The layout reader is `pdfminer.six`, chosen by measurement rather than by the source
+   specification's suggestion (ADR-016).** `pypdf`, already a dependency, cannot serve: its
+   `visitor_text` callback reports the *line's* starting x rather than each run's, which splices
+   a marginal note into the middle of the provision sharing its baseline, and its operand-level
+   visitor reports accurate matrices but undecoded font bytes. `pdfplumber` wraps the same engine
+   while adding an imaging stack this project has no use for; PyMuPDF is AGPL. The locked set
+   grows by five packages and the dependency audit was re-run the same day.
+
+Three defects in the existing codebase were confirmed while doing this, all latent rather than
+live, and all recorded in `TODO.md` rather than fixed here because each changes behaviour that is
+currently correct:
+
+- `scraper/service.py`'s `persist_current_extraction` demotes **every** `is_current` extraction
+  for a document version regardless of extractor name, and `jobs/retention.py` keeps two
+  extractions per version without partitioning by extractor either. Both are correct while one
+  extractor writes that table; both become data loss the moment a second one does — which is what
+  the OCR tier will be. §26.1's reading is stored in its own tables precisely to avoid tripping
+  them today.
+- `documents.document_kind` and `documents.language` are written as `"unknown"` at creation and
+  never updated. The corpus therefore cannot be partitioned into BM/EN pairs, which blocks Gate L4.
+- `search/chunking.py`'s provision-aware splitting is inert. `_PROVISION` anchors on line starts,
+  but `normalize_text` collapses newlines before the extraction is stored, so each page arrives as
+  a single line and `_blocks()` returns one block per page. Chunks are page-shaped, not
+  provision-shaped, which is not what §12.3 describes.
+
+### 25.8 Changes recorded in 1.6
+
+These record a directed contract change, not an upstream observation. On 2026-08-21 the
+commissioner directed that each pipeline step be auditable, that each step be a Make target, and
+that each step store its output in a local directory structure — the raw downloaded PDF beside
+JSON metadata naming the source, raw file, language, and URL — and that this work be prioritised
+ahead of everything else open.
+
+1. **The pipeline's step decomposition and the audit tree are now contract, as §27.** The live
+   half of the pipeline, previously fused inside `make scrape`, splits into `fetch-listings`,
+   `parse-listings`, and `fetch-documents`; the offline steps keep their existing targets. Every
+   step materialises its artifacts into a human-legible tree with deterministic JSON sidecars and
+   per-run manifests, checked by `make verify-audit` and rebuildable by `make audit-rebuild`.
+2. **The tree is a projection, and that is the recorded design decision (ADR-019).** The
+   file-first alternative — tree as source of truth, database as index — was considered and
+   rejected: it would discard transactional change history (§10.1), content-hash dedup evidenced
+   at scale (ADR-003), and the §8 append-only invariants, and would rewrite Package C, which has
+   already ingested the whole corpus. The projection delivers every directed property without
+   destroying the record underneath it.
+3. **Nothing in §8–§10 changes.** The database and blob store remain the record and the backup
+   unit; the tree is derived, gitignored, and deliberately outside the backup contract.
+4. **The sidecar's `language` and `document_kind` fields will read `"unknown"` at first**, because
+   those columns are the known dead fields (§26.7, TODO 2.4). The sidecar states the record rather
+   than guessing; the classification sweep backfills every sidecar via `audit-rebuild` when it
+   lands.
+
+### 25.9 Changes recorded in 1.8
+
+Directed on 2026-08-21: parse stored bill PDFs with a hosted MinerU vision-language instance
+(`https://mineru.loqasi.io`) and keep the result local-file-based, like the PDF audit tree.
+
+1. **A second, independently versioned markdown reading is added, as §27.7.** MinerU2.5 is a
+   vision-language document-parsing model; the hosted instance was confirmed (by querying
+   `/v1/models`, `/version`, `/openapi.json` directly) to serve
+   `opendatalab/MinerU2.5-Pro-2605-1.2B` behind a standard vLLM OpenAI-compatible API. The vendor's
+   own client library, `mineru-vl-utils`, is used rather than reimplemented: its prompt templates
+   and per-block-type sampling parameters are intricate enough that the maintainers explicitly
+   warn against hand-rolling the API calls.
+2. **Written only as a local file artifact, never into `document_extractions` (ADR-020).** The
+   same single-writer landmine TODO 2.4 documents for a second extraction tier applies here
+   exactly as it would to an OCR tier; this reading avoids it the way Stage L1 does, by not
+   touching that table at all. `04-text/`, specified but unbuilt in §27.2, is now built.
+3. **Two new permissively licensed dependencies**: `mineru-vl-utils` (Apache-2.0; base install
+   only, no `vllm` extra, since this project calls a remote hosted endpoint rather than serving
+   the model itself) and `pypdfium2` (BSD-3-Clause/Apache-2.0), for the same reason ADR-016 chose
+   `pdfminer.six` over PyMuPDF: no AGPL dependency, no unnecessary imaging stack.
+4. **The endpoint is configuration, off by default** (`MINERU_ENABLED`, `MINERU_BASE_URL`,
+   optional `MINERU_MODEL_NAME`/`MINERU_API_KEY`): sending official document images to a
+   third-party inference host is a data-handling decision, the same class of decision ADR-009
+   made explicit for the RAG endpoint, not a default.
+5. **A live smoke test against the real endpoint, run once by hand, found and fixed one real
+   bug**: the vendor `MinerUClient` delegates to an inner backend-specific client at `.client`,
+   and the resolved model name lives on *that* object, not on `MinerUClient` itself. No mocked
+   test could have caught this, because no mocked test constructs the vendor client at all — the
+   fix is now pinned by `tests/unit/test_mineru_client.py`, which fakes the vendor client's
+   structural shape rather than the network. The smoke test itself is not part of the automated
+   suite, mirroring this project's own `test-live` opt-in pattern for a different third party.
+
+### 25.10 Changes recorded in 1.12
+
+These record a body of correction rather than a new direction: the file-first pipeline of §28 was
+built one step at a time and was not publishable as it stood. Nine defects were fixed; five of them
+change this document's contract, and those five are here. The full findings, with the direct-run
+evidence, are in the `docs/status.md` gate log for 2026-08-22.
+
+1. **The public identifier was withdrawn and replaced (§28.7, ADR-024).** §28.4's URL-hash document
+   key remains correct as a *store* key and is wrong as a *published* one: 1.10 recorded FRBR URIs
+   of the form `/akn/my/{type}/{year}/doc-<sha256(url)[:8]>`, which are opaque, change when a URL
+   changes, and split one bill's two language readings into two unrelated Works. Every published IRI
+   is now built from facts the document itself published — country, type, originating chamber (§8,
+   ADR-002), year, number, language — and nothing mutable appears in one. **Where §28.4 and §28.7
+   appear to disagree, §28.7 is authoritative for anything published and §28.4 for anything stored.**
+2. **Language is a recorded fact, not a default.** 1.10's `infer_unit` returned only a unit and the
+   renderer hard-coded `msa`, so an English reading was published as Malay under a Work no Malay
+   reading shared. `infer_language_and_unit` returns the language separately and as `None` when the
+   document declares nothing; `resolve_language` prefers the language declared when the markdown was
+   imported and cross-checks it against the Arrangement heading. **A document with no language from
+   either source fails**, which is the same refusal §11.5 already applies to an unparseable date.
+3. **A model's reading is now gated, and the XML is validated (§28.8, ADR-025).** §26's design
+   principle — "deterministic wherever possible, generative only at the edges… no stage may
+   best-effort its way past a gate" — was not honoured by §28.5 as built: nothing stood between the
+   extractor and the store. Gate P1 is that gate, and the rendered document is additionally
+   validated against the vendored OASIS Akoma Ntoso 3.0 schema, which the previous renderer's output
+   did not pass.
+4. **Regeneration is gated on input hashes, not on a file existing (§28.9, ADR-026).** Every step
+   used `has_*` to decide whether it had work, so a corrected identifier scheme or renderer would
+   have left the whole corpus untouched with nothing to report it. Each derived artifact now carries
+   a provenance record naming what it was built from; volatile facts (run id, timestamps) live in the
+   per-run manifest only, because a per-artifact sidecar that changes every run destroys the "a
+   second identical run writes zero rows" property §22 requires of this project generally.
+5. **Publication has a posture, and it is off (§28.10, ADR-027).** ADR-018 said the corpus is served
+   by the application and warned that gating a lower-risk artifact while leaving a higher-risk one
+   open would be exactly backwards. The corpus is therefore stored in full and **redacted at the
+   serving boundary**, with two flags and two rights confirmations: `SERVE_LEGISLATION_CORPUS` for a
+   metadata-only surface and `LEGISLATION_PUBLICATION_MODE=full` for provision text, the latter
+   requiring the A14 confirmation §26.7 and ADR-004 already govern. Provision headings are published
+   in metadata-only mode, as a recorded judgement (ADR-027 decision 4), reversible in one constant.
+
+Nothing in §6–§27 changes. The Postgres-backed system remains untouched and dormant, and Gate P1 is
+**not** Gate L1: they check different things on different inputs, and §26.6's gate table is
+unaffected.
+
+## 26. Legislation pipeline (Release 4)
+
+Releases 1–3 index what Parliament *published about* a bill: its code, its readings, its status, and the bytes of its PDF. This section specifies reading what those documents *say* — turning a stored PDF into a structured, citable, point-in-time corpus of Malaysian federal legislation.
+
+**Design principle: deterministic wherever possible, generative only at the edges.** Every stage has a validation gate that can fail the build. No stage may "best-effort" its way past a gate. Where a rule cannot decide, the item is queued for a human, never guessed.
+
+**The claim changes weight here, and that is the most important thing in this section.** Releases 1–3 make an accuracy claim about a *record*: we mirror what Parliament published, and we date it. A consolidated provision asserts a proposition about the *world* — that this is what the law says today — which no upstream source published in that form. Section 26.7 governs what may be published as a result, and it is stricter than §14, not looser.
+
+### 26.1 Stage L1 — layout-aware reading
+
+Naive text extraction is forbidden for this pipeline. Malaysian legislative typography carries structure in position: section numbers hang at the left margin, marginal notes sit in the right margin *on the same baseline as the provision they annotate*, running heads and page numbers repeat, and schedules restart numbering.
+
+`billwatcher.scraper.parse_document` continues to produce flat, page-delimited text for search and must not change; nothing in the 27,575 indexed pages is invalidated by this section. Stage L1 is a **second, independently versioned reading** of the same stored bytes, recorded under its own extractor name and its own `LAYOUT_EXTRACTOR_VERSION`.
+
+Requirements:
+
+1. Each text line must carry its page, its baseline, its left edge, its font, and its size.
+2. Each line must be classified: `body`, `heading`, `provision`, `marginal`, `header`, `footer`, `page_number`.
+3. A marginal note **must not** be joined to the provision sharing its baseline. Joining them splices an annotation into the middle of the legal text.
+4. Running heads, running feet, and page numbers are discarded from content **only after** every line has recorded the page it came from, so pinpoint citation back into the stored PDF survives.
+5. Every geometric threshold must be a fraction of the page box, never a count of points: Malaysian legislation is published on more than one paper size.
+6. A reprint's marginal amendment annotations — `[Am. Act A1234]`, `[Ins. Akta A660]` — are recognisable and must be classified as `marginal` rather than discarded as furniture, so Stage L1 does not destroy evidence Stage L3 will need. `vocabulary.amendment_annotations` parses the annotation's operation and instrument; **it is not yet wired into persistence**, so nothing is stored from it today. Storing it is Stage L3 work, not Stage L1's, since the operation itself is extracted from the amending Act's own words, never from a reprint's margin, and a `provision_nodes` row with nowhere to put an amendment reference would be premature schema.
+7. A document the extractor finds no text in at all is a scan. It must be recorded as `no_text`, distinctly from a document that merely has no contents page, and it must not be built on. The 22 known scans are the documents most likely to be wrong; filing them as ordinary is how they become invisible.
+
+The library choice and its dependency cost are ADR-016.
+
+### 26.2 Structural vocabulary and provision identity
+
+| BM | EN | AKN element | eId prefix |
+| --- | --- | --- | --- |
+| Bahagian | Part | `<part>` | `part_` |
+| Bab | Chapter | `<chapter>` | `chp_` |
+| Seksyen | Section | `<section>` | `sec_` |
+| Fasal *(bills)* | Clause | `<clause>` | `cl_` |
+| Subseksyen | Subsection | `<subsection>` | `subsec_` |
+| Perenggan | Paragraph | `<paragraph>` | `para_` |
+| Subperenggan | Subparagraph | `<subparagraph>` | `subpara_` |
+| Jadual | Schedule | `<hcontainer name="schedule">` | `sched_` |
+| Mukadimah | Preamble | `<preamble>` | — |
+
+**Bills use Fasal/Clause; Acts use Seksyen/Section.** A clause becomes a section on enactment. That rename is a first-class transition — one function, applied once, idempotent — and never a reparse. Which unit a document uses is read from its own Arrangement heading (`Susunan Fasal` versus `Susunan Seksyen`), so a bill is never asked to match a section tree.
+
+`eId` is the identifier in *this* expression; nesting joins with a double underscore (`sec_5A__subsec_1`). `wId` is the identifier the provision carried when it was first created and never changes: when the Commissioner of Law Revision renumbers on reprint, `eId` changes and `wId` does not.
+
+**Stage L1 must not assign `wId`.** Nothing in a single document establishes what a provision was first called, and a guess makes a renumbering look like a new provision. `wId` is assigned in Stage L2, where a work's expressions are related to one another.
+
+Two ambiguities are normative because getting either wrong silently renumbers everything beneath it:
+
+- **`(i)`, `(v)`, `(x)`, `(l)`, `(c)`, `(d)` and `(m)` are each both a paragraph letter and a roman numeral.** The token alone cannot decide. It must be resolved from the sequence it continues: `(i)` after `(h)` is the ninth paragraph; `(ii)` after `(i)` is the second subparagraph; `(i)` with nothing to continue opens a subparagraph list.
+- **A schedule restarts numbering.** Its item `1.` is a paragraph of that schedule, not a second section 1 of the Act.
+
+### 26.3 Gate L1 — the Arrangement of Sections
+
+Every Malaysian Act and bill opens with an Arrangement of Sections (*Susunan Seksyen*) or of Clauses (*Susunan Fasal*). It is a table of contents the drafter published, which makes it **a validation oracle the corpus supplies for free**.
+
+Parse it as a separate artifact, parse the body independently, and assert that the two agree. This is the single highest-value check in Stage L1: it catches dropped pages, failed extractions, and mis-detected hierarchy before any of it can propagate into an amendment operation or a consolidated statement of law.
+
+```
+GATE L1 (blocking): the Arrangement-of-Sections tree == the extracted body tree.
+                    Mismatch → the reading is stored, is never promoted,
+                    and is queued for human review.
+```
+
+Both readings must be stored, not just the verdict: a verdict is reviewable only if what it compared is on the record.
+
+Gate L1's outcomes are `passed`, `mismatch`, `no_arrangement`, `empty_body`, `no_text`, and `failed`. Only `passed` and `no_arrangement` may be promoted — an explanatory statement legitimately has no contents page, so the gate has no oracle to apply and says so rather than failing.
+
+A **repeated `eId` within one tree is blocking** (`duplicate_eid`), and must be caught by the gate rather than by a database constraint. An eId is an identifier: a body containing two section 1s gives every later citation, amendment anchor, and consolidation target two possible referents. It also cannot be caught by comparing the two trees as sets, because a set collapses the duplicate and reports the document as passing — which is exactly the well-formed-looking wrong answer this stage exists to prevent.
+
+**The gate is otherwise blocking on structure — which provisions exist, and in what order — and reports heading differences without blocking on them.** A section's heading is printed as a marginal note in some reprints and inline in others, so a heading difference is usually a typographic fact about the source rather than a defect in the parse. That narrowing is deliberate and is ADR-017; widening it is a one-constant change.
+
+**Gate L1 as specified here is per document, in whichever language that document is written.** The bilingual comparison the pipeline also needs is Gate L4 (§26.4) and is a different check on a different input: it needs a *pair* of documents, which requires document classification that does not yet exist (§26.7).
+
+A single failing document is a work item, not an incident. A *rate* of failures above baseline means the parser or the upstream typography changed, and raises `structure_gate_failure_spike` (§10.5) — exactly as `extraction_failure_spike` already does for extraction.
+
+### 26.4 Stages L2–L6 — specified, not built
+
+These are recorded so the shape is agreed before anyone codes them. None is implemented, and each is blocked (§26.7).
+
+**Stage L2 — Akoma Ntoso 3.0.** Target OASIS LegalDocML, namespace `http://docs.oasis-open.org/legaldocml/ns/akn/3.0`. `<act>` for an Act, `<bill>` for a bill, `<act>` with `<analysis><activeModifications>` for an amending Act. Naming follows the AKN Work/Expression/Manifestation pattern (`/akn/my/act/2010-06-02/710/msa@2014-01-15`), ISO 639-3 (`msa`, `eng`). `<analysis>` is the native home for amendment operations; do not invent a parallel structure. Stage L2 assigns `wId`.
+
+**Stage L3 — amendment extraction.** Malaysian amending language is highly formulaic in both languages (`...dipinda dengan menggantikan perkataan "X" dengan perkataan "Y"` / `...is amended by substituting for the words "X" the words "Y"`). Rules first, model second; an LLM may propose an operation but emits into the same schema and passes the same gate. Log the rules-versus-model ratio as a health metric.
+
+```
+GATE L2 (blocking): for every operation with an anchor, that string occurs
+                    exactly once in the target provision at the version in
+                    force immediately before the operation's commencement.
+                    0 matches → extraction or consolidation wrong → review.
+                    >1        → anchor ambiguous → review.
+```
+
+**Stage L4 — consolidation.** Materialise expressions **at change points only**, never per calendar date; a query for "as at 2023-06-15" resolves to the interval containing it. Same-day operations must be ordered deterministically and the order documented. `wId` is preserved across every operation, including renumbering. **Commencement lives on provisions, not instruments** — an Act can come into force section by section via P.U.(B) notification, and modelling it on the instrument publishes text that is not yet law.
+
+```
+GATE L3 (blocking): consolidate to a published AGC reprint's stated date and
+                    diff against the reprint. Normalised whitespace, exact
+                    otherwise. Get this green on a representative sample
+                    before scaling the corpus.
+```
+
+Gate L3 is the correctness oracle for consolidation, and it only exists for Acts with a published reprint. **Every consolidated expression without one is published with no oracle at all**, which is a limit on what may be claimed, not merely a coverage gap. Subsidiary legislation (P.U.(A)/P.U.(B)) is out of scope, yet Malaysian Acts are routinely amended by ministerial order; an expression consolidated only from Acts is therefore not guaranteed complete, and must say so.
+
+**Stage L5 — ELI/JSON-LD.** AKN carries structure and text; ELI carries the metadata graph. Publish both. Every provision needs a dereferenceable IRI — no blank nodes — in a flat `@graph` with `hasPart`/`isPartOf`, on truncatable paths where each level resolves to a listing.
+
+```
+GATE L5 (blocking): SHACL shapes pass; no dangling `amends` target; no
+                    blank-node provision; every expression has `validFrom`;
+                    no two expression intervals overlap for one wId+language.
+```
+
+**Stage L6 — bilingual cross-check.** BM and EN share identical structure, so alignment is on the structural path and needs no embeddings.
+
+```
+GATE L4 (warning): every wId present in one language and absent in the other
+                   is flagged, as is any aligned pair whose child counts or
+                   numbering diverge.
+```
+
+Malay is the authoritative language for federal law, so unexplained divergence is a finding worth publishing, not just an internal bug.
+
+`GATE L6` (ELI validator clean) and `GATE L7` (golden-set recall and abstention accuracy on out-of-corpus questions) are non-blocking; Gate L7 is substantially what `make evaluate` already does.
+
+### 26.5 Publication is served, not static
+
+The source specification for this pipeline proposed a static `dist/` tree with client-side SQLite/FTS5 over HTTP Range and edge-function content negotiation. **That is rejected for this project** (ADR-018). This service is a server-rendered FastAPI application over PostgreSQL with an external nginx (ADR-015), a weighted `tsvector` with `ts_rank_cd` ranking (ADR-007), and pgvector retrieval; adopting a static build would discard all of it and contradict four accepted decisions to buy a property — mirrorability — that a dump artifact provides on its own.
+
+Consequently:
+
+- AKN XML, ELI JSON-LD, and provision pages are served by the application on truncatable ELI paths, and indexed with the existing search machinery rather than a second one.
+- Mirrorability is delivered by an N-Quads dump plus checksums, produced by a Make target. **The dump is gated on the same rights determination as everything else (§26.7): once mirrored, it cannot be withdrawn.**
+- Content negotiation uses extension variants with `Link: rel="alternate"` headers, which needs no infrastructure.
+
+### 26.6 Gate summary
+
+Gates are named `L1`–`L7` to keep them distinct from the three kinds of tracking §0 warns against conflating, and from the gates in §18.
+
+| Gate | Stage | Blocking | Checks |
+| --- | --- | --- | --- |
+| L1 | L1 extraction | Yes | Arrangement of Sections == extracted body tree, per document |
+| L2 | L3 amendment | Yes | Anchor text occurs exactly once in the target at the prior version |
+| L3 | L4 consolidation | Yes | Output == AGC reprint at the reprint's stated date |
+| L4 | L6 bilingual | No | Structural parity between BM and EN |
+| L5 | L5 graph | Yes | SHACL shapes; no dangling `amends`; no blank-node provision |
+| L6 | L5 metadata | No | ELI validator report clean |
+| L7 | retrieval | No | Golden-set recall@k; abstention on out-of-corpus questions |
+
+### 26.7 What is blocked, and on whom
+
+Nothing below is resolvable in code. Each is tracked in `docs/status.md` with an owner.
+
+- **Acts are not yet obtainable, though a discovery spike has now run.** Acts and AGC reprints live on `lom.agc.gov.my`, which is not on the allowlist. A read-only discovery pass on 2026-08-20 (`docs/upstream.md`, A16) found a complete TLS chain, read the Terms & Conditions and FAQ in full, and confirmed the s.61 disclaimer and the pre-2011 coverage boundary from AGC's own text — but `robots.txt` returns an unexplained HTTP 500 rather than a clean absence, which is its own condition and its own decision, not A13's reused by analogy; no listing or document page was fetched, so the reprint-dating convention Gate L3 needs is still unconfirmed; and the FAQ's "for purposes of reference" download language is a fact on the record, not a permission this project has granted itself. Adding the host to the allowlist and beginning to crawl still needs its own recorded policy decision and, per the finding below, legal sign-off — the same discipline parlimen.gov.my got, and for the same reason. Stages L3, L4 and Gate L3 cannot start until both conclude. **Without Acts there is no consolidation and no correctness oracle**, so Stage L1 over the existing bills corpus remains the only part of this pipeline that can proceed today.
+- **`lawnet.com.my` is a different risk class** from AGC and must not be bundled with it: it is a paid PNMB subscription service, so access is governed by a contract, raising terms-of-use and unauthorised-access exposure on top of copyright.
+- **Publishing consolidated law needs legal sign-off**, not merely a rights answer. A Malaysian-qualified lawyer must review the consolidation methodology and the disclaimers before anything consolidated is public-facing. This is a *higher* bar than A14, which concerns mirroring bytes.
+- **The AGC disclaimer must be carried through.** The AGC portal states that copies printed from it do not constitute Gazette copies for the purposes of section 61 of the Interpretation Acts 1948 and 1967. That is a true statement about the authority of the data and must appear on every document derived from it. Note that today's disclaimers are bill-shaped — "Parliament is the authority" is *false* for a consolidated Act, whose authority is the Gazette — so the existing disclaimer regime must be extended, not reused.
+- **Document classification does not exist, and cannot yet be added reliably.** `documents.document_kind` and `documents.language` are written as `"unknown"` at creation and never updated, so the corpus cannot yet be partitioned into BM/EN pairs. This was checked, not merely left undone: `docs/upstream.md` already records that document URLs must be treated as opaque — only the search endpoint's own deep link (`/files/bm/billindex/pdf/...`), which this project does not crawl, carries a language segment in the path; the crawled URLs' filenames carry an inconsistent, partial marker (`DR 17 BM.pdf`, `DR 17 BI.pdf`, `D.R.45_2017 (bm).pdf`, or nothing at all) rather than a regular one. Writing a classifier from the handful of examples on record would repeat the exact mistake A9's status-vocabulary sweep already corrected twice — designing a rule from what happens to be visible rather than a real sweep. It needs the same corpus access Gate L1's pass-rate measurement is blocked on, not just developer time. Gate L1 sidesteps the whole question by reading the language from the document's own Arrangement heading; **Gate L4 cannot**, and is blocked on it.
+- **The stored corpus is not reachable from a clean checkout.** The 1,264 PDFs live on the deployment host or in the S3 gateway. Measuring Gate L1's pass rate over real Malaysian typography requires access to that blob store, and until then the gate is proven only against constructed fixtures.
+
+### 26.8 Release 4 definition of done — Stage L1 only
+
+Release 4 is deliberately scoped to Stage L1 over the existing bills corpus. It is done when:
+
+- Every current, accepted document version has a structural reading at the current extractor and structure versions, recorded additively and replayable offline from stored bytes.
+- Gate L1's verdict is stored per document, with both compared trees, and a reading that fails is preserved for review and never promoted.
+- A parser regression cannot withdraw a reading that passed.
+- Scans are recorded as `no_text`, counted, and distinguishable from documents that legitimately have no contents page.
+- `structure_gate_failure_spike` is raised on a failure-rate spike and is clearable by an operator with a name and a reason.
+- The corpus-wide pass rate is measured against the real stored PDFs and recorded in the `docs/status.md` gate log.
+- `make check` and `make test-pg` are green and `make doctor` is clean.
+
+Of these, only the corpus-wide pass rate is not yet met — the stored PDFs are not reachable from a clean checkout (§26.7) — and it is unmet for that reason alone: `make check` and `make test-pg` are green and `make doctor` is clean today. See `TODO.md`.
+
+## 27. Auditable step pipeline and the audit tree
+
+**Superseded as the current priority by §28**, later the same day and by the same commissioner
+("we are revisiting from scratch, database and object store are for later"). It still takes
+precedence over every other open work item — the embedding model, the OCR worker, and the Gate L1
+corpus measurement included — until its definition of done (§27.6) is met, and what is built of it
+stays in place and supported. The design decision it rests on is ADR-019.
+
+The requirement it answers: every step of the pipeline must be auditable by a person with a file
+browser and no database access; every step must be one Make target; and every step must store its
+output in a local directory structure — for a document, the raw downloaded PDF beside a JSON
+sidecar detailing the source, the raw file, the language, the URL, and the rest of its provenance.
+
+The design principle: **the database remains the authoritative, append-only record (§8–§10 are
+unchanged); the audit tree is a mandatory, byte-reproducible projection of it, written by every
+step as part of that step's own run.** The tree can fall behind the database — that is detectable
+and is an anomaly — but it can never silently disagree with it, because every sidecar is generated
+deterministically from the same rows the step writes, and regenerating the whole tree from the
+database and blob store must be byte-identical (§27.4). Why the projection direction and not
+file-first, and the alternatives rejected, are recorded in ADR-019.
+
+### 27.1 Steps and Make targets
+
+The pipeline decomposes into these steps. Each step is exactly one Make target; no step runs as an
+implicit side effect of another; aggregates are explicit targets that name their members.
+
+| Step | Make target | Reads | Writes to the tree | Network |
+| --- | --- | --- | --- | --- |
+| S1 fetch listings | `fetch-listings` | Parliament listing/archive endpoints | `01-listings/` raw HTML/XML + sidecars | live, approval-gated |
+| S2 parse listings | `parse-listings` | stored snapshots | `02-bills/` one `bill.json` per bill | none |
+| S3 fetch documents | `fetch-documents` | `fetch_queue` | `03-documents/` raw PDFs + sidecars | live, approval-gated |
+| S4 extract text | `reextract` | stored document bytes | `04-text/` extracted text + sidecars | none |
+| S5 structure (Gate L1) | `restructure` | stored document bytes | `05-structures/` both trees + verdict + sidecars | none |
+| S6 chunk | `rechunk` | current extractions | `06-chunks/` chunk sets + sidecars | none |
+| S7 embed | `reembed` | current chunk sets | `07-embeddings/` sidecars only (§27.3) | provider-dependent |
+
+Rules:
+
+- **One step, one target.** `make scrape` remains, redefined as the explicit aggregate S1→S2→S3
+  in one run; `make pipeline` is the aggregate S1→S6 (S7 joins once ADR-008 concludes). Both
+  aggregates are conveniences over the step targets, never a different code path.
+- S4–S7 keep their existing target names and semantics: they process everything pending or below
+  the current code version, which covers both the step role (process new items) and the backfill
+  role (reprocess at a bumped version). They keep their dry-run default when run standalone; the
+  `pipeline` aggregate runs them applied.
+- S1 and S3 are live and stay behind the existing `--approve-live` gate and crawl policy (§5,
+  §11.7). S2 and S4–S6 are fully offline — auditable and re-runnable from stored bytes alone,
+  exactly like §9.6 replay.
+- **Every step is idempotent against the tree**: re-running a step with unchanged inputs writes
+  no new artifact and rewrites no existing one, the same invariant §8 already imposes on rows.
+- **Every step run writes a manifest** to `manifests/<step>/<run-id>.json`: step name, run ID,
+  invoking target, started/finished times, the code versions involved, counts of inputs
+  considered, outputs written, items unchanged, and bounded failure details. The manifest is what
+  makes a step *run* auditable, as the sidecars make its *artifacts* auditable.
+
+### 27.2 The audit tree layout
+
+The tree lives under `AUDIT_TREE_ROOT` (default `./data` in development, a dedicated volume in
+containers). It is local, gitignored state, like `var/`.
+
+```text
+${AUDIT_TREE_ROOT}/
+├── manifests/<step>/<run-id>.json
+├── 01-listings/<chamber>-<kind>[-<year>]-<lang>/<requested-at>/raw.html|raw.xml + metadata.json
+├── 02-bills/<bill-slug>/bill.json
+├── 03-documents/<bill-slug>/<doc-key>/v<NNN>/document.pdf + metadata.json
+├── 04-text/<bill-slug>/<doc-key>/v<NNN>/<extractor>@<version>/text.txt + metadata.json
+├── 05-structures/<bill-slug>/<doc-key>/v<NNN>/structure@<version>/structure.json + metadata.json
+├── 06-chunks/<bill-slug>/<doc-key>/v<NNN>/chunker@<version>/chunks.json + metadata.json
+└── 07-embeddings/<bill-slug>/<doc-key>/v<NNN>/<model-id>/metadata.json
+```
+
+Rules:
+
+- **Paths are built only from our own identifiers** — bill slugs, a `doc-<first 8 hex of the
+  document UUID>` key (full UUID on collision), version numbers, and code-version strings. Never
+  from upstream filenames or URL fragments (§17); those live inside the sidecar.
+- **Paths never encode mutable fields.** Language and document kind are sidecar fields, not
+  directory names, so a later classification never moves a file.
+- **The append-only rule extends to the tree.** A new document version is a new `v<NNN>/`
+  directory; a superseded version's directory stays. Nothing in the tree is overwritten except
+  `02-bills/<slug>/bill.json`, which is explicitly a *current-state* projection — its history is
+  `record_changes`, in the database, where history lives.
+- **Legibility beats deduplication here.** A document linked from two bills appears under both;
+  the sidecars carry the same SHA-256, which is how an auditor (or `verify-audit`) sees they are
+  one document. The blob store keeps physical storage deduplicated; at 0.24 GB for the whole
+  corpus (A12), tree duplication costs nothing that matters.
+
+### 27.3 The sidecar contract
+
+Every artifact in the tree carries a `metadata.json` sidecar (for `02-bills`, the `bill.json` is
+itself the artifact and embeds the same envelope). Sidecars are versioned by
+`metadata_schema_version`, and serialise deterministically: UTF-8, LF line endings, two-space
+indentation, keys sorted, trailing newline — because §27.4's byte-identical rebuild is the test
+that proves the tree carries no state of its own.
+
+A document sidecar must carry at least:
+
+```json
+{
+  "metadata_schema_version": 1,
+  "artifact": "document",
+  "raw_file": "document.pdf",
+  "sha256": "…",
+  "byte_size": 273181,
+  "media_type_declared": "application/octet-stream",
+  "media_type_detected": "application/pdf",
+  "source": {
+    "publisher": "Parlimen Malaysia",
+    "host": "www.parlimen.gov.my",
+    "url": "https://www.parlimen.gov.my/…/DR152026.pdf",
+    "final_url": "https://www.parlimen.gov.my/…/DR152026.pdf",
+    "upstream_filename": "DR 15 2026.pdf",
+    "listing_url": "https://www.parlimen.gov.my/bills-dewan-rakyat.html?…"
+  },
+  "http": { "status": 200, "etag": null, "last_modified": null },
+  "retrieved_at": "2026-08-21T02:15:04Z",
+  "language": "unknown",
+  "document_kind": "unknown",
+  "bill": {
+    "identifier_raw": "D.R.15/2026",
+    "identifier_normalized": "DR-15-2026",
+    "slug": "dr-15-2026"
+  },
+  "chambers": ["dewan_rakyat", "dewan_negara"],
+  "version_no": 1,
+  "is_current": true,
+  "produced_by": { "step": "fetch-documents", "run_id": "…", "parser_version": "…" },
+  "database": { "document_id": "…", "document_version_id": "…", "blob_sha256": "…" }
+}
+```
+
+Derived-step sidecars (text, structure, chunks, embeddings) additionally name the tree path of the
+input artifact they were derived from and the producing tool and version (`extractor`,
+`structure_version`, `chunker_version`, `embedding_model_id`), so the derivation chain is walkable
+on disk exactly as it is in the schema. Embedding sidecars record the model, dimension, chunk-set
+reference, and a checksum of the vectors, not the vectors themselves — a vector is not
+human-auditable and the database is its home.
+
+Honesty rule: `language` and `document_kind` are `"unknown"` today because the classification
+sweep has not run (§26.7, TODO 2.4). The sidecar states what the record states — it never guesses.
+When classification lands, `make audit-rebuild` backfills every sidecar from the corrected rows.
+
+### 27.4 Verification and rebuild
+
+Two targets keep the projection honest:
+
+- `make verify-audit` — offline. Re-hashes every file in the tree against its sidecar,
+  regenerates every sidecar from the database and compares byte-for-byte, and checks that every
+  current row that should have a tree artifact has one. Any disagreement raises
+  `audit_tree_divergence` (critical, §10.5) and exits non-zero. This is `make doctor`'s
+  file-level counterpart and joins it as an operations gate.
+- `make audit-rebuild` — offline. Regenerates the entire tree from the database and blob store.
+  Running it against an already-correct tree must be byte-identical and write nothing, proven by
+  a test. It is the recovery path (a lost tree costs nothing), the backfill path (a sidecar
+  schema bump or a classification sweep re-emits every sidecar), and the materialisation path for
+  the already-ingested corpus, which predates this section.
+
+### 27.5 What this changes, and what it does not
+
+- §8, §9, and §10 are unchanged: the database is still the record, the blob store is still the
+  archival byte store, and every invariant on them stands.
+- The backup contract (§16.4, §16.5) is unchanged. The tree is **not** backed up: it is
+  rebuildable from what is backed up, and backing up a projection would imply it carries state,
+  which it must never do.
+- §9.6 replay and the backfill jobs are unchanged in semantics; they gain tree output.
+- The `/status` page gains the tree's last `verify-audit` time and result alongside the existing
+  pipeline versions (§10.4).
+
+### 27.6 Definition of done
+
+- Every step in §27.1 is invokable alone by its Make target, and every run leaves a manifest.
+- After a fixture-mode `make pipeline` run, every artifact appears in the tree with a sidecar
+  whose hash matches its file, and re-running the pipeline writes nothing new.
+- `make audit-rebuild` over an existing tree is byte-identical, proven by a test.
+- `make verify-audit` is clean on a correct tree and exits non-zero on a single tampered byte,
+  proven by a test.
+- The already-stored corpus (1,264 PDFs) is materialised into the tree by `make audit-rebuild`
+  wherever the blob store lives, with the counts recorded in the `docs/status.md` gate log.
+- `make check` and `make test-pg` are green and `make doctor` is clean.
+
+### 27.7 The MinerU markdown reading
+
+A second, independently versioned reading of the same stored PDFs, this time via a hosted
+vision-language model rather than the native-text `pypdf` path (ADR-020). Directed on 2026-08-21,
+using a hosted MinerU2.5 instance.
+
+**What it is.** MinerU2.5 reads a *page image* and returns a list of content blocks — type
+(`text`, `table`, `equation`, `title`, `header`, …), a normalised bounding box, and recognised
+content (text, an HTML table, or LaTeX) — via a standard vLLM OpenAI-compatible Chat Completions
+API. `billwatcher.mineru` renders each stored PDF's pages to images (`pypdfium2`), sends them to
+the configured endpoint through the vendor's own `mineru-vl-utils` client — never reimplemented by
+hand, because its prompt templates and per-block sampling parameters are exactly the kind of
+detail worth trusting to the maintainers — and assembles the returned blocks into markdown,
+trusting the model's own reading order rather than re-deriving one from bounding boxes.
+
+**Where it lives.** Written only as a local file artifact, under the `04-text/` tier §27.2 already
+specifies:
+
+```
+data/04-text/<bill-slug>/<doc-key>/v<NNN>/mineru@<version>/document.md + metadata.json
+```
+
+Never into `document_extractions`: that table demotes every `is_current` row for a version
+regardless of extractor name (TODO 2.4), and a second writer would silently destroy the native
+`pypdf` extraction the moment it ran. This reading avoids that landmine the same way Stage L1's
+structural reading does — by not touching the table at all — except here there is no database row
+whatsoever, not even in a dedicated table: the whole point of this reading is to live as a file,
+and eligibility (has this version already been read?) is decided by whether that file already
+exists, not by a query.
+
+**What a quarantined document gets.** A download that failed PDF validation is still a
+bytes-on-the-wire fact; if it was attempted, its status (`succeeded`/`empty`/`failed`) is recorded
+honestly in the sidecar rather than the document being silently skipped.
+
+**Configuration**, off by default because sending official document images to a third-party
+inference host is a data-handling decision, not a default (ADR-020, matching ADR-009's treatment
+of the RAG endpoint):
+
+```dotenv
+MINERU_ENABLED=false
+MINERU_BASE_URL=
+MINERU_MODEL_NAME=
+MINERU_API_KEY=
+MINERU_RENDER_DPI=150
+MINERU_TIMEOUT_SECONDS=120
+```
+
+`make mineru-extract` (dry-run default, `--apply` to write) processes current, accepted document
+versions that have a bill link and no existing markdown file, oldest first, up to `--limit`. It
+never contacts Parliament, but it does call the configured MinerU endpoint over the network for
+each eligible document — a live, real-cost call, which is why this is a manual step and not part
+of the scheduled worker or `make pipeline`.
+
+## 28. The file-first pipeline (`billwatcher.pipeline`)
+
+Directed on 2026-08-21, in parallel with everything in §6-§27: "database and object store are for
+later... the pipeline should work with interface of input, such as file and also from db or
+object store" (ADR-021). This section describes a second, independent pipeline living entirely
+under `billwatcher.pipeline`. It does not replace §6-§27 — the Postgres-backed system stays in
+place, untouched, dormant — and it is not described by any other section of this document.
+
+### 28.1 The interface, not the backend
+
+Every step depends only on `billwatcher.pipeline.store.PipelineStore`, a protocol:
+`save_listing`/`iter_listings`, `load_bill`/`save_bill`/`iter_bill_slugs`,
+`has_document`/`save_document`/`iter_documents`. `FileStore` — local directories and JSON — is the
+only implementation. A database or object-store backend is a later, additive extension: implement
+the same protocol and every step works unchanged, because no step imports `FileStore` by name.
+
+### 28.2 Steps
+
+This table is the only place this pipeline's targets are specified; where it and the code disagree,
+the code is the defect. Every path below is relative to `PIPELINE_DATA_ROOT`, and every version
+directory is `documents/<bill-slug>/<doc-key>/v<NNN>/`.
+
+| Step | Function | Network | Reads | Writes |
+| --- | --- | --- | --- | --- |
+| 1 fetch listings | `pipeline.listings.fetch_listings` | live | Parliament | `listings/<key>/body.<ext>` + `metadata.json` |
+| 2 parse listings | `pipeline.listings.parse_listings` | none | stored listings | `bills/<slug>/bill.json` |
+| 3 fetch documents | `pipeline.documents.fetch_documents` | live | `bills/*/bill.json` | `document.pdf` + `metadata.json` |
+| 3b import markdown | CLI only | none | a markdown file the operator produced elsewhere | `document.md` + `document.markdown.provenance.json` |
+| 4 convert to Akoma Ntoso | `pipeline.akn.convert_to_akn` | live (vLLM) | `document.md`, `bill.json` | `document.akn.xml` + `document.akn.provenance.json`, always `document.akn.gate.json`, and `document.akn.rejected.xml` instead of the XML when Gate P1 blocks |
+| 5 generate semantic files | `pipeline.semantic.generate_semantic_files` | none | `document.akn.xml`, `bill.json` | `document.jsonld` + `document.nq` + `document.semantic.provenance.json` |
+| verify | — | none | everything above | nothing; it reports (§28.9) |
+
+Every run of every step also writes `manifests/<step>/<run-id>.json` (§28.9). `KNOWN_FILENAMES` in
+`pipeline/store.py` is the closed set of filenames above; anything else in a version directory is
+reported by `verify` rather than ignored.
+
+`billwatcher pipeline fetch-listings|parse-listings|fetch-documents|import-markdown|convert-to-akn|generate-semantic|verify`
+runs them, with `make pipeline-fetch-listings`/`pipeline-parse-listings`/`pipeline-fetch-documents`/
+`pipeline-convert-to-akn`/`pipeline-generate-semantic` for the five corpus-wide steps.
+`import-markdown` is per document and takes the language as an argument, so it stays a CLI command
+rather than a target that would hide it.
+
+Steps 1 and 3 require `SCRAPE_ENABLED=true` or `--approve-live`, the same politeness and
+authorization discipline as the Postgres-backed `scrape`/`fetch-documents` commands — that
+discipline is not a database concern. Step 4 requires `AKN_LLM_ENABLED=true`, `AKN_LLM_BASE_URL`,
+and `AKN_LLM_MODEL_ID`. Steps 2, 3b, 5 and `verify` need neither network nor model: they read stored
+files only.
+
+**Step 3b is the seam, not a gap.** PDF-to-markdown extraction is out of scope for this pipeline
+(§28.11) because the operator's own vLLM endpoint does it. What `import-markdown`
+adds is the *record* of that: the markdown lands in the store together with a provenance sidecar
+naming what it was extracted from and, critically, which language it is in — the fact §28.7 makes a
+permanent component of every published identifier.
+
+Fetch and parse are separated for the same reason §11.1 separates them in the Postgres-backed
+scraper: a parser fix must be replayable from stored bytes without re-crawling Parliament.
+`billwatcher.scraper.fetch`, `.policy`, `.robots`, `.normalize`, `.parse_listing`, and
+`.parse_archive` are reused as-is — none of them ever imported a database model, so nothing about
+this pipeline required rewriting HTML/XML parsing, HTTP fetch policy, or identifier
+normalisation.
+
+### 28.3 Bill records
+
+One JSON file per bill, `bills/<slug>/bill.json`: identifier (raw, normalized, number, year,
+originating chamber, slug — all already produced by `normalize.normalize_identifier`), a title per
+observed language, one current record per chamber (status raw/normalized, presenter, dates,
+source URL, `last_seen_at`), and an accumulated, deduplicated list of document URLs. `first_seen_at`
+is set once; `last_seen_at` is a monotonic max across every merge, not a blind overwrite — a real
+bug, found while testing this pipeline: `FileStore.iter_listings` processes listings in storage-key
+order, not fetch order, so a bill referenced by both chambers (D.R.15/2026, per A4) could otherwise
+settle with `last_seen_at` earlier than its own `first_seen_at`.
+
+Deliberately simple: no field-level change history, no event fingerprints, no `record_changes`
+equivalent. That sophistication belongs to the database this pipeline is not using yet.
+
+### 28.4 Document identity, in the store
+
+A document's identity **in the store** is its URL, content-addressed as `doc-<sha256(url)[:8]>` —
+there is no database to assign an id. A URL already downloaded is skipped, not re-verified or
+re-hashed; there is no version tracking yet. A document shared by two bills gets its own directory
+under each bill slug (legibility over deduplication, the same choice §27.2 made for the audit tree).
+
+This key is deliberately **not** a published identifier. It names a location we fetched from, which
+is exactly the property a permanent identifier must not have, and 1.10 published it as one. What is
+published is built in §28.7 instead.
+
+### 28.5 Converting markdown to Akoma Ntoso
+
+Markdown itself is produced elsewhere (§28.11) and lands at
+`documents/<bill-slug>/<doc-key>/v<NNN>/document.md` through `import-markdown` (§28.2).
+`convert_to_akn` reads it and writes `document.akn.xml` beside it: `<bill>` for a Fasal/Clause
+document, `<act>` for a Seksyen/Section one (§26.2, `infer_language_and_unit` reads the markdown's
+own Arrangement heading to decide), with a full FRBR Work/Expression/Manifestation triple built by
+§28.7 — never from the document's store key, which is what 1.10 did.
+
+The rendered document must be **valid Akoma Ntoso 3.0** and is checked against the vendored OASIS
+schema before it is written; an invalid render is our renderer's defect, so it fails the document
+loudly (`AknSchemaError`) rather than being filed as a bad reading (§28.8). Whether the tree itself
+is publishable is Gate P1's question, also §28.8.
+
+Reading the provision hierarchy out of markdown is behind `pipeline.akn.MarkdownStructureExtractor`
+— one method, `extract(markdown_text, *, unit) -> Node`, plus the `name`/`model_id`/`prompt_sha256`
+an extractor must report so its identity lands in the artifact's provenance (§28.9) — so the
+decision of *how* is independent of everything else in this step (ADR-022):
+
+- **`VllmMarkdownStructureExtractor`** (`pipeline.akn_llm`), the production path, sends the
+  markdown to a configured OpenAI-compatible vLLM endpoint and asks for the tree as JSON, at the
+  operator's direction. This is the only mechanism able to tell a document's Arrangement of
+  Sections (table of contents) apart from its body — a table-of-contents entry is textually
+  identical to the real provision it lists, which a regex cannot resolve without a page/geometry
+  signal markdown does not carry.
+- **`RegexMarkdownStructureExtractor`** wraps a deterministic line classifier
+  (`parse_markdown_structure`) built on `billwatcher.legislation.vocabulary` — reused as-is,
+  since it is pure text classification with no database or PDF-layout dependency. Available for
+  tests and explicit offline use; does not solve the Arrangement/body problem above, and is never
+  a silent production fallback.
+
+**eId assignment is never delegated to either extractor.** `pipeline.akn.assign_eids` computes
+every eId deterministically from a node's own `node_type`/`num` and its parent's, after whichever
+extractor ran — the same discipline HANDOFF 26.2 requires of `wId`: an identifier comes from what
+was printed, never from a guess, model-generated or otherwise. A live smoke test against the real
+endpoint found the model wrapping every parenthesised token in its own punctuation (`"(1)"`
+instead of `"1"`), which would have poisoned every eId beneath it; fixed defensively
+(`_normalize_num` strips it regardless of what the model returns) as well as in the prompt.
+
+### 28.6 From Akoma Ntoso to the semantic graph
+
+Directed on 2026-08-21: "after akn, then it should be to the semantic files such as jsonld and
+rfg" — read as JSON-LD plus RDF (N-Quads); flagged to the commissioner as an interpretation of
+"rfg", to be corrected if wrong. `generate_semantic_files` (`pipeline.semantic`) is step 5: for
+every document whose semantic files are missing or no longer match their inputs (§28.9), it reads
+the XML back (`parse_akn`, a reverse-parser producing the same `Node` tree, Expression URI, root
+element name and language `render_akn` produced), builds one graph, and writes `document.jsonld` and
+`document.nq` beside the XML.
+
+Reading the AKN file back rather than reusing step 4's in-memory tree keeps the two steps able to
+run independently, hours or files apart — step 5 depends only on step 4's file output, the same
+seam every other step in this pipeline uses.
+
+The JSON-LD graph is a flat `@graph` of one node per document and per provision, each with an
+`@id` (the document's Expression IRI, or a provision's IRI suffixed `/~<eid>`, both from §28.7), an
+`@type` (`akn:bill`/`akn:act`/`akn:<node_type>`), `eli:number`, and `schema:name`/`schema:text` where
+the markdown carried them; parent/child edges are `eli:has_part`/`eli:is_part_of`. **JSON-LD and
+N-Quads cannot disagree**, because there is one graph construction and two serialisations of it —
+originally a hand-rolled JSON-LD dict that the N-Quads writer flattened, and since 1.12 a single
+`rdflib.Dataset` serialised twice (ADR-028). The guarantee is unchanged; the mechanism is stronger,
+and it is what buys correct N-Quads escaping and BCP 47 language tags on every literal, without
+which a bilingual corpus cannot tell a consumer whether it is reading Malay or English.
+
+Both outputs are **explicitly sorted** before they are written, because rdflib promises no stable
+serialisation order and byte comparison is how this pipeline's idempotence is checked (§28.9).
+
+A malformed or truncated `document.akn.xml` is counted `failed`, not raised — this step runs over
+every eligible document in the store in one pass, and one bad file must not stop the rest. XML
+declaring a doctype or an entity is refused outright, the same refusal `scraper.parse_archive`
+already makes for the archive tree: these bytes are normally ours, but markdown and Akoma Ntoso can
+be imported by an operator and the result is served publicly.
+
+**Gate L5 is not run.** Its SHACL shapes (§26.4, §26.6) check for dangling `amends` targets and
+missing or overlapping `validFrom` intervals, all of which Stages L3 and L4 would have to produce
+first, so pySHACL today would validate an empty half of the shape set and report success. Building
+the graph in rdflib is what lets those shapes drop in later without a rewrite; until then the ELI
+predicates are this project's reading of ELI rather than a validated one, and should be cited as
+such (ADR-028).
+
+### 28.7 Published identifiers: FRBR Work, Expression, Manifestation, provision
+
+`pipeline.frbr` owns every published IRI, because these strings are permanent: once a citation or a
+mirror points at one, it has to keep meaning the same document. The scheme follows the Akoma Ntoso
+naming convention, with the **originating** chamber (§8, ADR-002) in the subtype slot:
+
+| Level | Path | What it is |
+| --- | --- | --- |
+| Work | `/akn/my/bill/dr/2026/15` | the bill itself, in any language |
+| Expression | `/akn/my/bill/dr/2026/15/msa@` | that bill in one language |
+| Manifestation | `/akn/my/bill/dr/2026/15/msa@.xml` | one file of it (`.xml`, `.jsonld`, `.nq`, `.html`) |
+| Provision | `/akn/my/bill/dr/2026/15/msa@/~cl_5__subsec_1` | one provision of that Expression |
+
+Normative rules, all of them consequences of "permanent":
+
+- **Every component is a fact the document published.** Country, document type (from its own
+  Arrangement heading, §26.2), originating chamber, year, number, language. **Nothing derived from a
+  URL, a byte hash, or a retrieval time may appear in an IRI**, because all three change when we
+  re-fetch the same document.
+- **The Expression's version date is empty** — `msa@`, which in the AKN convention reads as "the
+  only version we have". `@YYYY-MM-DD` is reserved for a real document date on the record.
+- **Malay and English are two Expressions of one Work.** The language comes from what was declared
+  when the markdown was imported, cross-checked against the Arrangement heading; a disagreement is
+  recorded in the gate verdict rather than silently resolved, and **a document with no language from
+  either source fails**.
+- **Two spellings, one mapping.** ISO 639-3 (`msa`/`eng`) in the AKN name; BCP 47 (`ms`/`en`) on RDF
+  literals and HTML `lang`, per §15. `frbr.AKN_LANGUAGES` is the only place they meet.
+- **A missing fact is a refusal, not a default.** `FrbrIdentityError` fails the document by name in
+  the step's failure list. A placeholder inside a citable identifier is worse than no output.
+- **A request segment is validated and then discarded.** `parse_work_path` and
+  `parse_expression_segment` return `None` for anything malformed (a caller answers 404), and the
+  store key is recomputed from the validated identity (`slug_for`) — never joined from the request
+  string, which is §17's rule applied to serving.
+
+Two limits are contract, not oversight. There is **no version chain**: a bill revised and
+republished at a new URL resolves to the same Expression IRI, which A11 records as never yet
+observed, and which needs an Expression date or a version component when it is. And the `dn` branch
+has never seen real data, because no `D.N.` identifier exists anywhere in 35 years of archive (A5).
+
+### 28.8 Gate P1 — does the tree account for the markdown, and is the XML valid?
+
+§26's design principle applies to this pipeline too: no stage may best-effort its way past a gate.
+Step 4's canonical output is a **model's** reading (ADR-022), and a model that drops a clause or
+renumbers a subsection produces a document that parses, validates, builds a graph, and is wrong.
+
+Gate P1 (`pipeline.fidelity`) is the deterministic check between the extractor and the store. It
+asks whether a reading is *accountable*, not whether it is good:
+
+| Finding | Blocking | Check |
+| --- | --- | --- |
+| `duplicate_eid` | Yes | two provisions resolving to one identifier |
+| `missing_num` | Yes | a provision with no printed number (it would inherit its parent's eId) |
+| `sequence_gap` | Yes | a skipped number, with an inserted `5A` modelled rather than tolerated |
+| `sequence_order` | Yes | a number running backwards — the table-of-contents bleed signature |
+| `low_text_coverage` | Yes | distinct source tokens absent from the tree, against a threshold |
+| `unanchored_run` | Yes | the document's provision run does not start at 1 or 2 |
+| `no_source_text` | Yes | a tree judged against a source with nothing scoreable in it |
+
+- **Only coverage has a threshold**, `AKN_GATE_MIN_TEXT_COVERAGE` (default 0.95), because the real
+  corpus is unmeasured (A15). Exact where exactness is defensible; configuration where it is a
+  judgement, for the reason ADR-017 gives: a gate that fires on everything trains an operator to
+  clear a queue without reading it.
+- **Coverage is measured from the document's first structural heading onward**, over *distinct*
+  tokens, excluding the words that name a structure (`BAHAGIAN`, `JADUAL`, `SUSUNAN FASAL`). All
+  three exclusions are the same rule: a provision tree can only be held to the text a provision tree
+  can contain. Counting a bill's front matter — cover page, long title, enacting formula — scored a
+  *faithful* reading of a real bill 0.71-0.81 against the 0.95 default; the structural keywords cost
+  a further 5.2% on a short document. With both excluded a faithful reading scores exactly 1.0. The
+  cost, stated: front matter is unchecked, which it effectively always was.
+- **Continuity alone is not enough**, because comparing adjacent pairs is blind to a constant
+  offset: a tree numbered 3, 4, 5 for a document printed 1, 2, 3 is continuous and scores 1.0 while
+  every eId and provision IRI is off by two. `unanchored_run` checks where the run starts.
+- An Arrangement entry contributes no new distinct word — the provision it lists prints the same words —
+  so the measure is insensitive to how long a contents page is, while a dropped page, clause or
+  schedule removes whole distinct words. The multiset ratio is reported beside the verdict and never
+  blocks.
+- **Provisions are one document-wide sequence**; only subsections, paragraphs and subparagraphs
+  restart inside their parent. Checking every sibling list would demand that Part II's first clause
+  be numbered 1 and would fail nearly every multi-Part bill.
+- **A rejected document is a review item, not a discard.** `document.akn.gate.json` is written on
+  every path, including a failure that happened before a tree existed; a blocked render is kept as
+  `document.akn.rejected.xml` and `document.akn.xml` is not written, because `has_akn` is the
+  promotion flag every later step reads.
+- **The gate is replayable offline** from the stored markdown with no model call, which is why
+  `AKN_FIDELITY_GATE_VERSION` is separate from `AKN_VERSION`: a threshold change re-judges every
+  document without re-rendering any of them.
+
+Separately, the rendered XML is validated against the **vendored OASIS Akoma Ntoso 3.0 XSD**
+(`pipeline/schemas/`, byte-identical to upstream with recorded digests, loaded from disk so
+validation never touches the network). A schema violation is a defect in our renderer, not a
+statement about the document, so it counts `failed` rather than `rejected` and names the errors.
+
+Gate P1 is **not** Gate L1, and §26.6's table is unaffected: Gate L1 compares two independent
+readings of one PDF using page geometry (ADR-016), which is a stronger oracle this step does not
+have — the LLM extractor is instructed to drop the Arrangement, since separating it from the body is
+the problem it was introduced to solve. What Gate P1 cannot detect is stated rather than implied: it
+measures source words reaching the tree, so a model that **invents** a subsection while preserving
+every real word passes.
+
+### 28.9 Provenance, manifests, and `verify`
+
+Every derived artifact carries `document.<artifact>.provenance.json` naming what it was built from
+(`inputs`: every source file with its SHA-256, plus code version, gate version, threshold, producer,
+model id, prompt digest, base IRI) and what was written (`output`: SHA-256 and byte size per file).
+**Eligibility is decided by comparing a freshly computed `inputs` against the stored one**, never by
+asking whether the output file exists — which is what makes a corrected identifier scheme, prompt or
+renderer actually regenerate the corpus instead of leaving stale bytes behind a check that cannot
+notice. An artifact with no provenance record counts as stale, so a pre-provenance corpus regenerates
+once and then settles.
+
+**A provenance record carries no timestamp and no run id.** Either would make every re-run rewrite
+it and destroy the "a repeat run writes nothing" property this store's determinism rests on (§27.3,
+ADR-019). Volatile facts belong to `manifests/<step>/<run-id>.json`: start and finish, code
+versions, counts, and every failure named by bill, document and version. A step's counts stay a flat
+histogram — that is what the CLI echoes — with failures beside them rather than mixed into it.
+
+Every write is atomic (temp file, then `os.replace`), because a later step, a `verify` pass and the
+public serving surface all read these files and none of them may observe a half-written artifact.
+Identical bytes are still short-circuited, so an unchanged file keeps its mtime.
+
+`billwatcher pipeline verify` is the offline audit this makes possible, and the file-first analogue
+of `verify-audit` (§27.4): it re-hashes each artifact against its provenance `output`, reports
+artifacts whose `inputs` no longer match what the current code would produce, and lists files no
+step writes at all — a killed process's temp file, a hand-dropped edit, an artifact from a future
+version. Nothing is signed, so this detects drift and accident, not an adversary with write access.
+
+### 28.10 Publication: what is served, and under which flags
+
+This is ADR-018 being implemented, not re-decided: the corpus is served by the application on the
+truncatable §28.7 paths, with extension variants and `Link: rel="alternate"` for content
+negotiation, and each level resolving to a listing.
+
+**The store keeps the full text; redaction happens at the serving boundary** (`pipeline.redact`) —
+the same posture ADR-004 already takes for stored PDF bytes. The consequence is the point: the
+rights decision is a configuration change rather than a corpus regeneration.
+
+| Setting | Default | Governs |
+| --- | --- | --- |
+| `SERVE_LEGISLATION_CORPUS` | `false` | whether the corpus surface exists at all; every path 404s while it is off |
+| `LEGISLATION_PUBLICATION_MODE` | `metadata` | `metadata` publishes structure only; `full` publishes provision text |
+| `LEGISLATION_CORPUS_RIGHTS_CONFIRMED` | `false` | required in production for the first |
+| `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED` | `false` | required in production for `full`, on top of the above |
+
+Two flags rather than one, because they are two questions with different risk: a structural reading
+republishes none of the drafter's prose, while provision text is the A14 question §26.7 and ADR-004
+already govern. Gating the lower-risk artifact behind a hard control while leaving the higher-risk
+one open would be, in ADR-018's words, exactly backwards. Production **refuses to boot** rather than
+warning, so turning either on is a recorded decision.
+
+In `metadata` mode: every `<p>` inside `<content>`/`<intro>`/`<wrapUp>` is emptied and every
+`schema:text` triple dropped, on parsed structures rather than by regular expression over serialised
+bytes, and the redacted Akoma Ntoso stays schema-valid because an invalid document is not a useful
+thing to publish either. **Provision headings are published**, as a recorded judgement (ADR-027):
+they are the same class of bounded fragment as a bill title, which this site already publishes and
+which ADR-004 permits, and `redact.KEEP_HEADINGS` is the one constant that reverses it.
+
+**The bound on that fragment is enforced, in two independent layers, and must stay that way.** It
+was not, in the first implementation, and the consequence was the most serious defect in this work:
+a Malaysian amendment bill carries no marginal note and runs the whole provision in after its
+number, so entire drafted provisions became `heading` values and were served verbatim in every
+representation while the A14 review is open. `akn.split_marginal_note` classifies the text at parse
+time and `redact.publishable_heading` re-applies the same test at the serving boundary — 80
+characters, no terminal punctuation, matching `legislation.layout`'s existing marginal-note bound and
+the shapes in the real captured fixtures. The duplication is deliberate: the parser is not the only
+producer of a tree, since an LLM extractor fills the same field, and a prompt is a request rather
+than a guarantee. `redact.contains_provision_text` checks headings as well as body wrappers, because
+a self-check that inspected only `<content>` stayed silent through exactly the leak it existed to
+catch.
+
+The N-Quads **mirror dump** §26.5 promises is not part of this and stays unbuilt: a served surface
+can be withdrawn, a mirror cannot, and TODO 1.7 carries the legal work that gates it.
+
+### 28.11 What this pipeline does not do
+
+- **No PDF parsing or extraction.** The operator has a vLLM OpenAI-compatible endpoint
+  (`https://llm.loqasi.io/v1/`) for that, separately. `fetch_documents` stops at a downloaded,
+  magic-byte-validated PDF; markdown arrives at `document.md` from that external process through
+  `import-markdown` (§28.2), which records its language and source but does not produce it.
+- **No database, no object store, no blob deduplication.** `PIPELINE_DATA_ROOT` (default
+  `pipeline-data/`, a deliberately separate setting from `AUDIT_TREE_ROOT`) is the whole record.
+- **No reconciliation with the Postgres-backed system.** The two pipelines coexist without
+  awareness of each other; bringing them together is future work, not attempted here.
+- **No measurement.** Nothing has been fetched into `pipeline-data/`, and the 1,264 stored PDFs of
+  the Postgres-backed corpus are not reachable from a clean checkout (§26.7), so Gate P1's pass rate
+  over real Malaysian typography is unknown and its default threshold is uncalibrated. Every claim
+  about this pipeline is a claim about constructed fixtures and one direct run, and nothing here
+  should be read as a measured pass rate.
+- **No amendment, consolidation, or point-in-time query.** Those are Stages L3–L4 of §26.4, and they
+  are blocked on §26.7, not on this pipeline. Which is also why Gate L5 cannot run (§28.6).
+

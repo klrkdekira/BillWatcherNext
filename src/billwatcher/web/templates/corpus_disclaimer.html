@@ -1,0 +1,26 @@
+{#
+  Included by every page of the corpus. It is not boilerplate: these pages publish a machine
+  reading of somebody else's document, and a reader who cannot see how it was produced, what it
+  was produced from, or how well it accounted for the source has been given a false impression of
+  authority. `document` is None on the listing levels, where there is no single source document.
+#}
+<section class="notice" aria-label="How this reading was produced">
+  <p><strong>Unofficial index.</strong> This is BillWatcherNext's own reading of a document published by the Parliament of Malaysia. It is a parliamentary document, not a statement that it is enacted or currently in force, and Parliament remains the authoritative source.</p>
+  {% if document %}
+  <p><strong>Machine-derived.</strong> The structure below was read by machine from a markdown transcription of the source PDF{% if document.producer %}, by <code>{{ document.producer }}</code>{% endif %}{% if document.model_id %} using model <code>{{ document.model_id }}</code>{% endif %}. Reading a document's provision structure is LLM-assisted by design, because telling an Arrangement of Clauses apart from the body it lists needs contextual judgement{% if document.producer == "regex" %} — though this particular document was read by the deterministic pattern reader rather than by a language model{% endif %}. No person has reviewed it.</p>
+  <p><strong>Source document.</strong> {% if document.source_url %}<a href="{{ document.source_url }}" rel="external nofollow">{{ document.source_url }}</a>{% else %}Not recorded.{% endif %}{% if document.source_sha256 %} sha256 <code>{{ document.source_sha256 }}</code>.{% endif %}{% if document.retrieved_at %} Our copy was retrieved on {{ document.retrieved_at }}; the official URL may serve different bytes now.{% endif %} Where this reading and that document disagree, that document is right.</p>
+  {% if document.gate %}
+  <p><strong>Fidelity gate P1: {{ document.gate.status }}.</strong>
+    {% if document.gate.coverage %}The reading accounts for {{ document.gate.coverage }} of the distinct words in the transcription it was read from{% if document.gate.min_coverage %}, against a threshold of {{ document.gate.min_coverage }}{% endif %}.{% endif %}
+    {% if document.gate.node_count %} It found {{ document.gate.node_count }} numbered provisions.{% endif %}
+    {% if document.gate.blocking_count %} {{ document.gate.blocking_count }} finding{{ "" if document.gate.blocking_count == 1 else "s" }} blocked publication of a stricter reading{% if document.gate.kinds %}: {{ document.gate.kinds | join(", ") }}{% endif %}.{% endif %}
+    {% if document.gate.language_disagreement %} The declared language and the document's own heading disagree ({{ document.gate.language_disagreement }}); the declared one was used.{% endif %}
+  </p>
+  {% else %}
+  <p class="warning">No fidelity verdict is recorded for this reading, so its accountability against the source is unknown.</p>
+  {% endif %}
+  {% endif %}
+  {% if metadata_only %}
+  <p><strong>Structure only.</strong> This service publishes provision numbers, short headings, identifiers and the relationships between them. The words of each provision are not republished here; read them in the official document. Where a provision was printed with no separate heading, no heading is shown for it rather than the opening of its text.</p>
+  {% endif %}
+</section>

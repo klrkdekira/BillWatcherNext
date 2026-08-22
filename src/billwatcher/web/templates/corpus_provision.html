@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% from "corpus_tree.html" import provisions as provision_tree %}
+{% block title %}{{ provision.label }}, {{ identifier }} — {{ site_name }}{% endblock %}
+{% block head %}{% for item in alternates %}<link rel="alternate" type="{{ item.media_type }}" href="{{ item.href }}">{% endfor %}{% endblock %}
+{% block content %}
+<h1>{{ provision.label }}{% if provision.heading %} — <span lang="{{ language }}">{{ provision.heading }}</span>{% endif %}</h1>
+<dl>
+  <dt>Provision identifier</dt><dd><code>{{ provision_uri }}</code></dd>
+  <dt>Part of</dt><dd><a href="{{ expression_uri }}">{{ identifier }}{% if title %} — <span lang="{{ title.language }}">{{ title.text }}</span>{% endif %}</a> ({{ language_label }})</dd>
+</dl>
+{% for paragraph in provision.paragraphs %}<p lang="{{ language }}">{{ paragraph }}</p>{% endfor %}
+{% if provision.children %}<h2>Within this provision</h2>{{ provision_tree(provision.children, language) }}{% endif %}
+{% include "corpus_disclaimer.html" %}
+{% endblock %}

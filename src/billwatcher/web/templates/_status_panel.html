@@ -49,6 +49,25 @@
   </table>
   {% else %}<p class="empty">No runs recorded.</p>{% endif %}
 
+  <h2>Structural readings (Gate L1)</h2>
+  {% if structures.total %}
+  <dl class="metrics">
+    <div><dt>Readings</dt><dd>{{ structures.total }}</dd></div>
+    <div><dt>Passed</dt><dd>{{ structures.passed }}</dd></div>
+    <div><dt>Blocked</dt><dd class="{{ 'bad' if structures.blocked else '' }}">{{ structures.blocked }}</dd></div>
+    <div><dt>Pass rate</dt><dd>{{ "%.1f%%"|format(structures.pass_rate * 100) if structures.pass_rate is not none else "—" }}</dd></div>
+  </dl>
+  <table>
+    <caption>A blocked reading is stored for review and is never built on. <code>no_arrangement</code> is not a failure: a document with no contents page gives the gate no oracle to apply.</caption>
+    <thead><tr><th>Gate outcome</th><th>Documents</th></tr></thead>
+    <tbody>
+      {% for outcome, count in structures.by_status.items() %}
+      <tr><td>{{ outcome.replace("_", " ") }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No document has been read for structure yet. Run <code>make restructure ARGS=--apply</code>.</p>{% endif %}
+
   <h2>Pipeline versions</h2>
   <dl class="metrics">{% for name, version in versions.items() %}<div><dt>{{ name }}</dt><dd>{{ version }}</dd></div>{% endfor %}</dl>
 </div>

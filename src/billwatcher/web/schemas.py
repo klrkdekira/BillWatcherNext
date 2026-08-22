@@ -15,8 +15,10 @@ from billwatcher.search.rag import Answer
 from billwatcher.version import (
     CHUNKER_VERSION,
     EXTRACTOR_VERSION,
+    LAYOUT_EXTRACTOR_VERSION,
     NORMALIZER_VERSION,
     PARSER_VERSION,
+    STRUCTURE_VERSION,
 )
 
 SCHEMA_VERSION = "v1"
@@ -72,6 +74,8 @@ def pipeline_versions() -> dict[str, str]:
         "parser": PARSER_VERSION,
         "normalizer": NORMALIZER_VERSION,
         "extractor": EXTRACTOR_VERSION,
+        "layout extractor": LAYOUT_EXTRACTOR_VERSION,
+        "structure": STRUCTURE_VERSION,
         "chunker": CHUNKER_VERSION,
     }
 

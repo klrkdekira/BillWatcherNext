@@ -34,6 +34,7 @@ Outstanding work is tracked in [`TODO.md`](../TODO.md).
 | `make doctor` | non-zero while any unresolved critical anomaly exists, a current document version is not accepted, or a recorded blob is missing or corrupt |
 | `make status` | per-target freshness, queue depth, latest run, pipeline versions |
 | `make verify-storage` | every database blob reference exists on disk, and no orphan bytes exist |
+| `billwatcher pipeline verify` | the file-first pipeline's own store: every artifact matches the record of what produced it, nothing is stale, nothing unexplained is on disk. Independent of the database, so it says nothing about the four rows above |
 
 `make doctor` is the release and daily-operations gate that stands in for CI. There is no GitHub
 workflow in this repository by design.
@@ -84,7 +85,101 @@ verification from the deployment host, and the configured contact identity.
 - `make fixtures-refresh` — regenerate the committed fixtures from stored snapshots, offline.
   Writes to `tests/fixtures/parliament/regenerated/` for review; `ARGS=--apply` overwrites the
   committed files. It never contacts Parliament: the only input is a snapshot already stored.
-- `make reextract` — additive re-extraction of current document versions
+- `make fetch-documents` — step S3 of the auditable pipeline (HANDOFF 27): drains the document
+  fetch queue, gated behind the same `SCRAPE_ENABLED`/`--approve-live` rule as the listing crawls
+  because it issues live requests to the same allowlisted host. Every accepted or quarantined
+  download is written into the audit tree as it happens, one manifest per run.
+- `make audit-rebuild` — offline. Regenerates the document tier of the audit tree from the
+  database and blob store; a no-op over an already-correct tree, so it is also the recovery path
+  after deleting `AUDIT_TREE_ROOT` and the backfill path after a sidecar schema bump.
+- `make verify-audit` — offline. Re-hashes the audit tree against the database and exits non-zero
+  on any divergence, raising the `audit_tree_divergence` anomaly `make doctor` reads.
+- `make reextract` — additive re-extraction of current document versions.
+- `make mineru-extract` — a second, independently versioned markdown reading via a hosted MinerU
+  vision-language model, written only as a local file artifact under `data/04-text/`; dry run by
+  default. Needs `MINERU_ENABLED=true` and `MINERU_BASE_URL` set, since it sends page images to a
+  configured third-party endpoint over the network — that is a data-handling decision (ADR-020),
+  so nothing here defaults it on. Eligibility is whatever markdown does not already exist on disk,
+  so a repeat run costs nothing for a document already processed.
+- `make restructure` — additive Gate L1 structural reading of current, accepted document
+  versions, offline from stored bytes; dry run by default. A reading that fails the gate is
+  stored for review and is never promoted; a failing re-read never withdraws one that passed
+  (§26.3). `/status` reports the corpus-wide outcome histogram.
+
+### The file-first pipeline and the legislation corpus
+
+A second, independent pipeline (HANDOFF 28, ADR-021) keeps its whole record in `PIPELINE_DATA_ROOT`
+— no database, no blob store — and produces the legislation corpus: Akoma Ntoso XML, ELI JSON-LD and
+RDF N-Quads per document. Nothing in it touches the Postgres-backed system above, and nothing above
+touches it.
+
+| Command | What it does | Network |
+| --- | --- | --- |
+| `make pipeline-fetch-listings` | step 1: listings into the file store; gated behind `SCRAPE_ENABLED`/`--approve-live` like `scrape`, because it hits the same live host | live |
+| `make pipeline-parse-listings` | step 2: stored listings into `bills/<slug>/bill.json` | none |
+| `make pipeline-fetch-documents` | step 3: download every document URL found in those bill records; same live gate | live |
+| `billwatcher pipeline import-markdown` | step 3b: put a markdown file produced by your own extraction into the store, **with its language declared** (`--language ms\|en`). The language becomes a permanent part of every published identifier (ADR-024), so it is an argument rather than a guess | none |
+| `make pipeline-convert-to-akn` | step 4: markdown → Akoma Ntoso, behind Gate P1 and schema validation. Needs `AKN_LLM_ENABLED=true`, `AKN_LLM_BASE_URL`, `AKN_LLM_MODEL_ID` | live (vLLM) |
+| `make pipeline-generate-semantic` | step 5: Akoma Ntoso → ELI JSON-LD + RDF N-Quads | none |
+| `billwatcher pipeline verify` | offline integrity pass: every artifact re-hashed against the provenance record of what it was built from, every stale artifact named, and every file no step writes reported | none |
+
+Two properties worth knowing before running any of them. **A repeat run writes nothing** — each
+derived artifact carries a provenance record naming its inputs, and a step rebuilds only when those
+inputs changed (ADR-026), so re-running a step after a code upgrade regenerates exactly what the
+upgrade affected and leaves the rest alone, including its mtimes. And **a document that fails Gate
+P1 is kept, not discarded**: its verdict lands in `document.akn.gate.json` and the rejected render in
+`document.akn.rejected.xml`, and no `document.akn.xml` is written, so nothing downstream can pick it
+up (ADR-025). `billwatcher pipeline convert-to-akn` prints the counts and names every failure on
+stderr; the same is on disk in `manifests/<step>/<run-id>.json`.
+
+The gate's one threshold, `AKN_GATE_MIN_TEXT_COVERAGE` (default 0.95), is **uncalibrated**: it has
+never run against Parliament's real typesetting. If a first real batch rejects a large fraction of
+documents, read the verdicts before changing the number — `low_text_coverage` alone on a short
+document may be structural furniture, while `sequence_order` beside it is the table-of-contents bleed
+the gate exists to catch.
+
+#### Publishing the corpus
+
+`SERVE_LEGISLATION_CORPUS` is `false` by default, and every corpus path returns 404 while it is.
+Turning it on is a sequence of recorded decisions, not a flag flip (ADR-027):
+
+1. Build the corpus and run `billwatcher pipeline verify` clean. For the first real corpus, the
+   whole sequence — including reading Gate P1's verdicts before trusting them — is the runbook in
+   `docs/first-corpus-run.md`.
+2. The rights decision is **made and recorded** (gate log, 2026-08-22): the owner determined that
+   Parliament bills are public information, covering both the structural corpus and provision text.
+   The confirmation flags below assert that record; they never substitute for it.
+3. Set `SERVE_LEGISLATION_CORPUS=true` **and** `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true`.
+   Production refuses to boot with the first and not the second.
+4. For provision text, set `LEGISLATION_PUBLICATION_MODE=full`, which additionally requires
+   `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true` — the A14 confirmation that also gates
+   `SERVE_ARCHIVED_DOCUMENTS`, now likewise covered by the recorded determination. `metadata`
+   remains the shipped default and the posture the deployment falls back to if the determination is
+   ever revisited.
+5. Neither flag needs a rebuild. Redaction happens when a response is rendered, so both directions
+   are reversible and neither costs a re-extraction.
+
+The `app` container mounts `PIPELINE_DATA_ROOT` **read-only**: the pipeline steps write it and are
+run deliberately, and the serving process only reads. Do not treat it like the audit tree below just
+because both are directory trees — the audit tree is a projection and `make audit-rebuild`
+regenerates it, while this store **is the record** and nothing can rebuild it. Losing it means
+re-crawling Parliament and re-running the extraction. Back it up as data if the corpus matters to
+you; HANDOFF 16.4 leaves that a deployment decision rather than a contract, because the corpus is
+not yet built anywhere.
+
+### The audit tree
+
+`AUDIT_TREE_ROOT` (default `data/` in development, `/var/lib/billwatcher/audit` in the container
+image) holds a human-legible projection of the archive: every downloaded document version's raw
+PDF beside a `metadata.json` naming its source URL, language, retrieval time, hashes, and the bill
+it belongs to (HANDOFF 27). It is scoped to `03-documents/` today — Package K covers the PDF
+download step only; the listing and processing tiers are specified but not built.
+
+It is **not** part of the backup contract. It is a derived, rebuildable projection of the database
+and blob store — `make audit-rebuild` regenerates it byte-for-byte — so deleting it, or losing the
+volume, loses nothing the database and blob-store backups do not already cover. Run
+`make verify-audit` after a restore drill or a suspected disk issue; a clean result only certifies
+the document tier it checks.
 
 The scheduled worker (`billwatcher worker`, the `worker` service in Compose) runs incremental
 crawls only, because HANDOFF 11.7 makes the archive an explicitly triggered mode. Nothing refreshes
@@ -96,6 +191,17 @@ carries `expected_interval_hours = 0`, which `/status` treats as "not expected t
 Only the newest archived year, which can still gain bills, can go stale — one meaningful alert per
 chamber instead of sixty-six meaningless ones. The orchestrator re-sets this on every archive run,
 so last year's newest year closes when the index gains a node.
+
+`make completeness` reuses that same "closed" signal to check something different: whether a
+chamber-year's bill numbers run without a hole (`DR-1`, `DR-2`, `DR-3`, …). It only looks at years
+whose archive coverage target is closed, because an open year is still growing and a "gap" in it
+is just a bill nobody has fetched yet, not evidence of anything missing. It is a heuristic report
+for a human to check against the archive — it raises no anomaly and does not affect `make doctor`
+— because nothing in the assumption register claims Parliament's numbering has no legitimate
+gaps. Run it after a full archive crawl of years you have not checked before; it has not yet been
+run against the real corpus, only against synthetic data in tests, because the real corpus is not
+reachable from a clean checkout (the same limitation as the Gate L1 pass-rate measurement,
+`TODO.md` §1.8).
 
 An archive run reads about 70 documents over several minutes, so a dropped connection is ordinary
 rather than exceptional. Transport failures are retried, and a year that still cannot be read
@@ -142,6 +248,20 @@ It is a dry run unless `ARGS=--apply`.
 
 A database restore without the blob store loses the archive and every future re-extraction. Drill
 both together, and record each drill in the manual gate log in `docs/status.md`.
+
+**`PIPELINE_DATA_ROOT` is inside the backup contract and has no target yet.** This is the one gap in
+the list above, and it is a real one rather than an oversight of convenience. The audit tree is
+excluded because `make audit-rebuild` regenerates it from the database; the file-first pipeline's
+store is the opposite — it *is* the record for that pipeline (ADR-021), so nothing regenerates it.
+Losing that volume loses every fetched listing, every downloaded PDF, every imported markdown
+reading and every derived artifact, and the listings and PDFs can only be recovered by crawling
+Parliament again. The derived tiers could be rebuilt from the markdown, but the Akoma Ntoso step
+needs the vLLM endpoint and would produce a *different* reading, which is precisely what the
+provenance records exist to make visible.
+
+Until a `make backup-pipeline` target exists, copy the directory as part of any backup run and say
+so in the drill record. Do not treat a clean `make pipeline-verify` as a substitute: it proves the
+stored corpus is internally consistent, not that a copy of it exists anywhere else.
 
 ## Release 3 rollout
 
@@ -254,6 +374,40 @@ uvx pip-audit -r /tmp/locked.txt --vulnerability-service osv      # OSV, as a se
 Result: **67 locked packages, no known vulnerabilities from either source.** The lockfile is
 committed and the image installs from it with `uv sync --locked`, so what was audited is what
 runs.
+
+**Re-run 2026-08-19**, after Stage L1 added `pdfminer.six` (ADR-016): **67 locked requirements, no
+known vulnerabilities** from PyPI advisories or OSV. That reads as unchanged from the 2026-08-18
+count of 67, and it is not: between the two reviews, moving RAG to an OpenAI-compatible endpoint
+removed five packages (`anthropic`, `distro`, `docstring-parser`, `jiter`, `sniffio`), taking the
+locked set to 62 — a number this document never recorded, which is the gap being closed here.
+Stage L1 then added five different packages — `pdfminer.six` itself plus `cryptography`, `cffi`,
+`pycparser` and `charset-normalizer` — landing back at 67 by coincidence of count, not of contents.
+Note `cryptography`: it is a native crypto library with an active advisory history, it arrives as a
+hard dependency of `pdfminer.six` rather than by choice, and this project has no CI, so this review
+is the only control on it. Record the count on every run, not just when it looks like it changed —
+this gap is exactly why.
+
+**This review is stale, and by more than one change.** It last ran on 2026-08-19 against 67 locked
+requirements. The export command above returns **79** today, and the difference is not one
+addition: the MinerU reading (ADR-020) added `mineru-vl-utils` and `pypdfium2` with their transitive
+set — `aiofiles`, `httpx-retries`, `loguru`, `pillow`, `tqdm` among them — and the audit was not
+re-run for them, and the legislation corpus then added `rdflib` and `xmlschema` with `pyparsing` and
+`elementpath` (ADR-025, ADR-028). All four of the latter are pure Python; `pillow` is not, and it
+arrives the same way `cryptography` did, as somebody else's hard dependency rather than a choice.
+
+Re-running this is an **operator action**, not a code change, and it is the only control this
+project has on that set:
+
+```bash
+uv export --frozen --no-hashes --no-emit-project --all-extras --all-groups -o /tmp/locked.txt
+grep -cE '^[a-zA-Z0-9._-]+==' /tmp/locked.txt        # record this number
+uvx pip-audit -r /tmp/locked.txt
+uvx pip-audit -r /tmp/locked.txt --vulnerability-service osv
+```
+
+Record the count and both results here with a date, the way the entries above do, and note that a
+count matching a previous one proves nothing about the contents — that is the mistake the 2026-08-19
+entry had to reconstruct after the fact.
 
 ### Container image
 
