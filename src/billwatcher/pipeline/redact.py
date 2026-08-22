@@ -51,8 +51,14 @@ KEEP_HEADINGS = True
 MAX_HEADING_CHARS = 80
 _SENTENCE_ENDINGS = (".", ";", ":", "!", "?")
 
-# The AKN wrappers that hold a provision's own prose.
-_TEXT_WRAPPERS = ("content", "intro", "wrapUp")
+# The AKN wrappers that hold drafted prose. `preamble` is here too, found live in the first real
+# corpus run: `render_akn` puts a bill's enacting formula ("Suatu Akta untuk meminda... DIPERBUAT
+# oleh Parlimen Malaysia...") in a `<p>` directly under `<preamble>`, never inside a
+# content/intro/wrapUp wrapper, so the redactor's own iteration missed it entirely — and so did
+# `contains_provision_text`'s belt-and-braces self-check below, which walks this same tuple. The
+# self-check stayed silent through exactly the leak it exists to catch, the same shape as the
+# heading leak ADR-027's review already found once.
+_TEXT_WRAPPERS = ("content", "intro", "wrapUp", "preamble")
 
 
 def publishable_heading(heading: str | None) -> str | None:

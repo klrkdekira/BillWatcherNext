@@ -51,6 +51,7 @@ an operator to clear the queue without reading it. Hence one threshold, on the o
 genuinely statistical, configurable because the real corpus is unmeasured (A15).
 """
 
+import html
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,6 +69,13 @@ from billwatcher.legislation.vocabulary import (
     to_roman,
 )
 from billwatcher.pipeline.tree import Node, strip_markdown_line
+
+# Types whose document-wide numbering only belongs to a document actually of that unit. A
+# clause-numbered bill can still contain "section"-typed nodes -- a quoted or inserted section of
+# the Act it amends -- and those sections are numbered by that *other* document, not by this one.
+# Found live: a bill quoting sections 31, 44, 49, 50A... of the Act it amends, read as one
+# document-wide "section" run and reported as riddled with sequence gaps that were never there.
+_UNIT_SCOPED_TYPES = frozenset({"clause", "section"})
 
 # The provision types whose numbering is checked. `preamble` is a node type with no eId prefix and
 # no number of its own, and the tree's synthetic `body` root is neither.
@@ -118,6 +126,33 @@ MIN_TEXT_COVERAGE = 0.95
 _DETAIL_LIMIT = 50
 
 _TOKEN_RE = re.compile(r"[^0-9a-z]+")
+
+# The line that opens a bill's own text — a bill's provisions cannot precede it, so it is a more
+# reliable start-of-body marker than "looks like a heading or a numbered line", which an
+# Arrangement of Clauses printed as bare text also satisfies (see `_extractor_view`).
+_ENACTING_FORMULA_RE = re.compile(
+    r"^(diperbuat\s+oleh\s+parlimen\s+malaysia|enacted\s+by\s+the\s+parliament\s+of\s+malaysia)\b",
+    re.IGNORECASE,
+)
+
+# A bill's own back matter: an "Explanatory Statement" narrating every clause in prose, and a
+# "Financial Implications" note, both standard on every printed Malaysian bill and neither part of
+# the enacted text (see `_extractor_view`). Matched as a heading line naming *only* the section, so
+# a clause that merely mentions the word inline is not mistaken for it.
+_BACK_MATTER_HEADING_RE = re.compile(
+    r"^(huraian|implikasi\s+kewangan|explanatory\s+statement|financial\s+implications)$",
+    re.IGNORECASE,
+)
+
+# MinerU renders a schedule table as literal HTML (`<table><tr><td>...`); replaced with a space
+# rather than deleted so two adjacent cells' text does not run together into one fictitious word.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+# A table is one structural unit however MinerU happens to lay out its newlines. Collapsed to one
+# line *before* the text is split into lines, so an isolated cell's own text can never be mistaken
+# for a standalone heading -- "Huraian" ("particulars") is an entirely ordinary column header, and
+# `_BACK_MATTER_HEADING_RE` matches a whole line, not a line's substring.
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 
 # Words that *name* a structural element rather than belonging to a provision's own text:
 # `BAHAGIAN`, `JADUAL PERTAMA`, `SUSUNAN FASAL`. Every parser here consumes them and keeps only the
@@ -302,10 +337,14 @@ def _tree_text(nodes: list[Node]) -> list[str]:
 def _extractor_view(markdown_text: str) -> str:
     """The part of the markdown a provision tree is answerable for.
 
-    Two exclusions, both because coverage has to compare like with like.
+    Three exclusions, all because coverage has to compare like with like.
 
-    Markdown furniture — page-boundary comments, display-math fences, heading punctuation — is
-    dropped by `strip_markdown_line`, so the threshold does not end up tracking formatting.
+    Markdown furniture — page-boundary comments, display-math fences, heading punctuation, and (a
+    real first-corpus finding) MinerU's HTML table markup — is dropped, so the threshold does not
+    end up tracking formatting. Table tags are replaced with a space rather than deleted outright,
+    or the text of adjacent cells would run together into one fictitious word; entities such as
+    `&quot;`/`&#x27;` are unescaped for the same reason, or their names (`quot`) tokenize as if they
+    were content.
 
     Everything before the document's first structural marker is dropped too, and that one matters
     more than it looks. A real bill PDF opens with a cover page, the long title, the presenter's
@@ -316,21 +355,64 @@ def _extractor_view(markdown_text: str) -> str:
     quality bar. Measuring from the first Part, provision or Schedule heading is measuring the thing
     the tree is actually responsible for.
 
-    The honest cost: front matter is now unchecked. That is the right trade, because it was never
-    checked in any useful sense — no tree can hold it, so its absence was indistinguishable from a
-    correct reading. If the front matter ever becomes structured output (an AKN `<preface>` beyond
-    the long title, say), it needs its own check rather than a share of this one.
+    That "first structural marker" heuristic has a hole a real Arrangement of Clauses falls
+    straight through: printed as bare text rather than as a markdown heading, its own listing
+    ("1. Tajuk ringkas...", "BAHAGIAN I") satisfies `container_heading`/`provision_number` just as
+    readily as the real body's first Part or clause does, so the scan can lock onto the contents
+    page instead of skipping it. A bill's own text can never precede its own enacting formula, so
+    when that formula is found *after* the first heuristic match, the position right after it is the
+    safer start.
+
+    And a bill's back matter — a "HURAIAN" (Explanatory Statement) narrating every clause in prose,
+    usually followed by an "IMPLIKASI KEWANGAN" (Financial Implications) note — is standard,
+    mandatory content on every printed Malaysian bill (the first real corpus run's dominant finding:
+    every one of 181 pilot documents carried a HURAIAN section), and is exactly as untreeable as the
+    front matter this function already excludes: it explains the clauses, it is not one of them.
+    Measured only from the point the real body is judged to start, so a spurious early "HURAIAN" on
+    a committee-stage amendment paper (which reprints the whole bill *after* a short note of its
+    own) is not mistaken for the real one.
+
+    The honest cost: front and back matter are now unchecked. That is the right trade, because
+    neither was ever checked in any useful sense — no tree can hold either, so their absence is
+    indistinguishable from a correct reading. If either ever becomes structured output (an AKN
+    `<preface>` beyond the long title, say), it needs its own check rather than a share of this one.
     """
+    # Collapsed to one line per table *before* the line split below, so a cell's own text can never
+    # be read as a standalone line and mistaken for a heading — see `_TABLE_RE`.
+    markdown_text = _TABLE_RE.sub(lambda match: match.group(0).replace("\n", " "), markdown_text)
     lines = [strip_markdown_line(line) for line in markdown_text.splitlines()]
     kept = [line for line in lines if line]
+
+    # No marker anywhere means no front matter was recognised, which is "measure everything" —
+    # the same fallback the previous, single-pass version of this function returned.
+    start = 0
     for index, line in enumerate(kept):
         if (
             container_heading(line) is not None
             or schedule_heading(line) is not None
             or provision_number(line) is not None
         ):
-            return " ".join(kept[index:])
-    return " ".join(kept)
+            start = index
+            break
+    for index, line in enumerate(kept):
+        if _ENACTING_FORMULA_RE.match(line):
+            start = max(start, index + 1)
+            break
+
+    end = len(kept)
+    for index in range(start, len(kept)):
+        if _BACK_MATTER_HEADING_RE.match(kept[index]):
+            end = index
+            break
+
+    text = " ".join(kept[start:end])
+    # Tags stripped *before* entities are unescaped, never after: unescaping first would turn an
+    # escaped "&lt;" inside a cell's own text into a literal "<", which the tag regex then reads as
+    # a real tag opening and consumes everything up to the next real ">" — silently deleting
+    # whatever real body text sat in between (found in review, before this ever reached a real
+    # document).
+    text = _HTML_TAG_RE.sub(" ", text)
+    return html.unescape(text)
 
 
 def _tokens(text: str) -> list[str]:
@@ -370,24 +452,44 @@ def _sequence_findings(root: Node, *, unit: str) -> list[Finding]:
     under the body, which is what a document with an unheaded opening section looks like — would
     otherwise be collected level by level and compared out of order, reporting gaps and backwards
     steps that are not in the document at all.
+
+    A `clause`/`section` node whose type does not match `unit`, *nested inside a provision of the
+    document's own unit*, is a different case again: this document is a bill (or an Act), and a
+    node typed the other way sitting inside one of its own clauses (or sections) is a fragment
+    quoted from whatever it amends — some other Act's section 50A, say, spliced into this bill's
+    clause 6. That fragment's own numbering belongs to the document it was quoted from, not to this
+    one, so it is read (its children still restart-checked normally) but left out of the
+    document-wide run entirely, rather than being compared against clauses or sections it has
+    nothing to do with.
+
+    That exclusion is conditional on nesting, not on type alone — a mismatched-type node found
+    *before* the document-wide run ever reaches its own unit (at the top level, or nested only
+    under Parts/Chapters) is not a quotation, it is the extractor's own reading of the document's
+    real provisions typed wrong, and skipping it would silently defeat the very thing this gate
+    exists to catch (a model that drops or mistypes a clause produces a well-formed tree that is
+    wrong). `inside_unit` is only ever set once the walk has actually entered a node of the
+    document's own unit, so a genuine quotation nested inside one is excluded and a top-level
+    mistyping is not.
     """
     findings: list[Finding] = []
     document_wide: dict[str, list[Node]] = {}
 
-    def collect(node: Node) -> None:
+    def collect(node: Node, *, inside_unit: bool) -> None:
         siblings: dict[str, list[Node]] = {}
         for child in node.children:
             if child.node_type not in NUMBERED_TYPES:
                 continue
             if child.node_type in RESTARTING_TYPES:
                 siblings.setdefault(child.node_type, []).append(child)
+            elif inside_unit and child.node_type in _UNIT_SCOPED_TYPES and child.node_type != unit:
+                pass
             else:
                 document_wide.setdefault(child.node_type, []).append(child)
-            collect(child)
+            collect(child, inside_unit=inside_unit or child.node_type == unit)
         for group in siblings.values():
             findings.extend(_check_run(group))
 
-    collect(root)
+    collect(root, inside_unit=False)
     for node_type in sorted(document_wide):
         run = document_wide[node_type]
         findings.extend(_check_run(run))
@@ -431,10 +533,25 @@ def _check_run(nodes: list[Node]) -> list[Finding]:
 
 
 def _compare(previous: Node, node: Node) -> list[Finding]:
-    expected = _successor(previous.num or "", node.node_type)
+    prev_num, cur_num = previous.num or "", node.num or ""
+    if (
+        node.node_type in _ROMAN_NUMBERED
+        and prev_num.isalpha()
+        and cur_num.isalpha()
+        and alpha_successor(prev_num).casefold() == cur_num.casefold()
+    ):
+        # `C` -> `D` is a genuine next-letter step, but `is_roman` accepts both of them too (100,
+        # 500) — Malaysian drafting nests `subparagraph` at both a roman-numbered depth (`i`, `ii`)
+        # and a plain lettered one (`A`, `B`, `C`...), and the node type alone cannot tell which a
+        # given run is. Found live: a real `A, B, C, D` run read as a jump from 100 to 500 and
+        # rejected as a "sequence_gap" expecting `CI`. Real drafting never mixes the two
+        # conventions within one run, so if the letter reading says this pair is exactly
+        # consecutive, that is the reading — the roman one below is reached only when it is not.
+        return []
+    expected = _successor(prev_num, node.node_type)
     if expected is None:
         return []
-    order = _order(previous.num or "", node.num or "", node.node_type)
+    order = _order(prev_num, cur_num, node.node_type)
     if order is not None and order <= 0:
         return [
             Finding(

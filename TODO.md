@@ -9,8 +9,9 @@ If the two ever disagree, `docs/status.md` is right, because it carries dates.
 
 The last recorded green run is 2026-08-22 (`make check` 626 passed, 28 skipped, 2 deselected
 offline), `make doctor` is clean, and the site serves 1,269 bills spanning 1990–2026 from live data
-(via the Postgres-backed system, §0.1 — the file-first pipeline in §0 is a separate, still-empty
-store). `make test-pg` is green at the same date: **654 passed, nothing skipped**, which matters
+(via the Postgres-backed system, §0.3 — the file-first pipeline in §0.2 has its own store,
+`pipeline-data/`, now holding the first pilot slice). `make test-pg` is green at the same date:
+**654 passed, nothing skipped**, which matters
 because the publication-readiness change did touch two modules the Postgres-backed system depends on
 — the atomic-write helper in `storage/audit_tree.py` and the `SCHEDULE_ORDINALS` rename in
 `legislation/vocabulary.py`.
@@ -23,23 +24,85 @@ guaranteed to bite the next change in its area. A fourth was live rather than la
 
 ---
 
-## 0. Current priority — the file-first pipeline (HANDOFF §28, ADR-021)
+## 0. Current priority — the public static cache (HANDOFF §28.12, ADR-029)
 
-Directed by the commissioner on 2026-08-21, superseding §0.1 below as the current priority:
-"we are revisiting from scratch, database and object store are for later, we want the pipeline
-to work fully with file first," then "it can work from db, but it would be an extension, the
-pipeline should work with interface of input, such as file and also from db or object store,"
-then "do not attempt to parse the pdf for me too, I have vllm openai compatible endpoint
-https://llm.loqasi.io/v1/ for that."
+Directed by the commissioner on 2026-08-22, superseding §0.2 below as the current priority: "my
+priority right now is serving the schema and dataset statically, second part would only be the
+backend serving, db integration and etc. the data pipeline should be solely local file for now,
+not committed, only the static semantic files or definition," then "My prioritise is a public
+cache of files, only then we do the teooling."
 
-Read as three constraints together: (1) build a working file-first pipeline now, no database, no
-object store; (2) design it behind a storage interface (`PipelineStore`) so a database or
-object-store backend is a later, additive extension rather than a rewrite; (3) stop at a
-downloaded PDF — do not build PDF parsing/extraction, which the operator already has covered.
+Read as three constraints together: (1) the first public form of the corpus is a **static cache of
+files** — dataset on its FRBR paths plus the schema/definitions — exportable to any static host;
+(2) backend serving, database integration, and pipeline restructuring are all "the tooling" and
+come **after** the cache; (3) `pipeline-data/` stays local-file and uncommitted — only the export
+tree and the definitions may ever be committed or published.
 
-Everything in §0.1 (the Postgres-backed audit tree, `fetch-documents`, `mineru-extract`) is left
+The pipeline as built (§0.2) already produces every file the cache needs, so no tooling item in
+§0.1 blocks this.
+
+- [ ] **The export step** (`pipeline/export.py`, CLI `billwatcher pipeline export-static`, Make
+      `pipeline-export-static`, `PIPELINE_EXPORT_ROOT` defaulting to `public-cache/`): walk the
+      store, export **only gate-passing** documents onto their §28.7 paths
+      (`akn/my/bill/<chamber>/<year>/<number>/<lang>@.xml|.jsonld|.nq`), apply `pipeline.redact`
+      at the export boundary under `LEGISLATION_PUBLICATION_MODE`, and refuse to run without
+      `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true` (plus `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true`
+      for `full`). Idempotent: a re-export over an unchanged store writes nothing.
+- [ ] **The definitions** (`definitions/` in the export): the vendored OASIS AKN XSD with its
+      copyright notices preserved (check redistribution terms once, record the answer in the gate
+      log), the JSON-LD context, the §26.2 structural vocabulary, and — once ADR-030 lands — the
+      JSON Schema for `document.structure.json`.
+- [ ] **Index and checksums**: `index.json` (Works/Expressions present, titles, files) and
+      `checksums.sha256` over every exported file, so a mirror can verify itself.
+- [ ] **Tests**: passing-only export; refusal without each rights flag; metadata-mode export
+      contains no provision text, checked by `redact.contains_provision_text` (an independent
+      reader), not by the redactor agreeing with itself; re-export idempotence by hash and mtime;
+      a document whose bill record cannot mint an identity is absent, not placeholdered.
+- [ ] **Fill the store, then export it**: finish the first-corpus runbook
+      (`docs/first-corpus-run.md`) — the pilot run has begun (its fixes are the 2026-08-22
+      working-tree changes) but the measured pass/reject counts are still owed to the gate log
+      (§1.10) — then produce the first real export and record its counts.
+- [ ] **Decide where the cache lives** — committed to this repo, a separate repo, or synced to a
+      static host behind the existing external nginx (ADR-015). Operator decision; ADR-029 leaves
+      it open deliberately. Remember: once mirrored, it cannot be withdrawn.
+- [ ] **Keep the store out of git**: verify `pipeline-data/` and `public-cache/` (until the
+      hosting decision says otherwise) are gitignored.
+
+### 0.1 Second — the tooling (HANDOFF §28.5 as amended, ADR-030; then §28.10)
+
+Explicitly after §0: "only then we do the teooling." In order:
+
+- [ ] **Split step 4 (ADR-030).** `extract-structure` persists `document.structure.json` (+
+      provenance, + `document.structure.gate.json`, + `document.structure.rejected.json` on
+      rejection; `has_structure` becomes the promotion flag; Gate P1 moves here unchanged);
+      `render-akn` renders deterministically from the stored tree. Retire
+      `document.akn.gate.json`/`document.akn.rejected.xml`; grow `KNOWN_FILENAMES`,
+      `PipelineStore`, CLI, Make. Acceptance is in Package M (HANDOFF §19).
+- [ ] **The anchored extractor contract (ADR-030).** Send line-numbered markdown; the model
+      returns node type / printed num / heading / start line, never body text; paragraphs are
+      sliced from `document.md` between anchors. This is the actual fix for per-document LLM cost
+      — output drops from O(document) to O(provisions) — and it makes paraphrase structurally
+      impossible. A wrong anchor must fail Gate P1, not publish mis-sliced text.
+- [ ] **Backend serving (§28.10)** — the served surface on truncatable paths with content
+      negotiation. Unchanged contract, now phase two behind the cache.
+- [ ] **A database or object-store `PipelineStore` implementation** — correctly unbuilt, per
+      standing direction. When it lands, no step function should need to change. Note it now has
+      more to implement than it did: the provenance, manifest, gate-verdict, unexpected-file — and,
+      post-split, structure — methods are part of the protocol.
+- [ ] Optional, after the split proves itself: a tiered extractor (regex first, LLM only for the
+      Arrangement/body split or on Gate P1 rejection). Deliberately not decided in ADR-030.
+
+### 0.2 The file-first pipeline as built (HANDOFF §28, ADR-021)
+
+Directed by the commissioner on 2026-08-21, the priority before §0 above: "we are revisiting from
+scratch, database and object store are for later, we want the pipeline to work fully with file
+first," then "it can work from db, but it would be an extension, the pipeline should work with
+interface of input, such as file and also from db or object store," then "do not attempt to parse
+the pdf for me too, I have vllm openai compatible endpoint https://llm.loqasi.io/v1/ for that."
+
+Everything in §0.3 (the Postgres-backed audit tree, `fetch-documents`, `mineru-extract`) is left
 in place, untouched, dormant. `billwatcher.pipeline` is a new, separate package that imports none
-of it.
+of it. Kept here as the build record; the open work moved to §0 and §0.1.
 
 - [x] **`PipelineStore` interface + `FileStore` implementation**
       (`src/billwatcher/pipeline/store.py`): `save_listing`/`iter_listings`,
@@ -102,17 +165,11 @@ of it.
       (`pipeline/reporting.py`); `pipeline/redact.py` plus four settings give the corpus a
       publication posture that is off by default. Evidence and the full defect list are in the
       `docs/status.md` gate log.
-- [ ] **A database or object-store `PipelineStore` implementation** is unbuilt — correctly, per
-      standing direction ("skip db for now, the pipeline should be file only"). When it lands, no
-      step function in `pipeline/listings.py`/`pipeline/documents.py`/`pipeline/akn.py`/
-      `pipeline/semantic.py` should need to change. Note it now has more to implement than it did:
-      the provenance, manifest, gate-verdict and unexpected-file methods are part of the protocol.
-- [ ] **Run it against real data, once.** Nothing has ever been fetched into `PIPELINE_DATA_ROOT`:
-      no listing, no document, no markdown. Every claim about this pipeline is a claim about
-      constructed fixtures. A first real batch is also the only way to answer §1.10 (the Gate P1
-      threshold) and needs the same live-crawl approval every other live step needs.
+The two items formerly open here moved: the database/object-store `PipelineStore` to §0.1 (it is
+"the tooling"), and "run it against real data" into §0's fill-the-store item — the pilot has
+begun, and §1.10 still owns the measurement.
 
-### 0.1 Auditable step pipeline (superseded as current priority, HANDOFF §27, ADR-019, Package K)
+### 0.3 Auditable step pipeline (superseded as current priority, HANDOFF §27, ADR-019, Package K)
 
 Directed by the commissioner on 2026-08-21 and prioritised ahead of everything below at the time; every
 pipeline step auditable from the filesystem, every step one Make target, every step storing its
@@ -324,9 +381,12 @@ published, in full-text mode.** The metadata-only posture and the `KEEP_HEADINGS
 here previously are moot under that determination; they remain in the code as the fallback posture
 should the determination ever be revisited, which is the reversibility ADR-027 was built for.
 
-Remaining operator actions, per deployment:
+Remaining operator actions, per deployment. Note the surface changed shape (ADR-029): the first
+publication is the **static cache export** of §0, which the same rights flags gate at the command
+level; `SERVE_LEGISLATION_CORPUS` only matters when the phase-two served surface (§0.1) arrives.
 
-- [ ] `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true`, then `SERVE_LEGISLATION_CORPUS=true`.
+- [ ] `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true` — now gates `pipeline export-static` first, and
+      `SERVE_LEGISLATION_CORPUS=true` later, in phase two.
 - [ ] `LEGISLATION_PUBLICATION_MODE=full` (requires `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true`,
       which §1.2 now permits).
 - [ ] Run the first-corpus runbook (`docs/first-corpus-run.md`) **before** flipping any of these in
@@ -346,9 +406,10 @@ production: publication being permitted does not make an unmeasured corpus fit t
 
 Gate P1 is the deterministic check that a model's reading of a bill accounts for the words that were
 on the page (ADR-025). Its logic is proven; its **one threshold is a guess**.
-`AKN_GATE_MIN_TEXT_COVERAGE` defaults to 0.95 and has never been measured against Parliament's real
-typesetting — the same class of gap as §1.8, and for a related reason: the pipeline's store is empty
-and the 1,264 stored PDFs are not reachable from a clean checkout.
+`AKN_GATE_MIN_TEXT_COVERAGE` defaults to 0.95. The pilot run has now begun — `pipeline-data/` holds
+a first slice (123 bills, 122 documents as of 2026-08-22) and the fixes the run forced are in the
+working tree — but the measured pass/reject distribution is **still owed to the gate log**, and
+until it is recorded there this item stands open.
 
 **Treat this item as more urgent than it looks, on evidence.** Two coverage defects were found by
 review rather than by testing, and both were invisible for the same reason: the fixtures were
@@ -474,13 +535,13 @@ Things that work but whose evidence is thinner than it looks.
       explicitly triggered. Consequence: nothing refreshes it automatically. Schedule
       `make scrape-archive` on the host if it should be refreshed; monthly is generous, since a
       closed year cannot change.
-- [ ] **The legislation corpus has never been served, and its store has never held real data.** Both
-      publication flags are off (§1.9), `PIPELINE_DATA_ROOT` is empty, and redaction is proven
-      against constructed documents — a bill whose provisions are emptied and a graph whose
-      `schema:text` triples are dropped, each checked by an independent reader rather than by the
-      redactor agreeing with itself. What is untested is the combination that matters: real
-      Malaysian drafting, at corpus scale, through the serving path. Verify `contains_provision_text`
-      on a sample of real responses the first time the surface is enabled, not the last.
+- [ ] **The legislation corpus has never been served or exported publicly.** Both publication
+      flags are off (§1.9). `PIPELINE_DATA_ROOT` now holds the first pilot slice (§1.10), and the
+      pilot has already justified the caution once: real drafting exposed a preamble text leak
+      past the redactor's wrapper walk (fixed in the 2026-08-22 working tree). What remains
+      untested is the combination that matters: real Malaysian drafting, at corpus scale, through
+      the publication path — now the §0 export first, the serving path second. Verify
+      `contains_provision_text` on a sample of the first real export, not the last.
 - [ ] **`make completeness` (bill-numbering gap check, added 2026-08-21) has only run against
       synthetic test data.** The logic is proven — a detected gap, a clean year, an open year's
       gap correctly ignored, chamber isolation, a bill with no parsed number correctly excluded —

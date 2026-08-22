@@ -165,6 +165,32 @@ def test_no_body_sentence_survives_redact_akn() -> None:
         assert word not in redacted
 
 
+def test_a_preamble_carries_no_sentence_through_redaction() -> None:
+    """Found live on the first real corpus run: `render_akn` puts a bill's enacting formula in a
+    `<p>` directly under `<preamble>`, never inside a content/intro/wrapUp wrapper. The redactor's
+    own belt-and-braces self-check (`contains_provision_text`) walks the same wrapper list, so
+    without `preamble` in it the check stays silent through exactly the leak it exists to catch —
+    the same shape as the heading leak ADR-027's review already found once.
+    """
+    formula = "Suatu Akta untuk meminda Akta Pelaporan Kuari 2026 dan bagi perkara berkaitan."
+    tree = Node(node_type="body", num=None, heading=None, eid="")
+    tree.children.append(Node("preamble", None, None, "", paragraphs=[formula]))
+    tree.children.append(
+        Node("clause", "1", "Tajuk ringkas", "cl_1", ["Akta ini bolehlah dinamakan Akta Contoh."])
+    )
+    akn = render_akn(tree, identity=IDENTITY, language="ms", bill=BILL)
+
+    assert b"<preamble>" in akn
+    assert formula.encode("utf-8") in akn  # the control: it really is there before redaction
+    assert contains_provision_text(akn) is True
+
+    redacted = redact_akn(akn)
+    assert formula.encode("utf-8") not in redacted
+    assert b"meminda" not in redacted  # not a word of it, not merely not the whole sentence
+    assert validate_akn(redacted) == []
+    assert contains_provision_text(redacted) is False
+
+
 def test_redacted_akoma_ntoso_is_still_valid_akoma_ntoso() -> None:
     """The `<p>` elements stay, and stay empty.
 

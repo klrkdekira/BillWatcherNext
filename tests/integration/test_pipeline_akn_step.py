@@ -378,6 +378,50 @@ def test_an_extractor_failure_is_counted_and_named_not_raised(tmp_path) -> None:
     )
 
 
+def test_a_tree_gate_p1_already_rejects_is_not_also_run_through_schema_validation(
+    tmp_path,
+) -> None:
+    """Found live on real "Tafsiran" clauses that list several defined terms as bare, unlettered
+    paragraphs: `assign_eids` falls every one of them back to their parent's eId, which Gate P1
+    already names `duplicate_eid`/`missing_num` -- both blocking findings fidelity.evaluate()
+    computes before render_akn ever runs. The same collision also makes the rendered XML schema-
+    invalid (an AKN document may not repeat an eId), and validating a reading Gate P1 has already
+    disqualified turned this into an opaque "failed" step with the real verdict discarded and no
+    document.akn.rejected.xml written -- instead of the reviewable "mismatch" it actually is."""
+
+    class BareDefinitionTermsExtractor:
+        name = "stub-llm"
+        model_id = "test-model"
+        prompt_sha256 = None
+
+        def extract(self, markdown_text: str, *, unit: str) -> Node:
+            clause = Node("clause", "4", "Tafsiran", "")
+            clause.children = [
+                Node("paragraph", None, None, "", paragraphs=['"Pesuruhjaya" ertinya...']),
+                Node("paragraph", None, None, "", paragraphs=['"Menteri" ertinya...']),
+            ]
+            root = Node("body", None, None, "")
+            root.children = [clause]
+            return root
+
+    store = FileStore(tmp_path)
+    seed_document(store)
+
+    result = convert_to_akn(store, extractor=BareDefinitionTermsExtractor())
+
+    assert result.counts == {"eligible": 1, "converted": 0, "rejected": 1, "failed": 0}
+
+    directory = version_dir(tmp_path)
+    assert (directory / "document.akn.rejected.xml").exists()
+    assert not (directory / "document.akn.xml").exists()
+
+    verdict = store.load_akn_gate(bill_slug="dr-15-2026", doc_key=DOC_KEY, version=1)
+    assert verdict["status"] == "mismatch"
+    kinds = {finding["kind"] for finding in verdict["findings"]}
+    assert "duplicate_eid" in kinds
+    assert "missing_num" in kinds
+
+
 def test_a_reading_that_cannot_account_for_its_source_is_kept_as_evidence_and_never_promoted(
     tmp_path,
 ) -> None:

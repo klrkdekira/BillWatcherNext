@@ -25,3 +25,4 @@ pipeline-data/
 
 # pi goal/loop tooling state
 .pi-glla/
+public-cache/

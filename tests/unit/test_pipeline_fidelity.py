@@ -562,6 +562,288 @@ DIPERBUAT oleh Parlimen Malaysia seperti yang berikut:
     assert with_front_matter.covered_tokens == body_only.covered_tokens
 
 
+def test_a_huraian_and_implikasi_kewangan_back_matter_is_not_counted() -> None:
+    """The first real-corpus finding: every one of 181 pilot documents carried a "HURAIAN"
+    (Explanatory Statement) section, usually followed by an "IMPLIKASI KEWANGAN" (Financial
+    Implications) note, and neither is enacted text -- no tree holds either, any more than it
+    holds the front matter the previous test excludes."""
+    back_matter = """\
+
+## HURAIAN
+
+Rang Undang-Undang ini bertujuan untuk mengadakan peruntukan bagi pelaporan kuari. Fasal 3
+bertujuan untuk mengadakan peruntukan bagi kewajipan melaporkan.
+
+## IMPLIKASI KEWANGAN
+
+Rang Undang-Undang ini tidak melibatkan Kerajaan Persekutuan dalam apa-apa perbelanjaan.
+"""
+    body_only = fidelity.evaluate(tree_of(MARKDOWN), MARKDOWN, unit="clause")
+    with_back_matter = fidelity.evaluate(
+        tree_of(MARKDOWN), MARKDOWN + back_matter, unit="clause"
+    )
+
+    assert with_back_matter.status == "passed"
+    assert with_back_matter.findings == ()
+    assert with_back_matter.coverage == 1.0
+    assert with_back_matter.source_tokens == body_only.source_tokens
+    assert with_back_matter.covered_tokens == body_only.covered_tokens
+
+
+def test_a_bare_arrangement_before_the_enacting_formula_does_not_widen_the_denominator() -> (
+    None
+):
+    """The Arrangement-bleed bug in a form the existing regex-heading tests do not reach.
+
+    Printed as a markdown heading (`# SUSUNAN FASAL`), the Arrangement is invisible to
+    `container_heading`/`provision_number` and is skipped by construction. Printed as bare text --
+    what a real Malaysian bill's cover page actually looks like -- its own listing ("BAHAGIAN I",
+    "1. Tajuk ringkas...") satisfies those same patterns just as well as the real body does, so the
+    naive "first match" scan locks onto the Arrangement instead of skipping past it, and every word
+    of the long title and enacting formula *between* the Arrangement and the real body gets swept
+    into the denominator. The enacting formula can never be preceded by the bill's own text, so it
+    is the more reliable anchor once it is found after that first, ambiguous match.
+    """
+    bare_front_matter = """\
+BAHAGIAN I
+
+1. Tajuk ringkas dan permulaan kuat kuasa
+
+2. Tafsiran
+
+3. Kewajipan untuk melaporkan
+
+4. Penalti
+
+Suatu Akta untuk mengadakan peruntukan bagi pelaporan kuari dan bagi perkara yang berkaitan
+dengannya.
+
+DIPERBUAT oleh Parlimen Malaysia seperti yang berikut:
+
+"""
+    body_only = fidelity.evaluate(tree_of(MARKDOWN), MARKDOWN, unit="clause")
+    result = fidelity.evaluate(
+        tree_of(MARKDOWN), bare_front_matter + MARKDOWN, unit="clause"
+    )
+
+    assert result.status == "passed"
+    assert result.findings == ()
+    assert result.coverage == 1.0
+    assert result.source_tokens == body_only.source_tokens
+    assert result.covered_tokens == body_only.covered_tokens
+
+
+def test_html_table_markup_is_not_counted_and_does_not_glue_adjacent_cells_together() -> None:
+    """MinerU renders a schedule as literal HTML (`<table><tr><td>...`), never as the plain
+    numbered lines the regex extractor and the LLM's own tree both produce for it. A faithful
+    reading must not be charged for tag names or entities -- and stripping a tag must not glue two
+    cells' text into one fictitious word. (A table's own header-row words, e.g. "Bil."/"Perihalan",
+    are a separate, smaller and still-open gap: real documents score comfortably above threshold
+    without also excluding them, so this test does not claim they are handled.)
+    """
+    html_schedule = MARKDOWN.replace(
+        """\
+## JADUAL PERTAMA
+
+1. Borang notis pelaporan bagi maksud fasal 3.
+
+2. Kadar denda yang ditetapkan bagi maksud fasal 4.
+""",
+        """\
+## JADUAL PERTAMA
+
+<table><tr><td>1.</td><td>Borang notis pelaporan &quot;bagi&#x27; maksud fasal 3.</td></tr>
+<tr><td>2.</td><td>Kadar denda yang ditetapkan bagi maksud fasal 4.</td></tr></table>
+""",
+    )
+    assert html_schedule != MARKDOWN  # the replacement actually matched something
+
+    body_only = fidelity.evaluate(tree_of(MARKDOWN), MARKDOWN, unit="clause")
+    result = fidelity.evaluate(tree_of(MARKDOWN), html_schedule, unit="clause")
+
+    assert result.status == "passed"
+    assert result.findings == ()
+    assert result.coverage == 1.0
+    # Not merely "still passes" -- the exact same denominator, so the tags and the entities
+    # contributed nothing at all.
+    assert result.source_tokens == body_only.source_tokens
+    view = fidelity._tokens(fidelity._extractor_view(html_schedule))
+    assert "borang" in view
+    assert "notis" in view
+    # If the `<td>` boundary between "notis" and the next cell's text were not replaced with a
+    # space, the two would run together into one token instead of two adjacent ones.
+    assert "notispelaporan" not in view
+
+
+def test_an_escaped_angle_bracket_inside_a_table_cell_does_not_delete_real_text() -> None:
+    """Found in review: unescaping entities *before* stripping tags is backwards. An escaped
+    "&lt;" inside a cell's own text decodes to a literal "<", which the tag-stripping regex would
+    then read as a real tag opening and consume everything up to the next real ">" -- silently
+    deleting whatever body text happened to sit in between, in the direction that hides a real
+    extraction failure rather than flags one."""
+    html_schedule = MARKDOWN.replace(
+        """\
+## JADUAL PERTAMA
+
+1. Borang notis pelaporan bagi maksud fasal 3.
+
+2. Kadar denda yang ditetapkan bagi maksud fasal 4.
+""",
+        """\
+## JADUAL PERTAMA
+
+<table><tr><td>1.</td><td>Umur &lt; 18 tahun: notis pelaporan bagi maksud fasal 3.</td></tr>
+<tr><td>2.</td><td>Kadar denda yang ditetapkan bagi maksud fasal 4.</td></tr></table>
+""",
+    )
+    view = fidelity._tokens(fidelity._extractor_view(html_schedule))
+    # A real, later word that a backwards ordering would delete along with the "<18 tahun..." run.
+    assert "denda" in view
+    assert "ditetapkan" in view
+
+
+def test_an_isolated_table_cell_reading_huraian_is_not_mistaken_for_the_back_matter() -> None:
+    """Found in review: "huraian" ("particulars"/"description") is an entirely ordinary column
+    header, and MinerU may lay a cell's text on its own physical line. `_BACK_MATTER_HEADING_RE`
+    matches a whole line, so without collapsing a table to one line first, that isolated header
+    line is indistinguishable from the real back-matter section title and truncates everything
+    after it -- including the rest of the schedule."""
+    html_schedule = MARKDOWN.replace(
+        """\
+## JADUAL PERTAMA
+
+1. Borang notis pelaporan bagi maksud fasal 3.
+
+2. Kadar denda yang ditetapkan bagi maksud fasal 4.
+""",
+        """\
+## JADUAL PERTAMA
+
+<table>
+<tr><td>Bil.</td><td>
+Huraian
+</td></tr>
+<tr><td>1.</td><td>Borang notis pelaporan bagi maksud fasal 3.</td></tr>
+<tr><td>2.</td><td>Kadar denda yang ditetapkan bagi maksud fasal 4.</td></tr>
+</table>
+""",
+    )
+    view = fidelity._tokens(fidelity._extractor_view(html_schedule))
+    assert "denda" in view
+    assert "ditetapkan" in view
+
+
+def test_a_spurious_early_huraian_heading_does_not_truncate_the_real_body() -> None:
+    """The edge case a first-corpus committee-stage amendment paper actually carried: a short
+    "## HURAIAN" note on the single amendment itself, printed *before* the reprinted bill's own
+    body even starts, followed much later by the bill's real, full Explanatory Statement. Matching
+    the first "HURAIAN" anywhere would truncate the measured text down to that opening sliver and
+    discard the entire well-covered body from the denominator -- the back-matter search has to
+    start no earlier than the real body does.
+    """
+    premature_note = """\
+## HURAIAN
+
+Pindaan ini bertujuan untuk meminda subseksyen 5(2) Akta ibu.
+
+"""
+    body_only = fidelity.evaluate(tree_of(MARKDOWN), MARKDOWN, unit="clause")
+    result = fidelity.evaluate(
+        tree_of(MARKDOWN), premature_note + MARKDOWN, unit="clause"
+    )
+
+    assert result.status == "passed"
+    assert result.findings == ()
+    assert result.coverage == 1.0
+    assert result.source_tokens == body_only.source_tokens
+    assert result.covered_tokens == body_only.covered_tokens
+
+
+def test_a_quoted_section_of_the_act_being_amended_is_not_checked_against_the_bill_numbering() -> (
+    None
+):
+    """A clause-numbered bill can contain a "section"-typed node: an existing Act's section,
+    quoted in full because this clause substitutes or inserts it. That section's own number (its
+    identity in the *other* Act) has nothing to do with this bill's clause sequence, so a bill that
+    quotes sections 31 and 50A back to back must not be read as a "section" run with a fictitious
+    gap between them."""
+    root = tree_of(MARKDOWN)
+    quoted = Node("section", "31", "Peruntukan asal", "", paragraphs=["Teks seksyen 31."])
+    quoted_far = Node("section", "50A", "Peruntukan baru", "", paragraphs=["Teks seksyen 50A."])
+    # Appended under the same clause a real "substitute this section" instruction would use.
+    root.children[2].children.append(quoted)
+    root.children[3].children.append(quoted_far)
+    assign_eids(root)
+
+    result = fidelity.evaluate(root, MARKDOWN, unit="clause")
+
+    sequence_findings = {finding.kind for finding in result.findings}
+    assert not sequence_findings & {"sequence_gap", "sequence_order"}
+
+
+def test_the_bills_own_provisions_mistyped_as_the_wrong_unit_are_still_checked() -> None:
+    """The quotation exclusion above is conditional on nesting, not on type alone.
+
+    A "section"-typed node that never sits inside a real clause of this bill is not a quotation —
+    it is the extractor's own reading of the document's real provisions, typed wrong, which is
+    exactly the "model drops or mistypes a provision" failure this gate exists to catch. Skipping
+    it purely because its type does not match `unit` would silently defeat that."""
+    root = Node("body", None, None, "")
+    root.children = [
+        Node("section", "1", "Tajuk ringkas", "", paragraphs=["Teks."]),
+        Node("section", "2", "Tafsiran", "", paragraphs=["Teks."]),
+        # Clause 3 is missing entirely -- the reading the gate must still catch.
+        Node("section", "4", "Penalti", "", paragraphs=["Teks."]),
+    ]
+    assign_eids(root)
+
+    result = fidelity.evaluate(root, MARKDOWN, unit="clause")
+
+    gaps = [finding for finding in result.findings if finding.kind == "sequence_gap"]
+    assert [(item.expected, item.found) for item in gaps] == [("3", "4")]
+
+
+def test_a_lettered_subparagraph_run_that_also_looks_like_roman_numerals_is_not_a_false_gap() -> (
+    None
+):
+    """`subparagraph` is numbered in roman at one depth (`i`, `ii`) and in plain letters at
+    another (`A`, `B`, `C`...) -- the node type alone cannot say which a given run is, and every
+    single letter from `c`/`d`/`i`/`l`/`m`/`v`/`x` is *also* a valid roman numeral. A real `A, B, C,
+    D` run was read as a jump from roman 100 to roman 500 and rejected expecting `CI`."""
+    root = Node("body", None, None, "")
+    clause = Node("clause", "1", "Pindaan", "", paragraphs=["Akta ibu dipinda—"])
+    subpara_a = Node("subparagraph", "A", None, "", paragraphs=["dengan memasukkan seksyen 5A;"])
+    subpara_b = Node("subparagraph", "B", None, "", paragraphs=["dengan memasukkan seksyen 5B;"])
+    subpara_c = Node("subparagraph", "C", None, "", paragraphs=["dengan memasukkan seksyen 5C;"])
+    subpara_d = Node("subparagraph", "D", None, "", paragraphs=["dengan memasukkan seksyen 5D."])
+    clause.children = [subpara_a, subpara_b, subpara_c, subpara_d]
+    root.children = [clause]
+    assign_eids(root)
+
+    result = fidelity.evaluate(root, "1. Pindaan\n\nA. x\n\nB. x\n\nC. x\n\nD. x\n", unit="clause")
+
+    sequence_findings = {finding.kind for finding in result.findings}
+    assert not sequence_findings & {"sequence_gap", "sequence_order"}
+
+
+def test_a_genuine_gap_in_a_roman_numbered_subparagraph_run_is_still_caught() -> None:
+    """The letter-reading rescue must not swallow a real roman gap: `i`, `ii` then `iv` is not
+    the letter sequence `i, ii, iv` (which is not consecutive either), it is roman 1, 2, 4."""
+    root = Node("body", None, None, "")
+    clause = Node("clause", "1", "Pindaan", "", paragraphs=["Akta ibu dipinda—"])
+    subpara_i = Node("subparagraph", "i", None, "", paragraphs=["dengan memasukkan seksyen 5A;"])
+    subpara_ii = Node("subparagraph", "ii", None, "", paragraphs=["dengan memasukkan seksyen 5B;"])
+    subpara_iv = Node("subparagraph", "iv", None, "", paragraphs=["dengan memasukkan seksyen 5D."])
+    clause.children = [subpara_i, subpara_ii, subpara_iv]
+    root.children = [clause]
+    assign_eids(root)
+
+    result = fidelity.evaluate(root, "1. Pindaan\n\ni. x\n\nii. x\n\niv. x\n", unit="clause")
+
+    gaps = [finding for finding in result.findings if finding.kind == "sequence_gap"]
+    assert [(item.expected, item.found) for item in gaps] == [("iii", "iv")]
+
+
 def test_the_repeated_token_ratio_is_reported_and_never_blocks() -> None:
     """A useful calibration number and a terrible gate, so it is recorded and not judged."""
     result = evaluate(MARKDOWN)

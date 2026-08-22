@@ -1,6 +1,10 @@
 # Implementation status
 
-Last reconciled: 2026-08-22 (Asia/Kuala_Lumpur), after making the file-first pipeline
+Last reconciled: 2026-08-22 (Asia/Kuala_Lumpur), after the commissioner reordered publication: the
+file-first corpus's first public surface is a static cache of files (ADR-029, HANDOFF 28.12,
+Package M, TODO §0), with backend serving, database integration and the step-4 split into a
+persisted structure artifact with an anchored extractor (ADR-030, HANDOFF 28.5) all second.
+Reconciled earlier the same day after making the file-first pipeline
 publication-ready: permanent FRBR identifiers (ADR-024), Gate P1 and schema validation (ADR-025),
 provenance-gated regeneration (ADR-026), metadata-only corpus publication (ADR-027), and the rdflib
 semantic graph (ADR-028), recorded as HANDOFF 28.7–28.10 and Package L. Reconciled before that on
@@ -83,6 +87,15 @@ what closing it takes. When the two disagree, this file is right, because it car
 | ADR-026 | Regeneration is gated on input hashes, not on whether an output file exists | accepted | 2026-08-22 |
 | ADR-027 | The corpus is published metadata-only, redacted at the serving boundary, behind two flags | accepted | 2026-08-22 |
 | ADR-028 | The semantic graph is an rdflib dataset, serialised in sorted order; SHACL is deferred | accepted | 2026-08-22 |
+| ADR-029 | The first publication surface is a public static cache of files; tooling comes after | accepted | 2026-08-22 |
+| ADR-030 | The structural reading is a persisted intermediate artifact; the extractor returns anchors, not text | accepted | 2026-08-22 |
+
+**ADR-018 is qualified by ADR-029** for the file-first pipeline only: the static cache ships first
+there and the served surface (HANDOFF 28.10) is phase two, while ADR-018 continues to govern the
+Postgres-backed system unchanged (HANDOFF 26.5). **ADR-022 is amended by ADR-030**: the extractor
+keeps its protocol and its LLM, but its contract becomes anchors over line-numbered markdown
+rather than re-emitted body text, and the tree it returns becomes a persisted, gate-judged
+artifact rather than an in-memory intermediate.
 
 Two earlier decisions are amended rather than superseded, and both are worth reading with their
 amendment beside them. **ADR-021 decision 6** — a document's identity is a hash of its URL — remains

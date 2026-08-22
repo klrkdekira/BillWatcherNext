@@ -581,11 +581,20 @@ def convert_to_akn(
             assign_eids(tree)
             verdict = fidelity.evaluate(tree, markdown, unit=unit, min_coverage=min_text_coverage)
             xml_bytes = render_akn(tree, identity=identity, language=language, bill=bill)
-            schema_errors = validate_akn(xml_bytes)
-            if schema_errors:
-                # Not a bad reading — a broken renderer. Fail loudly rather than publish XML that
-                # calls itself Akoma Ntoso and cannot be read by Akoma Ntoso tooling.
-                raise AknSchemaError("; ".join(schema_errors[:3]))
+            # Schema validity only has to hold for a reading that might be published — a rejected
+            # reading's XML is a review artifact, not a citable Manifestation (ADR-017), so it is
+            # validated only when Gate P1 would otherwise have let it through. Found live: several
+            # of the tree defects Gate P1 already names as findings (a duplicate eId, a provision
+            # with no printed number) are *also* schema violations, and validating unconditionally
+            # meant `validate_akn` raised first and every one of them turned into an opaque "failed"
+            # step instead of a reviewable "mismatch" verdict — discarding the informative finding
+            # fidelity.evaluate() had already computed, and never writing document.akn.rejected.xml.
+            if verdict.passed:
+                schema_errors = validate_akn(xml_bytes)
+                if schema_errors:
+                    # Not a bad reading — a broken renderer. Fail loudly rather than publish XML
+                    # that calls itself Akoma Ntoso and cannot be read by Akoma Ntoso tooling.
+                    raise AknSchemaError("; ".join(schema_errors[:3]))
         except Exception as error:
             reason = describe_error(error)
             store.save_akn_gate(**keys, record=fidelity.failure(reason).as_detail())

@@ -18,10 +18,10 @@ MINERU_EXTRACTOR_VERSION = "1.0.0"
 # identification, and AKN serialisation. Versioned apart from whichever extractor read the
 # structure, so a serialisation fix does not invalidate every structural reading — and apart from
 # the gate below, so tightening a threshold does not imply the XML changed.
-AKN_VERSION = "1.0.0"
+AKN_VERSION = "1.1.0"
 # Gate P1, the AKN fidelity gate (§28.5): the deterministic check that an LLM-read provision tree
 # accounts for the markdown it was read from. Its own version because a threshold change re-judges
 # every document without re-rendering any of them.
-AKN_FIDELITY_GATE_VERSION = "1.0.0"
+AKN_FIDELITY_GATE_VERSION = "1.1.0"
 # The Akoma Ntoso -> ELI JSON-LD / RDF N-Quads graph construction (§28.6, ADR-023).
 SEMANTIC_VERSION = "1.0.0"

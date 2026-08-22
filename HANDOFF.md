@@ -1,6 +1,6 @@
 # BillWatcherNext implementation handoff
 
-Document version: 1.12 — 2026-08-22 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
+Document version: 1.13 — 2026-08-22 (Asia/Kuala_Lumpur). See §25 for the changelog and §0 for how to amend this document.  
 Status: implementation-ready specification  
 Repository state at handoff: no application code and no commits; `HANDOFF.md`, `README.md`, `main.py`, `pyproject.toml`, and `.python-version` exist as an unbuilt `uv init` skeleton.
 
@@ -1292,7 +1292,7 @@ writes nothing; `audit-rebuild` is byte-identical over a correct tree; `verify-a
 catches a single tampered byte; the stored corpus is materialised where the blob store lives, with
 counts recorded in the gate log.
 
-### Package L — file-first pipeline (current priority)
+### Package L — file-first pipeline
 
 Inputs: §28, ADR-021 through ADR-028. Depends on nothing in Packages A–K: it shares
 `billwatcher.scraper`'s pure fetch/parse/normalise modules and `storage.audit_tree`'s deterministic
@@ -1311,6 +1311,27 @@ byte, a stale artifact and an unexpected file; production refuses to boot with e
 set and its rights confirmation absent. Not in the acceptance list, and deliberately: a corpus-wide
 Gate P1 pass rate, which needs the corpus access §26.7 blocks.
 
+### Package M — public static cache, then the step-4 split (current priority)
+
+Inputs: Package L as built, §28.12 (ADR-029), §28.5 as amended (ADR-030), the A14 rights
+determination of 2026-08-22.  
+Outputs, in this order: **first** the export step — `pipeline.export`, the
+`export-static` CLI command and `pipeline-export-static` Make target, `PIPELINE_EXPORT_ROOT` in
+§16.2, redaction applied at the export boundary, rights flags enforced at command level, index and
+checksums; **only then** the tooling — the ADR-030 split of step 4
+(`document.structure.json` + provenance, Gate P1 relocated, the anchored extractor contract,
+`render-akn` deterministic), and after that the §28.10 served surface and a database/object-store
+`PipelineStore`.  
+Acceptance, cache half: an export over a store with one gate-passing and one rejected document
+contains exactly the passing one; a re-export over an unchanged store writes nothing, proven by
+hash and mtime; the export command refuses without `LEGISLATION_CORPUS_RIGHTS_CONFIRMED` (and
+refuses `full` without `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED`); every exported file is named in
+`checksums.sha256` and verifies; a metadata-mode export contains no provision text, checked by an
+independent reader (`redact.contains_provision_text`), not by the redactor agreeing with itself.
+Acceptance, split half: per ADR-030 — a renderer version bump regenerates every `document.akn.xml`
+with zero extractor calls; a prompt or model change regenerates every structure; a wrong anchor
+fails Gate P1 rather than publishing mis-sliced text.
+
 ### Integration sequence
 
 ```text
@@ -1321,7 +1342,7 @@ B model/discovery┼─> C scraper ─────> E deployment
 C scraper ────────────────> K audit pipeline (§27)
 C extraction + D search ─> G semantic ─> H RAG
 C extraction ─────────────> I Stage L1 ─> J Stages L2+ (blocked, §26.7)
-(nothing) ────────────────> L file-first pipeline (current priority, §28)
+(nothing) ────────────────> L file-first pipeline (§28) ─> M public cache, then tooling (current priority, §28.12)
 ```
 
 Package L hangs off nothing on purpose. It is a parallel pipeline, not a stage of the one above, and
@@ -1474,6 +1495,7 @@ These links informed the handoff and should be rechecked because upstream pages 
 | 1.10 | 2026-08-21 | Added §28.5, a fourth pipeline step converting markdown to Akoma Ntoso (OASIS LegalDocML) XML, at the commissioner's direction ("next up for pipeline after markdown conversion is conversion to the oasis format"). Structure extraction reads with the help of a vLLM endpoint, per a follow-up direction ("should use the help of the vllm server"), behind a `MarkdownStructureExtractor` protocol; eId assignment and XML serialisation stay fully deterministic (ADR-022). Still file-only: `AKN_LLM_*` configuration added, no database or object-store code anywhere in `billwatcher.pipeline`. |
 | 1.11 | 2026-08-21 | Added §28.6, a fifth pipeline step generating ELI-style JSON-LD and RDF N-Quads from the stored Akoma Ntoso XML, at the commissioner's direction ("after akn, then it should be to the semantic files such as jsonld and rfg" — read as RDF, flagged as an interpretation). Fully offline: reads `document.akn.xml` back into a tree, builds one JSON-LD graph, and derives the N-Quads from that same graph so the two representations cannot disagree (ADR-023). No database, no object store, no network or LLM call. |
 | 1.12 | 2026-08-22 | Made the file-first pipeline publication-ready and recorded the four decisions it rests on: permanent FRBR identifiers built from published facts (§28.7, ADR-024), Gate P1 plus Akoma Ntoso schema validation (§28.8, ADR-025), provenance-gated regeneration with per-run manifests and `pipeline verify` (§28.9, ADR-026), and metadata-only publication redacted at the serving boundary behind two flags (§28.10, ADR-027), with step 5 rebuilt on rdflib and SHACL deferred (ADR-028). Adds `AKN_GATE_MIN_TEXT_COVERAGE`, `SERVE_LEGISLATION_CORPUS`, `LEGISLATION_PUBLICATION_MODE` and `LEGISLATION_CORPUS_RIGHTS_CONFIRMED` to §16.2, `import-markdown` and `verify` to §28.2, and Package L to §19. Withdraws the URL-hash public identifier and the `infer_unit` language default recorded in 1.10 (§25.10). |
+| 1.13 | 2026-08-22 | Reordered publication and recorded two directions (§25.11). First: the file-first corpus's first publication surface is a **public static cache of files** — the dataset on its FRBR paths plus the schema/definitions, exported by a new step (§28.12, ADR-029), with backend serving, database integration, and all other tooling explicitly second; the pipeline store stays local-file only and is never committed. Second: step 4 splits into an LLM `extract-structure` step persisting `document.structure.json` (Gate P1 moves to it) and a deterministic `render-akn` step, with the extractor contract changed from re-emitting text to returning anchors (§28.5, ADR-030) — phase-two tooling, specified now so the cache and the split cannot drift apart. Package L loses "current priority" to the new Package M (§19). |
 
 ### 25.2 Defects corrected in 1.1
 
@@ -1709,6 +1731,37 @@ evidence, are in the `docs/status.md` gate log for 2026-08-22.
 Nothing in §6–§27 changes. The Postgres-backed system remains untouched and dormant, and Gate P1 is
 **not** Gate L1: they check different things on different inputs, and §26.6's gate table is
 unaffected.
+
+### 25.11 Changes recorded in 1.13
+
+Two directions from the commissioner on 2026-08-22, one reprioritisation and one pipeline
+restructuring, plus the first-corpus-run corrections already in the working tree.
+
+1. **Publication order is inverted for the file-first corpus (§28.12, ADR-029).** Directed: "my
+   priority right now is serving the schema and dataset statically, second part would only be the
+   backend serving, db integration and etc. the data pipeline should be solely local file for now,
+   not committed, only the static semantic files or definition," then "My prioritise is a public
+   cache of files, only then we do the teooling." The first publication surface is a static export
+   — gate-passing documents on their §28.7 FRBR paths plus the definitions (XSD, JSON-LD context,
+   vocabulary, artifact schemas), an index, and checksums — produced by
+   `billwatcher pipeline export-static` behind the same rights flags as serving. §28.10's served
+   surface, the database/object-store `PipelineStore`, and the §28.5 step split all become phase
+   two. ADR-018 is qualified for this pipeline only, not reversed: it still governs the
+   Postgres-backed system (§26.5).
+2. **Step 4 is split and the extractor stops re-emitting text (§28.5, ADR-030).** Directed:
+   "conversion directly to akoma ntoso is too resource intensive, how about we first produce an
+   intermediate format that fits all the bills we got so far then we'll do the conversion probably
+   at the end of the pipeline." The provision tree becomes a persisted artifact
+   (`document.structure.json`) with its own provenance and JSON Schema; Gate P1 judges it there;
+   Akoma Ntoso is rendered from the stored tree deterministically. The extractor returns anchors
+   (node type, printed number, heading, start line) and body text is sliced from `document.md`,
+   never re-generated by the model. No new format is invented — the intermediate is the `Node`
+   tree the pipeline already builds and gates, written down.
+3. **First-corpus-run corrections.** Gate P1 has now seen real documents. The corrections it
+   forced — among them a preamble text leak past `pipeline.redact`'s wrapper walk, fidelity
+   refinements, and version bumps to `AKN_VERSION`/`AKN_FIDELITY_GATE_VERSION` (1.1.0) — are in
+   code and belong to the `docs/status.md` gate log, not to this contract; they are noted here
+   because 1.12's "the corpus is unmeasured" no longer describes reality.
 
 ## 26. Legislation pipeline (Release 4)
 
@@ -2143,25 +2196,37 @@ directory is `documents/<bill-slug>/<doc-key>/v<NNN>/`.
 | 2 parse listings | `pipeline.listings.parse_listings` | none | stored listings | `bills/<slug>/bill.json` |
 | 3 fetch documents | `pipeline.documents.fetch_documents` | live | `bills/*/bill.json` | `document.pdf` + `metadata.json` |
 | 3b import markdown | CLI only | none | a markdown file the operator produced elsewhere | `document.md` + `document.markdown.provenance.json` |
-| 4 convert to Akoma Ntoso | `pipeline.akn.convert_to_akn` | live (vLLM) | `document.md`, `bill.json` | `document.akn.xml` + `document.akn.provenance.json`, always `document.akn.gate.json`, and `document.akn.rejected.xml` instead of the XML when Gate P1 blocks |
+| 4a extract structure | `pipeline.akn.extract_structures` | live (vLLM) | `document.md` | `document.structure.json` + `document.structure.provenance.json`, always `document.structure.gate.json` (Gate P1 judges the tree here, §28.8), and `document.structure.rejected.json` instead of the structure when it blocks |
+| 4b render Akoma Ntoso | `pipeline.akn.render_documents` | none | `document.structure.json`, `bill.json` | `document.akn.xml` + `document.akn.provenance.json` |
 | 5 generate semantic files | `pipeline.semantic.generate_semantic_files` | none | `document.akn.xml`, `bill.json` | `document.jsonld` + `document.nq` + `document.semantic.provenance.json` |
+| 6 export static cache | `pipeline.export.export_static` | none | every promoted artifact above, `bill.json` | the `PIPELINE_EXPORT_ROOT` tree (§28.12) — the one step that writes outside the store |
 | verify | — | none | everything above | nothing; it reports (§28.9) |
+
+**Steps 4a/4b are the ADR-030 split and are phase-two tooling; until they land, the fused step 4
+as built (`pipeline.akn.convert_to_akn`, reading `document.md` + `bill.json`, writing
+`document.akn.xml`/`document.akn.gate.json`/`document.akn.rejected.xml`) remains the working
+contract**, and step 6 exports from it. When the split lands, the fused step's artifacts
+regenerate once under §28.9's provenance rule and the `document.akn.gate.json`/
+`document.akn.rejected.xml` names retire in favour of the structure-level ones.
 
 Every run of every step also writes `manifests/<step>/<run-id>.json` (§28.9). `KNOWN_FILENAMES` in
 `pipeline/store.py` is the closed set of filenames above; anything else in a version directory is
 reported by `verify` rather than ignored.
 
-`billwatcher pipeline fetch-listings|parse-listings|fetch-documents|import-markdown|convert-to-akn|generate-semantic|verify`
-runs them, with `make pipeline-fetch-listings`/`pipeline-parse-listings`/`pipeline-fetch-documents`/
-`pipeline-convert-to-akn`/`pipeline-generate-semantic` for the five corpus-wide steps.
+`billwatcher pipeline fetch-listings|parse-listings|fetch-documents|import-markdown|convert-to-akn|generate-semantic|export-static|verify`
+runs them (`convert-to-akn` becomes `extract-structure` + `render-akn` when the ADR-030 split
+lands), with `make pipeline-fetch-listings`/`pipeline-parse-listings`/`pipeline-fetch-documents`/
+`pipeline-convert-to-akn`/`pipeline-generate-semantic`/`pipeline-export-static` for the corpus-wide
+steps.
 `import-markdown` is per document and takes the language as an argument, so it stays a CLI command
 rather than a target that would hide it.
 
 Steps 1 and 3 require `SCRAPE_ENABLED=true` or `--approve-live`, the same politeness and
 authorization discipline as the Postgres-backed `scrape`/`fetch-documents` commands — that
-discipline is not a database concern. Step 4 requires `AKN_LLM_ENABLED=true`, `AKN_LLM_BASE_URL`,
-and `AKN_LLM_MODEL_ID`. Steps 2, 3b, 5 and `verify` need neither network nor model: they read stored
-files only.
+discipline is not a database concern. Step 4 (4a once split) requires `AKN_LLM_ENABLED=true`,
+`AKN_LLM_BASE_URL`, and `AKN_LLM_MODEL_ID`. Steps 2, 3b, 4b, 5, 6 and `verify` need neither network
+nor model: they read stored files only. Step 6 additionally requires the rights confirmations of
+§28.12, because its output is the publishable unit.
 
 **Step 3b is the seam, not a gap.** PDF-to-markdown extraction is out of scope for this pipeline
 (§28.11) because the operator's own vLLM endpoint does it. What `import-markdown`
@@ -2239,6 +2304,26 @@ was printed, never from a guess, model-generated or otherwise. A live smoke test
 endpoint found the model wrapping every parenthesised token in its own punctuation (`"(1)"`
 instead of `"1"`), which would have poisoned every eId beneath it; fixed defensively
 (`_normalize_num` strips it regardless of what the model returns) as well as in the prompt.
+
+**The tree becomes a persisted intermediate, and the extractor stops re-emitting text (ADR-030,
+phase two).** As built, the tree lives only in memory and the prompt asks the model for the
+hierarchy *with body text*, so output tokens scale with document length, a long bill risks timeout,
+truncation and paraphrase, and every renderer or `bill.json` correction re-pays the full LLM read
+(§28.9 keys the AKN artifact on both). The amended contract:
+
+- `document.structure.json` is the reading of record — a versioned JSON serialisation of the
+  `Node` tree plus resolved `language` and `unit`, with its own provenance and its own JSON Schema
+  (published with the definitions, §28.12). Gate P1 judges it there (§28.8); `has_structure` is
+  the promotion flag; step 4b renders `document.akn.xml` from the *stored* tree, so a renderer or
+  FRBR fix regenerates the corpus with zero LLM calls.
+- **The extractor returns anchors, not prose**: node type, printed number, heading, and the start
+  line in a line-numbered copy of the markdown. Body text is sliced from `document.md` between
+  anchors, deterministically — it never passes through the model, so paraphrase is structurally
+  impossible and output cost drops from O(document) to O(provisions). The
+  `MarkdownStructureExtractor` protocol keeps its shape; the regex extractor anchors trivially.
+- "Conversion at the end" means *decoupled*, not deferred: rendering and XSD validation stay in
+  every corpus pass, because they are the cheap steps and they surface renderer defects one
+  document at a time rather than corpus-wide.
 
 ### 28.6 From Akoma Ntoso to the semantic graph
 
@@ -2408,6 +2493,11 @@ version. Nothing is signed, so this detects drift and accident, not an adversary
 
 ### 28.10 Publication: what is served, and under which flags
 
+**Since 1.13 this surface is phase two** (§28.12, ADR-029): the first publication surface is the
+public static cache, and the served surface below — with the database/object-store `PipelineStore`
+and every other piece of "the tooling" — comes after it. The contract here is unchanged; only its
+place in the queue moved.
+
 This is ADR-018 being implemented, not re-decided: the corpus is served by the application on the
 truncatable §28.7 paths, with extension variants and `Link: rel="alternate"` for content
 negotiation, and each level resolving to a listing.
@@ -2470,3 +2560,42 @@ can be withdrawn, a mirror cannot, and TODO 1.7 carries the legal work that gate
 - **No amendment, consolidation, or point-in-time query.** Those are Stages L3–L4 of §26.4, and they
   are blocked on §26.7, not on this pipeline. Which is also why Gate L5 cannot run (§28.6).
 
+
+### 28.12 The public static cache — the first publication surface
+
+Directed 2026-08-22 (ADR-029): "My prioritise is a public cache of files, only then we do the
+teooling." The corpus's first public form is a directory tree any static file host can serve — no
+application, no database, no content negotiation. `billwatcher pipeline export-static` (Make:
+`pipeline-export-static`) produces it from the store into `PIPELINE_EXPORT_ROOT`
+(default `public-cache/`), and it is the only step that writes outside `PIPELINE_DATA_ROOT`.
+
+What the tree holds:
+
+| Path | Content |
+| --- | --- |
+| `akn/my/bill/<chamber>/<year>/<number>/<lang>@.xml\|.jsonld\|.nq` | every **gate-passing** document's Akoma Ntoso, JSON-LD and N-Quads, laid out so a cached file's path *is* its §28.7 identifier |
+| `definitions/` | the vendored OASIS AKN XSD (copyright notices preserved), the JSON-LD context, the §26.2 structural vocabulary, and the JSON Schema for `document.structure.json` |
+| `index.json` | the Works and Expressions present, with titles and file listings — the machine-readable catalogue |
+| `checksums.sha256` | a digest per exported file, so a mirror can verify itself |
+
+Normative rules:
+
+- **Only promoted artifacts are exported.** A document whose reading Gate P1 rejected, or whose
+  bill record cannot mint a §28.7 identity, is absent — never exported "for completeness".
+- **The export boundary is a serving boundary.** `pipeline.redact` applies at export under
+  `LEGISLATION_PUBLICATION_MODE`, exactly as §28.10 applies it when serving; the store keeps full
+  text either way.
+- **The same rights flags gate it, at the same hardness.** The command refuses to run without
+  `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true`, and `full` mode additionally requires
+  `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true`. ADR-018's irreversibility warning binds *harder*
+  here: a cache, once mirrored, cannot be withdrawn. Both confirmations became legitimate to set
+  with the A14 determination of 2026-08-22.
+- **The store is never committed; the export may be published.** `pipeline-data/` — PDFs,
+  markdown, structures, provenance, rejected renders, manifests — stays local and gitignored.
+  The export tree and the definitions are the only pipeline output that may enter version control
+  or a public host: "only the static semantic files or definition."
+- **Freshness is a re-export.** No invalidation and no redirects; a re-export overwrites in place,
+  idempotently (unchanged bytes are not rewritten, §28.9's discipline), and `checksums.sha256` is
+  how a consumer detects change. Anything needing liveness belongs to §28.10.
+- **Nothing consolidated may enter the cache.** Stages L3–L4 output stays under TODO 1.7's legal
+  sign-off, which is a higher bar than A14 and is not satisfied by it.

@@ -106,6 +106,49 @@ def test_num_is_stripped_of_parentheses_and_trailing_periods_defensively() -> No
     assert paragraph.num == "a"
 
 
+def test_a_num_with_embedded_whitespace_is_collapsed_rather_than_left_for_the_schema() -> (
+    None
+):
+    """Found live on a real federal Supply Bill: a schedule paragraph numbered "B. 1" (letter,
+    dot, space, digit -- a vote number, not a clause). Left as printed, the space survives into the
+    eId, which AKN 3.0 requires to be whitespace-free, so a document Gate P1 would otherwise have
+    judged normally instead crashed the schema validator with no fidelity verdict to show for it."""
+    tree_with_vote_number = {
+        "children": [
+            {
+                "node_type": "schedule",
+                "num": "1",
+                "heading": None,
+                "paragraphs": [],
+                "children": [
+                    {
+                        "node_type": "paragraph",
+                        "num": "B. 1",
+                        "heading": None,
+                        "paragraphs": [],
+                        "children": [],
+                    },
+                    {
+                        "node_type": "paragraph",
+                        "num": "B. 10",
+                        "heading": None,
+                        "paragraphs": [],
+                        "children": [],
+                    },
+                ],
+            }
+        ]
+    }
+    extractor = VllmMarkdownStructureExtractor(
+        model_id="test-model",
+        base_url="https://llm.example.org/v1",
+        transport=_transport(_chat_response(json.dumps(tree_with_vote_number))),
+    )
+    tree = extractor.extract("some markdown", unit="clause")
+    schedule = tree.children[0]
+    assert [child.num for child in schedule.children] == ["B.1", "B.10"]
+
+
 def test_an_unnumbered_schedule_is_read_as_schedule_1_rather_than_as_a_missing_number() -> None:
     """A document with one schedule does not number it, so a faithful reading of a bare `JADUAL` has
     no number to report — and the gate's `missing_num` check would have rejected it for being right.

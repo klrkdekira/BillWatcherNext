@@ -138,13 +138,18 @@ def _normalize_num(num: object) -> str | None:
 
     A model that emits "(1)" or "5." despite the instruction would otherwise poison every eId
     beneath that node with literal parentheses or a stray period (found live: the model's first
-    response over this exact prompt did exactly that for every parenthesised token).
+    response over this exact prompt did exactly that for every parenthesised token). A real
+    Malaysian Supply Bill's vote numbers ("B. 1", "B. 10" — letter, dot, space, digit) do the same
+    with embedded whitespace: an eId may never contain whitespace, so a survivor here does not fail
+    the reading, it fails the *schema*, turning a document Gate P1 would have judged normally into
+    an opaque validator crash (found live).
     """
     if num is None:
         return None
     text = str(num).strip()
     if text.startswith("(") and text.endswith(")"):
         text = text[1:-1]
+    text = "".join(text.split())
     return text.removesuffix(".") or None
 
 
