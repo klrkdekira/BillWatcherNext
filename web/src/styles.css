@@ -1,0 +1,781 @@
+/*
+ * The design is the statute book, printed well.
+ *
+ * The palette is the gazette's: warm letterpress ink on legal paper in light, the same room lit by
+ * a lamp in dark. One maroon — the seal red of official Malaysian legal print — carries every link
+ * and every active state; a gold ochre is reserved for the crest rule and the focus ring, and is
+ * never text. Spectral (a serif drawn for long-form screen reading) sets the display and the
+ * reading; IBM Plex Sans is the working face of the apparatus around it; IBM Plex Mono sets the
+ * FRBR identifiers, which are content here, not decoration. All three are bundled at build time so
+ * the site keeps its property of making no request to anyone else's server.
+ */
+
+@import "@fontsource/spectral/400.css";
+@import "@fontsource/spectral/400-italic.css";
+@import "@fontsource/spectral/500.css";
+@import "@fontsource/spectral/600.css";
+@import "@fontsource/spectral/600-italic.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+:root {
+  --ink: #241f19;
+  --ink-soft: #6d6154;
+  --paper: #faf6ef;
+  --surface: #f1ebdf;
+  --line: #ddd3c1;
+  --accent: #7d2230;
+  --accent-ink: #faf6ef;
+  --gold: #8a6414;
+  --focus: #9c6a00;
+  --ok: #2a6b45;
+  --warn: #8a5200;
+  --bad: #a12b2b;
+
+  /* A control that should read as raised off the surface it sits on, and the tinted grounds for
+     the warning and error notices. In light these are the paper and the surface the rules already
+     used; they only diverge in dark, where "raised" has to mean lighter rather than darker. */
+  --raised: #faf6ef;
+  --wash-warn: var(--surface);
+  --wash-bad: var(--surface);
+
+  --measure: 68rem;
+  --radius: 0.25rem;
+  --gap: 1rem;
+
+  --serif: "Spectral", "Iowan Old Style", Palatino, Georgia, "Times New Roman", serif;
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  color-scheme: light dark;
+}
+
+/*
+ * The lamp-lit room. The two blocks below carry the same palette — one for a reader who has asked
+ * their system for dark, one for a reader who asked this site directly — and must stay in step.
+ *
+ * The accent is the point of the retune. Inverting the seal maroon by lightness alone bleached it
+ * to a rose, which is the one thing an official red must not read as; this holds the maroon's hue
+ * and its saturation and lifts only as far as legibility on the dark paper requires.
+ *
+ * `color-scheme` is declared here, not only on `:root`, because a reader can override the theme
+ * against their system's. Without it, forcing dark on a light desktop leaves the native furniture
+ * — select popups, scrollbars, the caret — rendering light against a dark page.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: #dcd2c3;
+    --ink-soft: #a89b89;
+    --paper: #16120e;
+    --surface: #211b15;
+    --raised: #2b241c;
+    --line: #3a3128;
+    --accent: #e2626d;
+    --accent-ink: #2a1014;
+    --gold: #c99b3f;
+    --focus: #e3b341;
+    --ok: #74c69a;
+    --warn: #e0a95c;
+    --bad: #f08a8a;
+
+    --wash-warn: color-mix(in oklab, var(--warn) 9%, var(--surface));
+    --wash-bad: color-mix(in oklab, var(--bad) 9%, var(--surface));
+
+    color-scheme: dark;
+
+    /* Light text on a dark ground blooms, and this site is read at length. The ink is held a step
+       off white and the glyphs are smoothed, so a long provision does not glare. */
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ink: #dcd2c3;
+  --ink-soft: #a89b89;
+  --paper: #16120e;
+  --surface: #211b15;
+  --raised: #2b241c;
+  --line: #3a3128;
+  --accent: #e2626d;
+  --accent-ink: #2a1014;
+  --gold: #c99b3f;
+  --focus: #e3b341;
+  --ok: #74c69a;
+  --warn: #e0a95c;
+  --bad: #f08a8a;
+
+  --wash-warn: color-mix(in oklab, var(--warn) 9%, var(--surface));
+  --wash-bad: color-mix(in oklab, var(--bad) 9%, var(--surface));
+
+  color-scheme: dark;
+
+  /* Light text on a dark ground blooms, and this site is read at length. The ink is held a step
+     off white and the glyphs are smoothed, so a long provision does not glare. */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The mirror of the above: a reader on a dark system who has asked this site for light needs the
+   native furniture to follow them back. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  .button,
+  .theme-toggle,
+  .tab {
+    transition:
+      color 120ms ease,
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.875em;
+}
+
+.shell {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 0 1.25rem 4rem;
+}
+
+/* --- masthead ---------------------------------------------------------------------------- */
+
+/*
+ * The signature of the whole site is the statute-book rule: a thick seal-maroon bar over a thin
+ * gold hairline, the double rule that opens an Act in print. It closes the masthead here and the
+ * page again at the footer, so every screen is bracketed the way a printed statute is.
+ */
+.masthead {
+  background: var(--surface);
+  border-bottom: 1px solid var(--gold);
+  margin-bottom: 2rem;
+}
+
+.masthead::after {
+  content: "";
+  display: block;
+  height: 4px;
+  background: var(--accent);
+  margin-bottom: 3px;
+}
+
+.masthead__inner {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  gap: var(--gap);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.masthead__title {
+  font-family: var(--serif);
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.masthead__title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.masthead__nav {
+  margin-left: auto;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.masthead__nav > a {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  text-decoration-color: var(--line);
+}
+
+.masthead__nav > a:hover {
+  color: var(--accent);
+}
+
+/* --- buttons ----------------------------------------------------------------------------- */
+
+/* A control reads as pressable because it stands off the surface behind it. `--paper` did that in
+   light, where paper is the lighter of the two, and quietly did the opposite in dark, where the
+   button sank into the masthead. `--raised` means the same thing in both. */
+.button,
+.theme-toggle {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink-soft);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.75rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.button:hover,
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- page furniture ---------------------------------------------------------------------- */
+
+.eyebrow {
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--gold);
+  margin: 0 0 0.35rem;
+}
+
+.display {
+  font-family: var(--serif);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  margin: 0 0 0.5rem;
+  text-wrap: balance;
+}
+
+h1.display {
+  font-size: clamp(1.7rem, 1.2rem + 1.8vw, 2.6rem);
+}
+
+h2.display {
+  font-size: 1.35rem;
+  margin-top: 2.5rem;
+}
+
+.display--sub {
+  font-size: 1.0625rem;
+  margin-top: 1.5rem;
+}
+
+.lede {
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  color: var(--ink-soft);
+  max-width: 46rem;
+  margin: 0 0 2rem;
+}
+
+.crumbs {
+  font-size: 0.875rem;
+  color: var(--ink-soft);
+  margin-bottom: 1rem;
+}
+
+.crumbs a {
+  color: var(--ink-soft);
+}
+
+/* --- stat cards -------------------------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 2rem;
+  padding: 0;
+  list-style: none;
+}
+
+.stat {
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.75rem 0.9rem;
+}
+
+.stat__value {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  font-weight: 600;
+  display: block;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
+/* --- pills ------------------------------------------------------------------------------- */
+
+.pill {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--ink-soft);
+  background: var(--paper);
+  white-space: nowrap;
+}
+
+.pill--accent {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pill--bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.pill--warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.pill--ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+/* --- filters ----------------------------------------------------------------------------- */
+
+.filters {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
+.field input,
+.field select {
+  font: inherit;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  min-width: 8rem;
+}
+
+.field--wide input {
+  min-width: 20rem;
+}
+
+.filters__count {
+  margin-left: auto;
+  font-size: 0.875rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- work list --------------------------------------------------------------------------- */
+
+.works {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.work {
+  border-bottom: 1px solid var(--line);
+  padding: 0.9rem 0;
+  display: flex;
+  gap: var(--gap);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+/* The bill's number, set as the gazette stamps it: mono, spaced, boxed. */
+.work__number {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.4rem;
+  min-width: 7.5rem;
+  text-align: center;
+}
+
+.work__title {
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  flex: 1 1 22rem;
+}
+
+.work__title a {
+  text-decoration: none;
+}
+
+.work__title a:hover {
+  text-decoration: underline;
+}
+
+.work__badges {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* --- resource groups --------------------------------------------------------------------- */
+
+.resources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+  padding: 0;
+  margin: 0 0 2rem;
+  list-style: none;
+}
+
+.resource {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+  background: var(--surface);
+}
+
+.resource__format {
+  font-family: var(--serif);
+  font-weight: 600;
+  display: block;
+}
+
+.resource__path {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  word-break: break-all;
+}
+
+/* --- tabs -------------------------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--line);
+  margin: 2rem 0 1.5rem;
+}
+
+.tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: none;
+  font: inherit;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+  padding: 0.5rem 0.9rem;
+  border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.tab[aria-selected="true"] {
+  border-color: var(--line);
+  border-top: 2px solid var(--accent);
+  border-bottom-color: var(--paper);
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* --- the reading ------------------------------------------------------------------------- */
+
+.reading {
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  line-height: 1.75;
+  max-width: 42rem;
+}
+
+/*
+ * The reading carries two heading levels that mean different things: `h2` is a division of the
+ * document — a Part, a Chapter, a Schedule, the display capitals on a bill's cover — and `h3` is
+ * one provision's own heading, the line printed above a single clause. The division is centred
+ * and letterspaced the way the paper sets it; the provision heading stays in the text column,
+ * where the eye picks it up as a label on the paragraph beneath rather than a new section.
+ */
+.reading h1,
+.reading h2 {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+  margin: 2.5rem 0 1rem;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.reading h3 {
+  font-size: 1.0625rem;
+  font-style: italic;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1.75rem 0 0.5rem;
+}
+
+.reading blockquote {
+  margin: 1.25rem 0 1.25rem 1rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+
+.reading hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  width: 8rem;
+  margin: 2.5rem auto;
+}
+
+.reading ul,
+.reading ol {
+  padding-left: 1.5rem;
+}
+
+.reading li {
+  margin-bottom: 0.35rem;
+}
+
+.reading table {
+  border-collapse: collapse;
+  font-family: var(--sans);
+  font-size: 0.875rem;
+}
+
+.reading td,
+.reading th {
+  border: 1px solid var(--line);
+  padding: 0.3rem 0.5rem;
+}
+
+.scroller {
+  overflow-x: auto;
+}
+
+/* --- the provision tree ------------------------------------------------------------------ */
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+
+.tree .tree {
+  padding-left: 1.25rem;
+  border-left: 1px solid var(--line);
+  margin-left: 0.35rem;
+}
+
+.provision {
+  padding: 0.3rem 0;
+}
+
+.provision__number {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--accent);
+  margin-right: 0.5rem;
+}
+
+.provision__heading {
+  font-family: var(--serif);
+}
+
+.provision__id {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--ink-soft);
+  margin-left: 0.5rem;
+}
+
+pre.raw {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem;
+  overflow-x: auto;
+  max-height: 32rem;
+  line-height: 1.5;
+}
+
+/* --- states ------------------------------------------------------------------------------ */
+
+.notice {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.75rem 1rem;
+  margin: 1.5rem 0;
+}
+
+/* On paper a coloured rule down the margin is enough to mark a caveat, because the panel itself is
+   already darker than the page. In dark every panel shares one ground and the rule was carrying
+   the meaning alone, so the ground takes a wash of the same colour — nothing in light, where the
+   wash tokens resolve to the plain surface. */
+.notice--bad {
+  border-left-color: var(--bad);
+  background: var(--wash-bad);
+}
+
+.notice--warn {
+  border-left-color: var(--warn);
+  background: var(--wash-warn);
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+/* The closing bracket of the page: the same double rule the masthead opens with. */
+.footer {
+  border-top: 4px solid var(--accent);
+  margin-top: 3rem;
+  padding-top: 1rem;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.footer::before {
+  content: "";
+  display: block;
+  height: 1px;
+  background: var(--gold);
+  margin-top: 3px;
+  margin-bottom: 0.75rem;
+}
+
+/* The language chooser sits in the masthead beside the theme toggle, and is the same kind of
+   control: a per-reader preference, not navigation. It borrows the toggle's shape so the two read
+   as a pair rather than as a control and an afterthought. */
+.chooser {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.chooser__label {
+  /* Available to a screen reader, invisible in a masthead that is already dense. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.chooser select {
+  font: inherit;
+  font-size: 0.8125rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  padding: 0.125rem 0.375rem;
+}
+
+/* --- print ------------------------------------------------------------------------------- */
+
+/*
+ * The reading is legal text, and legal text gets printed. The apparatus — filters, tabs, theme
+ * and language controls — is for the screen; the paper gets the statute.
+ */
+@media print {
+  .masthead__nav,
+  .filters,
+  .tabs,
+  .theme-toggle,
+  .footer::before {
+    display: none;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  .reading {
+    max-width: none;
+  }
+
+  a {
+    color: inherit;
+  }
+}

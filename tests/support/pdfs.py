@@ -15,14 +15,32 @@ A4_WIDTH = 595.0
 A4_HEIGHT = 842.0
 
 
+# The three faces Malaysian legislative typography actually uses, keyed by the resource name they
+# are registered under. Weight is load-bearing, not decoration: a section heading is set in the
+# same size as the provision beneath it and differs only in being bold, so a fixture that can only
+# write one face cannot express the shape the classifier reads.
+FONTS = {"F1": "Times-Roman", "F2": "Times-Bold", "F3": "Times-Italic"}
+ROMAN, BOLD, ITALIC = "F1", "F2", "F3"
+
+
 @dataclass(frozen=True, slots=True)
 class Placement:
-    """One line of text at a baseline origin in PDF user space (origin bottom-left)."""
+    """One line of text at a baseline origin in PDF user space (origin bottom-left).
+
+    `lead` sets the face of the first `lead_chars` characters, which is how a provision number is
+    printed: `2.` in bold, the sentence after it in roman, on one typeset line.
+    """
 
     x: float
     y: float
     text: str
     size: float = 11.0
+    font: str = ROMAN
+    lead: str | None = None
+    lead_chars: int = 0
+    # Extra space between every pair of glyphs, in points: the PDF `Tc` operator. This is how a
+    # bill's HURAIAN pages are letterspaced — tracked glyphs with no space characters between them.
+    tracking: float = 0.0
 
 
 def _escape(value: str) -> bytes:
@@ -43,34 +61,50 @@ def build_pdf(
         objects.append(body)
         return len(objects)
 
-    font_id = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    font_ids = {
+        name: add(b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % base.encode())
+        for name, base in FONTS.items()
+    }
     pages_id = add(b"")  # reserved; the Pages node needs its kids' ids
     page_ids: list[int] = []
 
     for placements in pages:
         parts = [b"BT\n"]
         for item in placements:
-            parts.append(
-                b"/F1 %s Tf\n1 0 0 1 %s %s Tm\n(%s) Tj\n"
-                % (
-                    f"{item.size:g}".encode(),
-                    f"{item.x:g}".encode(),
-                    f"{item.y:g}".encode(),
-                    _escape(item.text),
-                )
+            size = f"{item.size:g}".encode()
+            # A run per face. The text matrix places the first run; the ones after it follow on
+            # the same line, which is what makes a bold number and a roman sentence one line.
+            runs = (
+                [
+                    (item.lead, item.text[: item.lead_chars]),
+                    (item.font, item.text[item.lead_chars :]),
+                ]
+                if item.lead and item.lead_chars
+                else [(item.font, item.text)]
             )
+            parts.append(b"1 0 0 1 %s %s Tm\n" % (f"{item.x:g}".encode(), f"{item.y:g}".encode()))
+            parts.append(b"%s Tc\n" % f"{item.tracking:g}".encode())
+            for face, chunk in runs:
+                if not chunk:
+                    continue
+                parts.append(
+                    b"/%s %s Tf\n(%s) Tj\n" % ((face or ROMAN).encode(), size, _escape(chunk))
+                )
         parts.append(b"ET\n")
         stream = b"".join(parts)
         contents_id = add(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
         page_ids.append(
             add(
                 b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s] "
-                b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+                b"/Resources << /Font << %s >> >> /Contents %d 0 R >>"
                 % (
                     pages_id,
                     f"{width:g}".encode(),
                     f"{height:g}".encode(),
-                    font_id,
+                    b" ".join(
+                        b"/%s %d 0 R" % (name.encode(), font_id)
+                        for name, font_id in font_ids.items()
+                    ),
                     contents_id,
                 )
             )
@@ -206,6 +240,94 @@ def sample_bill() -> bytes:
         Placement(300, 40, "2", 9.0),
     ]
     return build_pdf([front, body])
+
+
+def amending_bill() -> bytes:
+    """The shape most of the real corpus has, and the one the reader kept getting wrong.
+
+    Reproduced from `DR 11/2024 BI`, measured: an amending bill is mostly *schedule*, and a
+    schedule is set in table type two points smaller than the prose. Three things follow, and each
+    of them broke a different rule:
+
+    - The small type carries more characters than the prose does, so the size carrying the most
+      text is the *table's*, not the body's.
+    - A section heading is set in the same size as the provision under it and differs only in
+      being bold.
+    - A subsection is indented rather than hung, so it does not start at the body margin.
+
+    The running heads alternate recto and verso, so neither appears on more than half the pages.
+    """
+    prose, table = 12.0, 10.0
+    body_margin, indent = 88.0, 100.0
+    head = "Employees' Social Security (Amendment)"
+
+    page_one = [
+        Placement(178, 664, head, prose, font=ITALIC),
+        Placement(447, 664, "1", prose),
+        Placement(264, 640, "A BILL", prose),
+        Placement(body_margin, 560, "Short title and commencement", prose, font=BOLD),
+        Placement(
+            body_margin,
+            532,
+            "1. (1) This Act may be cited as the Example Act 2024.",
+            prose,
+            lead=BOLD,
+            lead_chars=2,
+        ),
+        Placement(indent, 504, "(2) This Act comes into operation on a date", prose),
+        Placement(body_margin, 490, "appointed by the Minister.", prose),
+        Placement(body_margin, 448, "Amendment of Third Schedule", prose, font=BOLD),
+        Placement(
+            body_margin, 420, "2. The Third Schedule is amended-", prose, lead=BOLD, lead_chars=2
+        ),
+    ]
+    # The schedule: enough small type to outweigh the prose above, as the real bills do.
+    rows = [
+        Placement(
+            184, 380 - index * 11, f'"{55 + index}. When wages exceed RM{5000 + index * 100}', table
+        )
+        for index in range(8)
+    ]
+    page_two = [
+        Placement(245, 664, "Bill", prose, font=ITALIC),
+        Placement(87, 664, "2", prose),
+        *[
+            Placement(
+                184,
+                640 - index * 11,
+                f"RM{88 + index}.35 RM{25 + index}.25 RM{113 + index}.60”;",
+                table,
+            )
+            for index in range(8)
+        ],
+    ]
+    page_three = [
+        Placement(178, 664, head, prose, font=ITALIC),
+        Placement(447, 664, "3", prose),
+        *[
+            Placement(
+                184,
+                640 - index * 11,
+                f'"{79 + index}. When wages exceed RM{7400 + index * 100}',
+                table,
+            )
+            for index in range(8)
+        ],
+    ]
+    page_four = [
+        Placement(245, 664, "Bill", prose, font=ITALIC),
+        Placement(87, 664, "4", prose),
+        *[
+            Placement(
+                184,
+                640 - index * 11,
+                f"RM{112 + index}.35 RM{49 + index}.25 RM{161 + index}.60”;",
+                table,
+            )
+            for index in range(8)
+        ],
+    ]
+    return build_pdf([page_one + rows, page_two, page_three, page_four], width=540.9, height=750.7)
 
 
 def act_with_missing_section() -> bytes:

@@ -1,0 +1,471 @@
+{
+  "total_jobs": 51,
+  "found": 17,
+  "substitutes": 1,
+  "not_found": 33,
+  "jobs": [
+    {
+      "job": 1,
+      "job_id": "dr-1-2006",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DR12006E.pdf",
+      "status": "found",
+      "file": "dr-1-2006.pdf",
+      "note": "Factories and Machinery (Amendment) Bill 2006, 27p"
+    },
+    {
+      "job": 2,
+      "job_id": "dr-10-2006",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DR102006.pdf",
+      "status": "found",
+      "file": "dr-10-2006_ms.pdf",
+      "note": "Malaysian Pepper Board Bill 2006 (Rang Undang-Undang Lembaga Lada Malaysia 2006), header D.R. 10/2006, 60 pp — from lib.perdana.org.my mirror (official parlimen copy dead); title cross-checked vs parlimen 2006 index",
+      "md5": "1ca758acfeb63317967e4d55e646dda0",
+      "source": "lib.perdana.org.my (Perdana University library mirror)"
+    },
+    {
+      "job": 3,
+      "job_id": "dr-12-2004",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2004/dr12-2004.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 4,
+      "job_id": "dr-12-2009",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2009/DR122009.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 5,
+      "job_id": "dr-13-2009",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2009/DR132009.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 6,
+      "job_id": "dr-15-2018",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2018/D.R.%2015_2018%20-BM.pdf",
+      "status": "found",
+      "file": "D.R.15_2018_BM.pdf",
+      "note": "Perbekalan (Penguntukan Semula Peruntukan) 2018, D.R. 15/2018"
+    },
+    {
+      "job": 7,
+      "job_id": "dr-15-2018",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2018/D.R.%2015_2018%20-ENG.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 8,
+      "job_id": "dr-16-2004",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2004/DR162004%281%29.pdf",
+      "status": "found",
+      "file": "dr-16-2004_ms.pdf",
+      "note": "Criminal Procedure Code (Amendment) Bill 2004, internal ref D.R. 16/2004"
+    },
+    {
+      "job": 9,
+      "job_id": "dr-19-2017",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2017/D.R.%2019_2017%20%28eng%29.pdf",
+      "status": "found",
+      "file": "dr-19-2017_en.pdf",
+      "note": "Trade Descriptions (Amendment) Act 2017 — English, 3-pp scanned copy (image-only) — from lib.perdana.org.my mirror; official index lists D.R.19/2017 as 'Trade (Amendment) Bill 2017 (Passed)'; enacted act = A1545 per lom.agc.gov.my",
+      "md5": "f80812df55dcaedacc8977b4ac721e08",
+      "source": "lib.perdana.org.my (Perdana University library mirror)"
+    },
+    {
+      "job": 10,
+      "job_id": "dr-2-2006",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DR22006E.pdf",
+      "status": "found",
+      "file": "dr-2-2006.pdf",
+      "note": "Malaysian Health Promotion Board Bill 2006, 20p"
+    },
+    {
+      "job": 11,
+      "job_id": "dr-2-2021",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2021/D.R%202_2021%20eng.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 12,
+      "job_id": "dr-21-2009",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2009/DR212009.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 13,
+      "job_id": "dr-22-2009",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2009/DR222009.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 14,
+      "job_id": "dr-22-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2010/DR222010E.pdf",
+      "status": "SUBSTITUTE",
+      "file": "substitutes/dr-22-2010_MS_substitute_for_EN_job14.pdf",
+      "note": "Job requests 22/2010 ENGLISH; only the MALAY version (DR222010.pdf) was ever archived. Provided as substitute, clearly labeled."
+    },
+    {
+      "job": 15,
+      "job_id": "dr-24-2006",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DN%20242006.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 16,
+      "job_id": "dr-28-2023",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2023/DR%2028%20-%20BM.pdf",
+      "status": "found",
+      "file": "D.R.28_2023_BM.pdf",
+      "note": "Kecekapan dan Konservasi Tenaga 2023, D.R. 28/2023, 71p"
+    },
+    {
+      "job": 17,
+      "job_id": "dr-28-2023",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2023/DR%2028%20-%20BI.pdf",
+      "status": "found",
+      "file": "D.R.28_2023_EN.pdf",
+      "note": "Energy Efficiency and Conservation Bill 2023, 64p"
+    },
+    {
+      "job": 18,
+      "job_id": "dr-29-2002",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2002/BILL-DR-29.pdf",
+      "status": "found",
+      "file": "dr-29-2002.pdf",
+      "note": "Supplementary Supply Bill 2002 — old 'A BILL intituled' format, title matches official index D.R.29/2002"
+    },
+    {
+      "job": 19,
+      "job_id": "dr-29-2015",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.29_2015%28bm%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 20,
+      "job_id": "dr-29-2015",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.29_2015%28eng%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 21,
+      "job_id": "dr-3-2006",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DR32006E.pdf",
+      "status": "found",
+      "file": "dr-3-2006.pdf",
+      "note": "Akademi Seni Budaya dan Warisan Kebangsaan Bill 2006, 42p"
+    },
+    {
+      "job": 22,
+      "job_id": "dr-30-2002",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2002/BILL-DR-30.pdf",
+      "status": "found",
+      "file": "dr-30-2002.pdf",
+      "note": "Supply Bill (for 2003 appropriations) — title matches D.R.30/2002"
+    },
+    {
+      "job": 23,
+      "job_id": "dr-30-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR302010.pdf",
+      "status": "found",
+      "file": "D.R.30_2010_BM.pdf",
+      "note": "Penilai, Pentaksir dan Ejen Harta Tanah (Pindaan), D.R. 30/2010"
+    },
+    {
+      "job": 24,
+      "job_id": "dr-30-2011",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR302010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 25,
+      "job_id": "dr-31-2002",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2002/BILL-DR-31.pdf",
+      "status": "found",
+      "file": "dr-31-2002.pdf",
+      "note": "Majlis Amanah Rakyat (Amendment) Bill 2002 — title matches D.R.31/2002"
+    },
+    {
+      "job": 26,
+      "job_id": "dr-32-2002",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2002/BILL-DR-32.pdf",
+      "status": "found",
+      "file": "dr-32-2002.pdf",
+      "note": "Labuan Trust Companies (Amendment) Bill 2002 — title matches D.R.32/2002"
+    },
+    {
+      "job": 27,
+      "job_id": "dr-32-2025",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2025/DN/DR.32_2025%20Employees%E2%80%99%20Social%20Security%20%28Amendment%29%20Bill%202025.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 28,
+      "job_id": "dr-33-2002",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2002/BILL-DR-33.pdf",
+      "status": "found",
+      "file": "dr-33-2002.pdf",
+      "note": "Finance (No. 2) Bill 2002 — title matches D.R.33/2002"
+    },
+    {
+      "job": 29,
+      "job_id": "dr-34-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR342010.pdf",
+      "status": "found",
+      "file": "D.R.34_2010_BM.pdf",
+      "note": "Juruanalisis Makanan, D.R. 34/2010"
+    },
+    {
+      "job": 30,
+      "job_id": "dr-34-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR342010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 31,
+      "job_id": "dr-34-2015",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.34-2015%28BM%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 32,
+      "job_id": "dr-34-2015",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.34-2015%28BI%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 33,
+      "job_id": "dr-34-2017",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2017/WJW008818%20BI.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 34,
+      "job_id": "dr-36-2015",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.36-2015%28BM%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 35,
+      "job_id": "dr-36-2015",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.36-2015%28BI%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 36,
+      "job_id": "dr-37-2015",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.37-2015%28BM%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 37,
+      "job_id": "dr-37-2015",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R.37-2015%28BI%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 38,
+      "job_id": "dr-38-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR382010.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 39,
+      "job_id": "dr-38-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR382010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 40,
+      "job_id": "dr-39-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR392010.pdf",
+      "status": "found",
+      "file": "D.R.39_2010_BM.pdf",
+      "note": "Perkapalan Saudagar (Pencemaran Minyak) (Pindaan), D.R. 39/2010"
+    },
+    {
+      "job": 41,
+      "job_id": "dr-39-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR392010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 42,
+      "job_id": "dr-39-2015",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R%2039-2015%28BM%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 43,
+      "job_id": "dr-39-2015",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2015/D.R%2039-2015%28BI%29.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 44,
+      "job_id": "dr-4-2006",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2006/DR42006E.pdf",
+      "status": "found",
+      "file": "dr-4-2006.pdf",
+      "note": "Suruhanjaya Perkhidmatan Air Negara Bill 2006, 24p"
+    },
+    {
+      "job": 45,
+      "job_id": "dr-4-2013",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2013/DR4_2013%20BM.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 46,
+      "job_id": "dr-4-2013",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2013/DR42013%20ENG.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 47,
+      "job_id": "dr-40-2017",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2017/D.R%2046_2017%20-%20eng.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 48,
+      "job_id": "dr-41-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2010/DR412010.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 49,
+      "job_id": "dr-42-2010",
+      "lang": "[ms]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR422010.pdf",
+      "status": "found",
+      "file": "D.R.42_2010_BM.pdf",
+      "note": "Timbang Tara (Pindaan), internal ref D.R. 42/2010. NOTE: parlimen's index lists D.R.42/2010 as 'Arbitration (Amendment)' — the archived PDF (DR422010.pdf from the /2011/ tree) carries the number 42/2010 but a different title; parlimen's own index is known to mislabel (cf. dr-40-2017 -> D.R 46_2017). Treated as the correct document by bill number."
+    },
+    {
+      "job": 50,
+      "job_id": "dr-42-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2011/DR422010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    },
+    {
+      "job": 51,
+      "job_id": "dr-12-2010",
+      "lang": "[en]",
+      "url": "https://www.parlimen.gov.my/files/billindex/pdf/2010/DR122010E.pdf",
+      "status": "not found",
+      "file": "",
+      "note": ""
+    }
+  ]
+}

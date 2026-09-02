@@ -1,645 +1,520 @@
+"""The pipeline's whole command surface: local files in, local files out.
+
+One command per step, each one runnable on its own and safe to re-run. Only `fetch-listings` and
+`fetch-documents` touch the network, and both refuse to unless an operator says so in the same
+breath (`--approve-live`, or `DOWNLOAD_ENABLED=true`). Everything else reads the corpus on disk.
+
+Every step prints one JSON object on stdout and everything else on stderr, so a step can be piped
+into `jq` while a fifty-minute download still narrates itself. Every step also leaves a manifest in
+the corpus recording what it did and which code versions did it, which is what makes a build
+auditable after the fact rather than only while it is running.
+"""
+
 import json
-import random
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import typer
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import func, select, text
 
 from billwatcher.config import get_settings
-from billwatcher.db import SessionLocal
-from billwatcher.jobs.audit_rebuild import check_audit_tree, rebuild_documents
-from billwatcher.jobs.fixture_refresh import refresh_fixtures
-from billwatcher.jobs.fixtures import load_fixture_listings
-from billwatcher.jobs.mineru_extract import run_mineru_extract
-from billwatcher.jobs.rechunk import run_rechunk
-from billwatcher.jobs.reembed import drop_superseded_model, run_reembed
-from billwatcher.jobs.reextract import run_reextract
-from billwatcher.jobs.replay import run_reparse
-from billwatcher.jobs.restructure import run_restructure
-from billwatcher.jobs.retention import apply_retention
-from billwatcher.mineru.client import MarkdownExtractorUnavailable
-from billwatcher.mineru.client import build_extractor as build_mineru_extractor
-from billwatcher.models import (
-    Anomaly,
-    Blob,
-    ChunkEmbedding,
-    CoverageTarget,
-    FetchAttempt,
-    FetchQueueItem,
-    ScrapeRun,
+from billwatcher.coverage import build_report, render_markdown, summary_lines
+from billwatcher.download.documents import DocumentImportError, fetch_documents, import_document
+from billwatcher.download.fetch import Fetcher
+from billwatcher.download.listings import fetch_listings, parse_listings
+from billwatcher.download.policy import CrawlPolicy
+from billwatcher.frbr import LANGUAGES
+from billwatcher.graph.convert import convert_to_akn
+from billwatcher.graph.handoff import (
+    FileStructureExtractor,
+    HandoffError,
+    write_handoff,
 )
-from billwatcher.operations import (
-    diagnose,
-    evaluate_coverage,
-    find_bill_number_gaps,
-    prune_unreferenced_blobs,
+from billwatcher.graph.semantic import generate_semantic_files
+from billwatcher.graph.structure import MarkdownStructureExtractor, RegexMarkdownStructureExtractor
+from billwatcher.markdown.crosscheck import (
+    CROSSCHECK_FILENAME,
+    MIN_AGREEMENT,
+    cross_reference,
+    import_crosscheck,
+    import_crosscheck_tree,
 )
-from billwatcher.pipeline.cli import app as pipeline_app
-from billwatcher.scraper.document_worker import (
-    close_document_run,
-    open_document_run,
-    process_one_document,
-    run_fetch_documents_step,
+from billwatcher.markdown.imports import (
+    MarkdownImportError,
+    Producer,
+    import_markdown,
+    import_markdown_tree,
 )
-from billwatcher.scraper.fetch import Fetcher
-from billwatcher.scraper.policy import CrawlPolicy
-from billwatcher.scraper.queue import CrawlBudget
-from billwatcher.scraper.worker import ScrapeOrchestrator
-from billwatcher.search.embeddings import EmbeddingProviderUnavailable, build_provider
-from billwatcher.search.evaluation import evaluate
-from billwatcher.search.rag import AnswerProviderUnavailable, build_answer_provider
-from billwatcher.storage import build_blob_store
-from billwatcher.storage.audit_tree import AuditTree
-from billwatcher.version import PARSER_VERSION
+from billwatcher.markdown.reading import extract_markdown
+from billwatcher.publish.dataset import (
+    StaticExportRefused,
+    publish_dataset,
+    require_publication_rights,
+)
+from billwatcher.reporting import (
+    StepFailure,
+    StepResult,
+    manifest_payload,
+    run_id_for,
+)
+from billwatcher.store import FileStore, build_pipeline_store
+from billwatcher.verify import verify_store
+from billwatcher.version import (
+    AKN_VERSION,
+    CROSSCHECK_VERSION,
+    LAYOUT_EXTRACTOR_VERSION,
+    LOCAL_READING_VERSION,
+    SEMANTIC_VERSION,
+    STATIC_EXPORT_VERSION,
+    STRUCTURE_GATE_VERSION,
+    __version__,
+)
+
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Download Parliament's bills, read them into markdown, publish them as a graph.",
+)
 
 
-def audit_tree_store() -> AuditTree:
-    return AuditTree(get_settings().audit_tree_root)
-
-
-app = typer.Typer(no_args_is_help=True, help="BillWatcherNext operator commands.")
-# The file-first pipeline (listings -> bills -> documents, no database, no object store) is a
-# self-contained sub-app: it never imports billwatcher.db/models, only the Postgres-backed
-# commands above do.
-app.add_typer(pipeline_app, name="pipeline")
-
-
-def policy() -> CrawlPolicy:
+def _policy() -> CrawlPolicy:
     settings = get_settings()
     return CrawlPolicy(
         user_agent=(
-            f"BillWatcherNext/0.1 (+{settings.public_base_url}/about; "
+            f"BillWatcherNext/{__version__} (+{settings.site_base_url}/about; "
             f"contact: {settings.contact_email})"
         ),
-        delay_seconds=settings.scrape_delay_seconds,
-        concurrency=settings.scrape_concurrency,
+        delay_seconds=settings.download_delay_seconds,
+        # SCRAPE_CONCURRENCY is deliberately not passed on. Nothing in this pipeline fetches in
+        # parallel — every live step drives one `Fetcher`, and so one `httpx.Client`, through a
+        # sequential loop — so accepting the setting here only advertised a knob that did nothing:
+        # an operator who raised it to shorten a fifty-minute download waited the same fifty
+        # minutes. The real rate limit is the spacing in `Fetcher.get`, and `DOWNLOAD_DELAY_SECONDS`
+        # is floored at two seconds on purpose (`CrawlPolicy.__post_init__`), which is a promise
+        # about the load Parliament sees that concurrent requests could not keep.
         max_response_bytes=settings.document_max_bytes,
         ca_bundle=settings.upstream_ca_bundle,
     )
 
 
-@app.command()
-def serve(host: str = "127.0.0.1", port: int = 8000, reload: bool = False) -> None:
-    import uvicorn
-
-    uvicorn.run("billwatcher.web.app:app", host=host, port=port, reload=reload)
-
-
-@app.command()
-def migrate() -> None:
-    command.upgrade(Config("alembic.ini"), "head")
+def _store() -> FileStore:
+    store = build_pipeline_store(get_settings())
+    assert isinstance(store, FileStore)  # the only backend built; narrows for `save_manifest`
+    return store
 
 
-@app.command("scrape")
-def scrape(
-    full: bool = typer.Option(False, "--full"),
-    archive: bool = typer.Option(
-        False, "--archive", help="Crawl only the archive tree, skipping the current listings"
-    ),
-    archive_years: int | None = typer.Option(
-        None,
-        "--archive-years",
-        help="Read only the newest N archived years instead of all of them",
-    ),
-    approve_live: bool = typer.Option(False, "--approve-live"),
-) -> None:
-    if full and archive:
-        raise typer.BadParameter("--full already includes the archive; pass one or the other")
+def _progress(message: str) -> None:
+    """Live commentary for the long steps, on stderr so stdout stays one JSON object.
+
+    A cold document download is ~1,295 requests two seconds apart: without this, the run's first
+    and only output arrived fifty minutes in, which is indistinguishable from a hung process.
+    """
+    typer.echo(message, err=True)
+
+
+def _require_live_approval(approve_live: bool) -> None:
     settings = get_settings()
-    if not (settings.scrape_enabled or approve_live):
+    if not (settings.download_enabled or approve_live):
         raise typer.BadParameter(
-            "live crawl is disabled; set SCRAPE_ENABLED=true or pass --approve-live"
+            "live fetch is disabled; set DOWNLOAD_ENABLED=true or pass --approve-live"
         )
-    # The archive is a different size of job, so it gets the budget HANDOFF 11.7 gives it.
-    budget = (
-        CrawlBudget(
-            settings.archive_max_requests_per_run,
-            settings.archive_max_bytes_per_run,
-            settings.archive_max_duration_seconds,
-            settings.archive_max_new_documents,
-        )
-        if full or archive
-        else CrawlBudget(
-            settings.scrape_max_requests_per_run,
-            settings.scrape_max_bytes_per_run,
-            settings.scrape_max_duration_seconds,
-            settings.scrape_max_new_documents,
-        )
+
+
+def _report(
+    store: FileStore,
+    result: StepResult,
+    *,
+    step: str,
+    code_versions: dict[str, str],
+    started_at: datetime,
+    payload: dict[str, Any] | None = None,
+    progress_counts: tuple[str, ...] = (),
+) -> None:
+    """Echo the histogram, name every failure on stderr, and leave a manifest behind.
+
+    A count alone is not a report: an operator needs to know *which* document failed to act on it,
+    and a later reader needs the run on the record. Failures go to stderr so the stdout line stays
+    one parseable JSON object, matching the rest of this CLI.
+
+    `progress_counts` names the counters that mean "this step accomplished something". When they are
+    all zero *and* something failed, the step exits non-zero. A partial failure still exits 0 — a
+    handful of unreachable PDFs in a 2,400-document crawl is normal and resumable — but a step that
+    achieved nothing at all is a misconfiguration, and `make download` chains the live steps, so
+    reporting success for it sends the next step out over the same broken setup. This is not
+    hypothetical: a crawl that failed all nine targets on an incomplete certificate chain exited 0.
+    """
+    for failure in result.failures:
+        typer.echo(f"FAILED {failure.label}: {failure.reason}", err=True)
+    store.save_manifest(
+        step=step,
+        run_id=run_id_for(started_at),
+        payload=manifest_payload(result, code_versions=code_versions, started_at=started_at),
     )
-    with SessionLocal() as session, Fetcher(policy()) as fetcher:
-        run = ScrapeOrchestrator(
-            session=session,
-            fetcher=fetcher,
-            blob_store=build_blob_store(settings),
-            budget=budget,
-            count_drop_abort_fraction=settings.count_drop_abort_fraction,
-            absence_streak_alert=settings.absence_streak_alert,
-            allow_missing_robots=settings.robots_missing_policy == "allow",
+    typer.echo(json.dumps(payload if payload is not None else result.as_payload()))
+    made_progress = any(result.counts.get(name, 0) for name in progress_counts)
+    if progress_counts and result.failures and not made_progress:
+        typer.echo(
+            f"{step} accomplished nothing: {len(result.failures)} failure(s) and no progress",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+@app.command("fetch-listings")
+def fetch_listings_command(
+    approve_live: bool = typer.Option(False, "--approve-live"),
+    archive_years: int | None = typer.Option(
+        None, "--archive-years", help="Read only the newest N archived years instead of all"
+    ),
+    refetch_archive: bool = typer.Option(
+        False,
+        "--refetch-archive",
+        help="Re-download closed archive years that are already stored (default: skip them)",
+    ),
+) -> None:
+    """Stage 1a: fetch robots.txt, both current listings, and the whole archive tree, to files.
+
+    Resumable by default: a closed archive year already stored is skipped. The current listings,
+    the archive indices and the current year are always re-fetched, because they are how new bills
+    and new years are discovered.
+    """
+    _require_live_approval(approve_live)
+    started_at = datetime.now(UTC)
+    store = _store()
+    with Fetcher(_policy()) as fetcher:
+        result = fetch_listings(
+            fetcher,
+            store,
             archive_year_limit=archive_years,
-        ).run(mode="archive" if archive else "full" if full else "incremental")
-        session.commit()
-        typer.echo(
-            json.dumps(
-                {
-                    "run_id": run.id,
-                    "state": run.state,
-                    "publish_decision": run.publish_decision,
-                    "reason": run.publish_reason,
-                    "fetched": run.fetched,
-                    "parsed": run.parsed,
-                    "inserted": run.inserted,
-                    "updated": run.updated,
-                }
-            )
+            skip_existing=not refetch_archive,
+            progress=_progress,
         )
-        if run.state not in {"succeeded", "partial"}:
-            _explain_failed_run(run)
-            raise typer.Exit(1)
-
-
-# Operator guidance for failures whose cause is not obvious from the message alone.
-_FAILURE_HINTS: dict[str, str] = {
-    "CERTIFICATE_VERIFY_FAILED": (
-        "The upstream TLS chain did not verify. This is usually an incomplete chain served by "
-        "the site (a missing intermediate certificate) rather than a problem with this host: "
-        "browsers hide it by fetching the intermediate themselves, and Python does not. "
-        "Check `openssl s_client -connect www.parlimen.gov.my:443 -servername "
-        "www.parlimen.gov.my`; if only one certificate is shown, add the missing intermediate "
-        "to a bundle and point UPSTREAM_CA_BUNDLE at it. See docs/upstream.md. "
-        "Never disable verification."
-    ),
-    "robots.txt": (
-        "Crawl policy could not be established. HANDOFF section 5 requires a readable "
-        "robots.txt before any crawl, so the run stopped and prior data is untouched."
-    ),
-}
-
-
-def _explain_failed_run(run: ScrapeRun) -> None:
-    detail = ""
-    if run.error_details:
-        detail = f"{run.error_details.get('class', '')}: {run.error_details.get('detail', '')}"
-    message = run.publish_reason or detail or "no reason recorded"
-    typer.echo(f"FAIL: {message}", err=True)
-    haystack = f"{message} {detail}"
-    for needle, hint in _FAILURE_HINTS.items():
-        if needle in haystack:
-            typer.echo(f"\n{hint}", err=True)
-            break
-    typer.echo(
-        f"\nInspect the run with: uv run billwatcher run-report {run.id}",
-        err=True,
+    _report(
+        store,
+        result,
+        step="fetch-listings",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+        progress_counts=("fetched", "skipped"),
     )
 
 
-@app.command("anomalies")
-def list_anomalies(
-    severity: str | None = typer.Option(None, "--severity", help="critical, warn, or info"),
-    kind: str | None = typer.Option(None, "--kind"),
-    include_resolved: bool = typer.Option(False, "--include-resolved"),
-    limit: int = typer.Option(50, "--limit"),
-) -> None:
-    """List anomalies with their ids, which is what acknowledging or resolving one needs.
-
-    `status` reports counts; this reports the work list.
-    """
-    with SessionLocal() as session:
-        query = select(Anomaly).order_by(Anomaly.severity, Anomaly.last_seen_at.desc())
-        if not include_resolved:
-            query = query.where(Anomaly.resolved_at.is_(None))
-        if severity:
-            query = query.where(Anomaly.severity == severity)
-        if kind:
-            query = query.where(Anomaly.kind == kind)
-        rows = session.scalars(query.limit(limit)).all()
-        typer.echo(
-            json.dumps(
-                [
-                    {
-                        "id": row.id,
-                        "kind": row.kind,
-                        "severity": row.severity,
-                        "entity": f"{row.entity_type}:{row.entity_id}" if row.entity_type else None,
-                        "url": row.url,
-                        "occurrences": row.occurrence_count,
-                        "first_seen": row.first_seen_at.isoformat(),
-                        "last_seen": row.last_seen_at.isoformat(),
-                        "acknowledged_at": row.acknowledged_at.isoformat()
-                        if row.acknowledged_at
-                        else None,
-                        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
-                        "detail": row.detail_json,
-                    }
-                    for row in rows
-                ],
-                indent=2,
-            )
-        )
-
-
-def _close_anomaly(anomaly_id: str, *, by: str, note: str, resolve: bool) -> None:
-    """Record a human decision about one anomaly.
-
-    `make doctor` is the gate that stands in for CI, and it fails on unresolved critical
-    anomalies. Without a way to close one, the first critical finding would leave the gate red for
-    ever and an operator would learn to ignore it — which is exactly the failure mode the anomaly
-    table was introduced to prevent (HANDOFF 25.2 defect 13).
-    """
-    now = datetime.now(UTC)
-    with SessionLocal() as session:
-        anomaly = session.get(Anomaly, anomaly_id)
-        if anomaly is None:
-            typer.echo(f"FAIL: no anomaly with id {anomaly_id}", err=True)
-            raise typer.Exit(2)
-        if not by.strip() or not note.strip():
-            raise typer.BadParameter("both --by and --note are required; the reason is the record")
-        anomaly.acknowledged_at = anomaly.acknowledged_at or now
-        anomaly.acknowledged_by = by
-        detail = dict(anomaly.detail_json)
-        decisions = list(detail.get("decisions", []))
-        decisions.append({"at": now.isoformat(), "by": by, "note": note, "resolved": resolve})
-        detail["decisions"] = decisions[-10:]
-        anomaly.detail_json = detail
-        if resolve:
-            anomaly.resolved_at = now
-        session.commit()
-        typer.echo(
-            json.dumps(
-                {
-                    "id": anomaly.id,
-                    "kind": anomaly.kind,
-                    "acknowledged_at": anomaly.acknowledged_at.isoformat(),
-                    "resolved_at": anomaly.resolved_at.isoformat() if anomaly.resolved_at else None,
-                }
-            )
-        )
-
-
-@app.command("acknowledge-anomaly")
-def acknowledge_anomaly(
-    anomaly_id: str,
-    by: str = typer.Option(..., "--by", help="Who reviewed it"),
-    note: str = typer.Option(..., "--note", help="What was decided, and why"),
-) -> None:
-    """Record that a critical anomaly has been reviewed and is deliberately not blocking.
-
-    The condition stays visible on `/status` and keeps counting occurrences; it stops failing
-    `make doctor`. Use this when upstream is at fault and there is nothing to fix here.
-    """
-    _close_anomaly(anomaly_id, by=by, note=note, resolve=False)
-
-
-@app.command("resolve-anomaly")
-def resolve_anomaly(
-    anomaly_id: str,
-    by: str = typer.Option(..., "--by", help="Who resolved it"),
-    note: str = typer.Option(..., "--note", help="What was done"),
-) -> None:
-    """Close an anomaly whose cause has been dealt with. It reappears if the cause recurs."""
-    _close_anomaly(anomaly_id, by=by, note=note, resolve=True)
-
-
-@app.command("run-report")
-def run_report(run_id: str) -> None:
-    """Print everything recorded about one scrape run, including why it stopped."""
-    with SessionLocal() as session:
-        run = session.get(ScrapeRun, run_id)
-        if run is None:
-            typer.echo(f"FAIL: no run with id {run_id}", err=True)
-            raise typer.Exit(2)
-        attempts = session.scalars(
-            select(FetchAttempt)
-            .where(FetchAttempt.run_id == run_id)
-            .order_by(FetchAttempt.attempted_at)
-        ).all()
-        anomalies = session.scalars(
-            select(Anomaly)
-            .where(Anomaly.resolved_at.is_(None))
-            .order_by(Anomaly.last_seen_at.desc())
-            .limit(20)
-        ).all()
-        typer.echo(
-            json.dumps(
-                {
-                    "run": {
-                        "id": run.id,
-                        "mode": run.mode,
-                        "trigger": run.trigger,
-                        "state": run.state,
-                        "started_at": run.started_at,
-                        "ended_at": run.ended_at,
-                        "publish_decision": run.publish_decision,
-                        "publish_reason": run.publish_reason,
-                        "error_details": run.error_details,
-                        "counts": {
-                            "fetched": run.fetched,
-                            "parsed": run.parsed,
-                            "inserted": run.inserted,
-                            "updated": run.updated,
-                            "failed": run.failed,
-                        },
-                    },
-                    "attempts": [
-                        {
-                            "url": attempt.url,
-                            "status_code": attempt.status_code,
-                            "error_class": attempt.error_class,
-                            "error_detail": attempt.error_detail,
-                            "bytes": attempt.bytes_received,
-                        }
-                        for attempt in attempts
-                    ],
-                    "open_anomalies": [
-                        {
-                            "kind": anomaly.kind,
-                            "severity": anomaly.severity,
-                            "occurrences": anomaly.occurrence_count,
-                            "detail": anomaly.detail_json,
-                        }
-                        for anomaly in anomalies
-                    ],
-                },
-                indent=2,
-                default=str,
-            )
-        )
-
-
-@app.command("worker")
-def worker(poll_seconds: int = 60) -> None:
-    """Run the scheduled crawl/document loop; live crawling remains feature-gated."""
-    import time
-
-    settings = get_settings()
-    next_scrape_at = 0.0
-    while True:
-        try:
-            if settings.scrape_enabled and time.monotonic() >= next_scrape_at:
-                budget = CrawlBudget(
-                    settings.scrape_max_requests_per_run,
-                    settings.scrape_max_bytes_per_run,
-                    settings.scrape_max_duration_seconds,
-                    settings.scrape_max_new_documents,
-                )
-                with SessionLocal() as session, Fetcher(policy()) as fetcher:
-                    ScrapeOrchestrator(
-                        session=session,
-                        fetcher=fetcher,
-                        blob_store=build_blob_store(settings),
-                        budget=budget,
-                        count_drop_abort_fraction=settings.count_drop_abort_fraction,
-                        absence_streak_alert=settings.absence_streak_alert,
-                        allow_missing_robots=settings.robots_missing_policy == "allow",
-                    ).run()
-                    session.commit()
-                interval = settings.scrape_interval_hours * 3600
-                next_scrape_at = time.monotonic() + interval * random.uniform(0.95, 1.05)
-            with SessionLocal() as session, Fetcher(policy()) as fetcher:
-                run = open_document_run(session, trigger="schedule")
-                session.commit()
-                processed = int(
-                    process_one_document(
-                        session,
-                        fetcher=fetcher,
-                        blob_store=build_blob_store(settings),
-                        run_id=run.id,
-                        owner=f"worker-{datetime.now(UTC).timestamp()}",
-                    )
-                )
-                close_document_run(session, run, processed=processed)
-                session.commit()
-        except Exception as error:
-            typer.echo(f"worker iteration failed: {type(error).__name__}", err=True)
-        time.sleep(max(poll_seconds, 10))
-
-
-@app.command("document-worker")
-def document_worker(once: bool = True, limit: int = 1) -> None:
-    """Download queued documents. Every attempt is attributed to a real run row."""
-    settings = get_settings()
-    with SessionLocal() as session, Fetcher(policy()) as fetcher:
-        run = open_document_run(session, trigger="manual")
-        session.commit()
-        store = build_blob_store(settings)
-        processed = 0
-        for _ in range(max(1, limit)):
-            if not process_one_document(
-                session,
-                fetcher=fetcher,
-                blob_store=store,
-                run_id=run.id,
-                owner=f"cli-{datetime.now(UTC).timestamp()}",
-            ):
-                break
-            processed += 1
-            session.commit()
-        close_document_run(session, run, processed=processed)
-        session.commit()
-    typer.echo(json.dumps({"run_id": run.id, "processed": processed}))
-    if not once:
-        typer.echo("continuous scheduling is provided by the container worker loop")
+@app.command("parse-listings")
+def parse_listings_command() -> None:
+    """Stage 1b: offline. Parse every stored listing snapshot into bills/<slug>/bill.json."""
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = parse_listings(store)
+    _report(
+        store,
+        result,
+        step="parse-listings",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+    )
 
 
 @app.command("fetch-documents")
-def fetch_documents(
-    limit: int = typer.Option(
-        5000, "--limit", help="Safety cap on items drained in one process, not a live-crawl budget"
-    ),
+def fetch_documents_command(
     approve_live: bool = typer.Option(False, "--approve-live"),
 ) -> None:
-    """Step S3 (HANDOFF 27.1): drain the document queue, writing PDFs + sidecars to the audit tree.
+    """Stage 1c: download every document PDF named in bills/*/bill.json, skipping what exists."""
+    _require_live_approval(approve_live)
+    started_at = datetime.now(UTC)
+    store = _store()
+    with Fetcher(_policy()) as fetcher:
+        result = fetch_documents(fetcher, store, progress=_progress)
+    _report(
+        store,
+        result,
+        step="fetch-documents",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+        progress_counts=("downloaded", "skipped"),
+    )
 
-    Unlike `document-worker`, this is the auditable pipeline step: it runs until the queue is
-    empty (or the safety cap is hit) and materialises every accepted or quarantined download into
-    `03-documents/` as it downloads it, one manifest per run. It issues live HTTP requests to the
-    same allowlisted hosts as `scrape`, so it is gated the same way.
-    """
-    settings = get_settings()
-    if not (settings.scrape_enabled or approve_live):
-        raise typer.BadParameter(
-            "live document fetch is disabled; set SCRAPE_ENABLED=true or pass --approve-live"
+
+@app.command("import-document")
+def import_document_command(
+    source: Path = typer.Option(..., "--source", help="The PDF file to import"),
+    bill: str = typer.Option(..., "--bill", help="Bill slug, e.g. dr-1-2006"),
+    url: str = typer.Option(..., "--url", help="The document URL the bill's record names"),
+    via: str = typer.Option(..., "--via", help="Where the bytes came from, e.g. a mirror URL"),
+    replace: bool = typer.Option(False, "--replace", help="Overwrite an already-stored document"),
+) -> None:
+    """Record a PDF obtained outside the crawler, under the identity its URL already has.
+
+    For a document whose official link is dead but whose bytes were recovered elsewhere — the
+    Wayback Machine, a library mirror, a paper file scanned by hand. The URL must be one the
+    bill's own record names, so the import can never invent a document, and --via records where
+    the bytes actually came from."""
+    started_at = datetime.now(UTC)
+    store = _store()
+    try:
+        detail = import_document(
+            store, bill_slug=bill, url=url, content=source.read_bytes(), via=via, replace=replace
         )
-    with SessionLocal() as session, Fetcher(policy()) as fetcher:
-        manifest = run_fetch_documents_step(
-            session,
-            fetcher=fetcher,
-            blob_store=build_blob_store(settings),
-            audit_tree=audit_tree_store(),
-            trigger="manual",
-            limit=limit,
-        )
-    typer.echo(json.dumps(manifest, default=str))
+    except (DocumentImportError, OSError) as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
+    _report(
+        store,
+        StepResult(counts={"imported": 1}),
+        step="import-document",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+        payload=detail,
+    )
 
 
-@app.command("load-fixtures")
-def load_fixtures(
-    confirm_production: bool = typer.Option(
-        False, "--confirm-production", help="Required to seed a production database."
+@app.command("extract-markdown")
+def extract_markdown_command(
+    language: str = typer.Option(
+        ...,
+        "--language",
+        help=(
+            f"Fallback for documents whose listing language is unrecorded; one of "
+            f"{sorted(LANGUAGES)}"
+        ),
+    ),
+    replace_foreign: bool = typer.Option(
+        False,
+        "--replace-foreign",
+        help="Re-read documents whose markdown another tool produced, discarding that reading",
     ),
 ) -> None:
-    """Ingest the committed listing fixtures offline so the whole site works with no network."""
-    settings = get_settings()
-    if settings.environment == "production" and not confirm_production:
-        typer.echo(
-            "FAIL: refusing to load fixture data into a production database; "
-            "pass --confirm-production if that is really intended",
-            err=True,
-        )
+    """Stage 2: offline. Read every stored PDF locally into markdown (ADR-035).
+
+    No network and no model. The geometric reader of ADR-016 does the reading — which matters,
+    because a marginal note shares a baseline with the provision it annotates and a naive reader
+    splices one into the other — and this records the result through the same import path a
+    hand-produced reading uses, provenance and all. Reads the whole corpus in minutes.
+
+    Each document is read in the language of the listing that named it, which the corpus records
+    per document — the corpus holds both published languages (ADR-040). `--language` is only the
+    fallback for the documents that leaves unsettled, and the run reports how many there were.
+
+    Documents whose reading looks unreliable are counted as `suspect` and named rather than
+    hidden: that is the list worth reading by hand, and the list `structure-handoff` exists for.
+
+    A document whose markdown some other tool produced — anything put back through
+    `import-markdown` — is counted as `kept_foreign` and left alone. Re-reading it would replace a
+    reading someone chose to make with the cheap local one, which is the opposite of why that
+    command exists. `--replace-foreign` asks for exactly that, for an operator who wants the local
+    reading back.
+    """
+    if language not in LANGUAGES:
+        typer.echo(f"FAIL: {language!r} is not one of {sorted(LANGUAGES)}", err=True)
         raise typer.Exit(2)
-    with SessionLocal() as session:
-        report = load_fixture_listings(session, blob_store=build_blob_store(settings))
-        session.commit()
-        typer.echo(json.dumps(report.as_counts()))
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = extract_markdown(
+        store, language=language, progress=_progress, replace_foreign=replace_foreign
+    )
+    _report(
+        store,
+        result,
+        step="extract-markdown",
+        code_versions={
+            "billwatcher": __version__,
+            "layout_extractor": LAYOUT_EXTRACTOR_VERSION,
+            "local_reading": LOCAL_READING_VERSION,
+        },
+        started_at=started_at,
+    )
 
 
-@app.command("refresh-fixtures")
-def refresh_fixtures_command(
-    apply: bool = typer.Option(False, "--apply", help="Overwrite the committed fixtures"),
-    records: int = typer.Option(4, "--records", help="How many records to keep per fixture"),
+@app.command("import-markdown")
+def import_markdown_command(
+    source: Path = typer.Option(..., "--source", help="A markdown file, or a tree of them"),
+    language: str = typer.Option(..., "--language", help=f"One of {sorted(LANGUAGES)}"),
+    tool: str = typer.Option(..., "--tool", help="What produced the markdown, e.g. 'mineru'"),
+    model: str | None = typer.Option(None, "--model", help="The model it used, if any"),
+    tool_version: str | None = typer.Option(None, "--tool-version"),
+    bill: str | None = typer.Option(None, "--bill", help="Bill slug; single-file import only"),
+    document_url: str | None = typer.Option(None, "--document-url"),
+    doc_key: str | None = typer.Option(None, "--doc-key"),
+    version: int = typer.Option(1, "--version"),
 ) -> None:
-    """Regenerate the committed fixtures from stored snapshots, offline (HANDOFF 16.3).
+    """Record a markdown reading of a stored document, with the provenance that makes it usable.
 
-    Writes to `tests/fixtures/parliament/regenerated/` for review unless `--apply` is given.
-    Never contacts Parliament: the only input is a snapshot already in the blob store.
-    """
-    settings = get_settings()
-    with SessionLocal() as session:
-        report = refresh_fixtures(
-            session,
-            blob_store=build_blob_store(settings),
-            apply=apply,
-            record_limit=records,
-        )
-        typer.echo(json.dumps(report.as_counts(), indent=2))
-        if not report.refreshed:
-            typer.echo(
-                "No fixture could be regenerated: no stored upstream snapshot matches any "
-                "fixture target. Run a crawl first, or seed from fixtures and crawl live.",
-                err=True,
+    A reading produced anywhere else — another tool, another machine, a person — enters the corpus
+    here rather than being copied in, and this is also where the document's language enters the
+    system: that language becomes a permanent part of the Expression IRI, so it is declared rather
+    than guessed, and cross-checked against the document's own Arrangement heading.
+
+    Pass a directory to --source to import a whole tree laid out as the store's own
+    <bill-slug>/<doc-key>/v<NNN>/document.md; pass a file with --bill and one of --document-url or
+    --doc-key for a single document."""
+    producer = Producer(tool=tool, model_id=model, version=tool_version)
+    started_at = datetime.now(UTC)
+    store = _store()
+    try:
+        if source.is_dir():
+            report = import_markdown_tree(
+                store, source_root=source, language=language, producer=producer
             )
-            raise typer.Exit(1)
-
-
-@app.command("status")
-def runtime_status() -> None:
-    with SessionLocal() as session:
-        evaluate_coverage(session)
-        session.commit()
-        targets = [
-            {
-                "chamber": row.chamber,
-                "kind": row.listing_kind,
-                "scope": row.scope_key,
-                "language": row.language,
-                "state": row.state,
-                "last_success": row.last_success_at.isoformat() if row.last_success_at else None,
-                "records": row.last_record_count,
-            }
-            for row in session.scalars(select(CoverageTarget))
-        ]
-        latest = session.scalar(select(ScrapeRun).order_by(ScrapeRun.started_at.desc()).limit(1))
-        queue: dict[str, int] = {
-            state: int(count)
-            for state, count in session.execute(
-                select(FetchQueueItem.state, func.count()).group_by(FetchQueueItem.state)
-            ).tuples()
-        }
-    typer.echo(
-        json.dumps(
-            {
-                "pipeline": {"parser": PARSER_VERSION},
-                "coverage": targets,
-                "queue": queue,
-                "latest_run": latest.state if latest else None,
-            },
-            default=str,
-        )
-    )
-
-
-@app.command("completeness")
-def completeness() -> None:
-    """Report candidate bill-numbering gaps in closed archive years.
-
-    A heuristic, not a gate: nothing confirms Parliament numbers bills with no gaps at all, so a
-    reported gap means "worth checking the archive by hand," never "a bug." Restricted to years
-    whose archive coverage target is closed (HANDOFF 10.4) — the current or a partially-crawled
-    year is still growing, and a hole there is just a bill not yet fetched.
-    """
-    with SessionLocal() as session:
-        gaps = find_bill_number_gaps(session)
-    typer.echo(
-        json.dumps(
-            [
-                {
-                    "chamber": gap.chamber,
-                    "year": gap.year,
-                    "range": [gap.lowest, gap.highest],
-                    "missing_numbers": gap.missing_numbers,
-                }
-                for gap in gaps
-            ],
-            indent=2,
-        )
-    )
-    if gaps:
+            payload, warnings = report.as_payload(), report.warnings
+            result = report.as_step_result()
+        else:
+            if not bill:
+                raise MarkdownImportError("a single-file import needs --bill")
+            imported = import_markdown(
+                store,
+                bill_slug=bill,
+                language=language,
+                producer=producer,
+                doc_key=doc_key,
+                document_url=document_url,
+                version=version,
+                markdown_path=source,
+            )
+            payload = imported.as_detail()
+            warnings = (
+                (
+                    StepFailure(
+                        bill_slug=imported.bill_slug,
+                        doc_key=imported.doc_key,
+                        version=imported.version,
+                        reason=imported.language_disagreement,
+                    ),
+                )
+                if imported.language_disagreement is not None
+                else ()
+            )
+            result = StepResult(counts={"imported": 1, "changed": int(imported.changed)})
+    except MarkdownImportError as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
+    for warning in warnings:
         typer.echo(
-            f"\n{len(gaps)} chamber-year group(s) with candidate gaps — for review, not a "
-            "failure; make doctor does not fail on this.",
+            f"WARNING {warning.bill_slug}/{warning.doc_key}/v{warning.version:03d}: "
+            f"{warning.reason}",
             err=True,
         )
+    if source.is_dir():
+        for name in report.unrecognised:
+            typer.echo(f"WARNING source file matched no stored document: {name}", err=True)
+    _report(
+        store,
+        result,
+        step="import-markdown",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+        payload=payload,
+    )
 
 
-@app.command()
-def doctor() -> None:
-    settings = get_settings()
-    with SessionLocal() as session:
-        failures = diagnose(session, blob_store=build_blob_store(settings))
-    for failure in failures:
-        typer.echo(f"FAIL: {failure}", err=True)
-    if failures:
-        raise typer.Exit(1)
-    typer.echo("OK")
+@app.command("import-crosscheck")
+def import_crosscheck_command(
+    source: Path = typer.Option(..., "--source", help="A markdown file, or a tree of them"),
+    tool: str = typer.Option(..., "--tool", help="What produced this reading, e.g. 'mineru'"),
+    model: str | None = typer.Option(None, "--model", help="The model it used, if any"),
+    tool_version: str | None = typer.Option(None, "--tool-version"),
+    filename: str = typer.Option(
+        CROSSCHECK_FILENAME, "--filename", help="What the second reader named its files"
+    ),
+    bill: str | None = typer.Option(None, "--bill", help="Bill slug; single-file import only"),
+    document_url: str | None = typer.Option(None, "--document-url"),
+    doc_key: str | None = typer.Option(None, "--doc-key"),
+    version: int = typer.Option(1, "--version"),
+) -> None:
+    """Record a *second* reading of a stored document, beside the first rather than over it.
 
+    This is where MinerU's reading lands — or any second reader's, including a model an operator
+    drives themselves (ADR-035). It writes `document.crosscheck.md` and its own provenance, and it
+    never touches `document.md`: the whole value of a second reading is the disagreement, and
+    overwriting the first destroys it. Run `cross-reference` afterwards to compare them.
 
-@app.command("verify-storage")
-def verify_storage() -> None:
-    settings = get_settings()
-    store = build_blob_store(settings)
-    failures = 0
-    orphaned = 0
-    with SessionLocal() as session:
-        database_digests = set(session.scalars(select(Blob.sha256)))
-        for blob in session.scalars(select(Blob)):
-            if not store.verify(blob.sha256, compression=blob.compression):
-                typer.echo(f"missing-or-corrupt {blob.sha256}")
-                failures += 1
-        for digest in sorted(store.stored_digests() - database_digests):
-            typer.echo(f"orphan {digest}")
-            orphaned += 1
-    typer.echo(json.dumps({"failures": failures, "orphans": orphaned}))
-    if failures or orphaned:
-        raise typer.Exit(1)
-
-
-@app.command("verify-audit")
-def verify_audit() -> None:
-    """Re-hash the audit tree against the database and exit non-zero on any divergence.
-
-    Scoped to `03-documents/` today (Package K): the listing and processing tiers are not built
-    yet. A clean result here does not certify a tier this command does not check.
+    No --language, deliberately. The language is a permanent component of the Expression IRI and
+    the reading that entered through `import-markdown` already declared it; a cross-check is
+    evidence about the text, never about the document's identity.
     """
-    settings = get_settings()
-    with SessionLocal() as session:
-        issues = check_audit_tree(
-            session,
-            audit_tree=audit_tree_store(),
-            blob_store=build_blob_store(settings),
-            now=datetime.now(UTC),
-        )
-        session.commit()
+    producer = Producer(tool=tool, model_id=model, version=tool_version)
+    started_at = datetime.now(UTC)
+    store = _store()
+    try:
+        if source.is_dir():
+            result = import_crosscheck_tree(
+                store,
+                source_root=source,
+                producer=producer,
+                filename=filename,
+                progress=_progress,
+            )
+        else:
+            if not bill:
+                raise MarkdownImportError("a single-file import needs --bill")
+            changed = import_crosscheck(
+                store,
+                bill_slug=bill,
+                producer=producer,
+                doc_key=doc_key,
+                document_url=document_url,
+                version=version,
+                markdown_path=source,
+            )
+            result = StepResult(counts={"imported": 1, "changed": int(changed)})
+    except MarkdownImportError as error:
+        typer.echo(f"FAIL: {error}", err=True)
+        raise typer.Exit(2) from None
+    _report(
+        store,
+        result,
+        step="import-crosscheck",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+    )
+
+
+@app.command("cross-reference")
+def cross_reference_command(
+    min_agreement: float = typer.Option(
+        MIN_AGREEMENT,
+        "--min-agreement",
+        help="Below this symmetric word overlap, two readings disagree about the substance",
+    ),
+) -> None:
+    """Stage 2: offline. Compare each document's two readings and name where they disagree.
+
+    Gate P1 scores a provision tree against the markdown, never against the page, so whatever
+    produced that markdown is unchecked. Two readings with disjoint failure modes are what closes
+    that hole (ADR-035), and this is the comparison over them.
+
+    It writes nothing and it never promotes one reading over the other: when two readings disagree
+    this step knows that one of them is wrong, not which. Every divergence is named for a person to
+    work through, worst agreement first. Documents with only one reading are counted as
+    `unchecked`, not reported as failures — that is the ordinary state of a corpus cross-checked
+    incrementally.
+    """
+    if not 0.0 <= min_agreement <= 1.0:
+        typer.echo(f"FAIL: --min-agreement must be between 0 and 1, got {min_agreement}", err=True)
+        raise typer.Exit(2)
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = cross_reference(store, min_agreement=min_agreement, progress=_progress)
+    _report(
+        store,
+        result,
+        step="cross-reference",
+        code_versions={"billwatcher": __version__, "crosscheck": CROSSCHECK_VERSION},
+        started_at=started_at,
+    )
+
+
+@app.command("verify")
+def verify_command(
+    strict: bool = typer.Option(
+        False, "--strict", help="Also report artifacts that are stale rather than damaged"
+    ),
+) -> None:
+    """Re-hash the stored corpus against its own sidecars, provenance records and gate verdicts.
+
+    Offline: no network, no LLM, no database. Exits non-zero on any issue. A clean run certifies
+    only what this command can recompute from stored files — it says nothing about whether a
+    reading is a correct reading of the printed page, which is Gate P1's separate judgement."""
+    issues = verify_store(
+        _store(), strict=strict, min_text_coverage=get_settings().structure_gate_min_text_coverage
+    )
     for issue in issues:
         typer.echo(issue, err=True)
     typer.echo(json.dumps({"issues": len(issues)}))
@@ -647,249 +522,179 @@ def verify_audit() -> None:
         raise typer.Exit(1)
 
 
-@app.command("audit-rebuild")
-def audit_rebuild() -> None:
-    """Regenerate the audit tree from the database and blob store.
-
-    Byte-identical and a no-op over an already-correct tree (HANDOFF 27.4): every write goes
-    through the write-if-changed rule, so this is also the recovery path after deleting the
-    tree and the backfill path after a sidecar schema bump. Scoped to `03-documents/` today.
-    """
-    settings = get_settings()
-    with SessionLocal() as session:
-        report = rebuild_documents(
-            session, blob_store=build_blob_store(settings), audit_tree=audit_tree_store()
-        )
-    typer.echo(json.dumps(report))
-
-
-@app.command("prune-blobs")
-def prune_blobs(apply: bool = typer.Option(False, "--apply")) -> None:
-    settings = get_settings()
-    store = build_blob_store(settings)
-    with SessionLocal() as session:
-        try:
-            report = prune_unreferenced_blobs(session, blob_store=store, dry_run=not apply)
-        except ValueError as error:
-            raise typer.BadParameter(str(error)) from None
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(report.as_counts()))
-
-
-@app.command("retention")
-def retention(apply: bool = typer.Option(False, "--apply")) -> None:
-    """Aggregate expiring transport logs and release prunable blob references (HANDOFF 16.4)."""
-    settings = get_settings()
-    with SessionLocal() as session:
-        report = apply_retention(
-            session,
-            fetch_attempt_retention_days=settings.fetch_attempt_retention_days,
-            dry_run=not apply,
-        )
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(report.as_counts()))
-
-
-@app.command("reparse")
-def reparse(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
-    with SessionLocal() as session:
-        job = run_reparse(
-            session,
-            blob_store=build_blob_store(get_settings()),
-            dry_run=not apply,
-            limit=limit,
-        )
-        session.commit()
-        typer.echo(json.dumps(job.counts))
-
-
-@app.command("reextract")
-def reextract(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
-    with SessionLocal() as session:
-        job = run_reextract(
-            session,
-            blob_store=build_blob_store(get_settings()),
-            dry_run=not apply,
-            limit=limit,
-        )
-        session.commit()
-        typer.echo(json.dumps(job.counts))
-
-
-@app.command("rechunk")
-def rechunk(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
-    """Rebuild chunk sets at the current chunker version; older sets are demoted, not deleted."""
-    with SessionLocal() as session:
-        job = run_rechunk(session, dry_run=not apply, limit=limit)
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(job.counts))
-        if job.state == "failed":
-            raise typer.Exit(1)
-
-
-@app.command("restructure")
-def restructure(apply: bool = typer.Option(False, "--apply"), limit: int = 100) -> None:
-    """Read structure from stored bytes and record each document's Gate L1 verdict.
-
-    Offline: it never contacts Parliament. A reading that fails the gate is stored for review
-    and is not promoted, so nothing downstream builds on an unvalidated tree (HANDOFF 26.3).
-    """
-    with SessionLocal() as session:
-        job = run_restructure(
-            session, blob_store=build_blob_store(get_settings()), dry_run=not apply, limit=limit
-        )
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(job.counts))
-        if job.state == "failed":
-            raise typer.Exit(1)
-
-
-@app.command("mineru-extract")
-def mineru_extract(apply: bool = typer.Option(False, "--apply"), limit: int = 50) -> None:
-    """A second, independently versioned markdown reading of stored PDFs via MinerU.
-
-    Never contacts Parliament, but does call the configured MinerU endpoint over the network for
-    each eligible document. Written only as a local file artifact under `data/04-text/` — never
-    into `document_extractions` (HANDOFF 27.7). Eligibility is decided by what markdown already
-    exists on disk, so re-running costs nothing for a document already processed.
-    """
-    settings = get_settings()
-    try:
-        extractor = build_mineru_extractor(settings)
-    except MarkdownExtractorUnavailable as error:
-        typer.echo(f"FAIL: {error}", err=True)
-        raise typer.Exit(2) from None
-    with SessionLocal() as session:
-        job = run_mineru_extract(
-            session,
-            blob_store=build_blob_store(settings),
-            audit_tree=audit_tree_store(),
-            extractor=extractor,
-            render_dpi=settings.mineru_render_dpi,
-            mineru_base_url=settings.mineru_base_url,
-            dry_run=not apply,
-            limit=limit,
-        )
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(job.counts))
-        if job.state == "failed":
-            raise typer.Exit(1)
-
-
-@app.command("reembed")
-def reembed(apply: bool = typer.Option(False, "--apply"), limit: int = 200) -> None:
-    """Backfill vectors for the configured model alongside any previous model's vectors."""
-    try:
-        provider = build_provider(get_settings())
-    except EmbeddingProviderUnavailable as error:
-        typer.echo(f"FAIL: {error}", err=True)
-        raise typer.Exit(2) from None
-    with SessionLocal() as session:
-        job = run_reembed(session, provider=provider, dry_run=not apply, limit=limit)
-        if apply:
-            session.commit()
-        typer.echo(json.dumps(job.counts))
-        if job.state == "failed":
-            raise typer.Exit(1)
-
-
-@app.command("semantic-index")
-def semantic_index(
-    apply: bool = typer.Option(False, "--apply"),
-    lists: int = typer.Option(0, help="Unused; HNSW is built with m/ef_construction defaults."),
+@app.command("coverage")
+def coverage_command(
+    markdown_out: Path | None = typer.Option(
+        None,
+        "--markdown",
+        help="Also write the report as Markdown to this path, for diffing between runs",
+    ),
 ) -> None:
-    """Build the HNSW cosine index once representative vectors exist (HANDOFF 12.3)."""
-    with SessionLocal() as session:
-        if session.get_bind().dialect.name != "postgresql":
-            typer.echo("FAIL: a vector index requires PostgreSQL", err=True)
-            raise typer.Exit(2)
-        rows = session.scalar(select(func.count()).select_from(ChunkEmbedding)) or 0
-        typer.echo(json.dumps({"vectors": rows, "dry_run": not apply}))
-        if not apply:
-            return
-        if rows == 0:
-            typer.echo("FAIL: refusing to build an index before any vectors exist", err=True)
-            raise typer.Exit(1)
-        session.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_chunk_embeddings_hnsw ON chunk_embeddings "
-                "USING hnsw (embedding vector_cosine_ops)"
-            )
-        )
-        session.commit()
-        typer.echo("OK")
+    """What the corpus holds, what upstream does not publish, and what has not been run yet.
+
+    Offline and read-only: writes nothing into the corpus, leaves no manifest, and always exits 0.
+    A report is not a gate — "the English half is unread" is a finding to act on, not a reason to
+    fail a build that described itself accurately.
+
+    Counts are per stage and per language, never rolled into one percentage: a corpus 97% downloaded
+    and 50% read is not 73% anything, and the three causes of a gap — stored, absent upstream, not
+    yet run — want different responses.
+    """
+    settings = get_settings()
+    report = build_report(_store(), site_root=settings.site_root)
+    for line in summary_lines(report):
+        typer.echo(line, err=True)
+    if markdown_out is not None:
+        markdown_out.parent.mkdir(parents=True, exist_ok=True)
+        markdown_out.write_text(render_markdown(report), encoding="utf-8")
+        typer.echo(f"wrote {markdown_out}", err=True)
+    typer.echo(json.dumps(report.as_payload()))
 
 
-@app.command("evaluate")
-def evaluate_retrieval(as_json: bool = typer.Option(False, "--json")) -> None:
-    """Score the versioned retrieval/answer evaluation set (HANDOFF 13) offline."""
+@app.command("structure-handoff")
+def structure_handoff_command(
+    out: Path = typer.Option(..., "--out", help="Directory to write the work packets into"),
+    overwrite_answers: bool = typer.Option(
+        False,
+        "--overwrite-answers",
+        help="Delete structure.json answers already in the tree instead of keeping them",
+    ),
+) -> None:
+    """Stage 3a, the good path: one self-contained work packet per document, for a reader that is
+    not a regex — a coding agent, or a person.
+
+    Each packet is a directory holding the document's markdown and an INSTRUCTION.md naming exactly
+    the JSON to write beside it. Feed the finished tree back with
+    `convert-to-akn --from-handoff`, which runs the identical conversion, eId assignment and
+    Gate P1 as the deterministic path. Existing answers are preserved unless --overwrite-answers:
+    the answer is the expensive part.
+    """
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = write_handoff(store, root=out, progress=_progress, overwrite_answers=overwrite_answers)
+    _report(
+        store,
+        result,
+        step="structure-handoff",
+        code_versions={"billwatcher": __version__},
+        started_at=started_at,
+    )
+
+
+@app.command("convert-to-akn")
+def convert_to_akn_command(
+    from_handoff: Path | None = typer.Option(
+        None,
+        "--from-handoff",
+        help="Read structures from a handoff tree instead of the deterministic parser",
+    ),
+    produced_by: str | None = typer.Option(
+        None,
+        "--produced-by",
+        help="What produced the handoff answers, e.g. 'claude-code'; recorded in provenance",
+    ),
+) -> None:
+    """Stage 3a: read each document's provision structure and write Akoma Ntoso XML beside it.
+
+    Two model-free routes in, and the choice is recorded rather than blended: without
+    `--from-handoff` the deterministic parser reads the markdown directly, which is offline, free
+    and weakest on the Arrangement/body split; with it, the answers in a `structure-handoff` tree
+    are read back through the identical conversion, eId assignment, gate and provenance path, so a
+    hand- or agent-produced reading is judged exactly as strictly and stays distinguishable in the
+    record.
+
+    A document whose reading cannot account for its source is rejected by Gate P1: the verdict is
+    written to `document.structure.gate.json` either way and the rejected render is kept beside
+    it, but
+    no `document.akn.xml` appears for later steps to pick up.
+    """
+    settings = get_settings()
+    extractor: MarkdownStructureExtractor
+    if from_handoff is not None:
+        try:
+            extractor = FileStructureExtractor(root=from_handoff, model_id=produced_by)
+        except HandoffError as error:
+            typer.echo(f"FAIL: {error}", err=True)
+            raise typer.Exit(2) from None
+    else:
+        extractor = RegexMarkdownStructureExtractor()
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = convert_to_akn(
+        store,
+        extractor=extractor,
+        min_text_coverage=settings.structure_gate_min_text_coverage,
+    )
+    _report(
+        store,
+        result,
+        step="convert-to-akn",
+        code_versions={
+            "billwatcher": __version__,
+            "akn": AKN_VERSION,
+            "structure_gate": STRUCTURE_GATE_VERSION,
+        },
+        started_at=started_at,
+    )
+
+
+@app.command("generate-semantic")
+def generate_semantic_command() -> None:
+    """Stage 3b: offline. Read each document's Akoma Ntoso XML and write ELI-style JSON-LD and
+    RDF N-Quads beside it. Both are serialised from one graph, so they cannot disagree."""
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = generate_semantic_files(store, base_iri=get_settings().site_base_url)
+    _report(
+        store,
+        result,
+        step="generate-semantic",
+        code_versions={"billwatcher": __version__, "semantic": SEMANTIC_VERSION},
+        started_at=started_at,
+    )
+
+
+@app.command("publish")
+def publish_command(
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help="Also delete files this step owns but no longer publishes (default: report only)",
+    ),
+) -> None:
+    """Stage 4: write the gate-passing corpus into SITE_ROOT, the tree GitHub Pages serves.
+
+    This creates the publishable unit, so the rights confirmations are mandatory in every
+    environment — in this repository the tree is committed, which makes a local publish one push
+    away from a permanent one.
+
+    Touches only the dataset entries: `akn/`, `definitions/`, `index.json`, `checksums.sha256` and
+    `CNAME`. The compiled frontend shares the same directory and is left alone.
+
+    **Additive by default.** Files this step owns but no longer publishes are reported by name and
+    left in place; `--prune` deletes them. A published tree can outlive the corpus that produced
+    it, so a build has to be safe to run against one that is mid-repair.
+    """
     settings = get_settings()
     try:
-        embedding_provider = build_provider(settings)
-    except EmbeddingProviderUnavailable as error:
+        require_publication_rights(settings)
+    except StaticExportRefused as error:
         typer.echo(f"FAIL: {error}", err=True)
         raise typer.Exit(2) from None
-    answer_provider = None
-    if settings.rag_enabled:
-        try:
-            answer_provider = build_answer_provider(settings)
-        except AnswerProviderUnavailable as error:
-            typer.echo(f"WARN: {error}; scoring retrieval only", err=True)
-    report = evaluate(
-        settings=settings,
-        embedding_provider=embedding_provider,
-        answer_provider=answer_provider,
+    started_at = datetime.now(UTC)
+    store = _store()
+    result = publish_dataset(
+        store,
+        site_root=settings.site_root,
+        prefix=settings.cname_host,
+        publication_mode=settings.publication_mode,
+        representations=settings.site_representations,
+        prune=prune,
     )
-    if as_json:
-        typer.echo(json.dumps(report.as_dict(), indent=2))
-    else:
-        typer.echo(
-            f"set {report.set_version} / corpus {report.corpus_version} "
-            f"/ embeddings {report.embedding_model}"
-        )
-        for name, value in report.metrics.items():
-            threshold = report.thresholds.get(name)
-            mark = "ok " if threshold is None or value >= threshold else "LOW"
-            typer.echo(f"  {mark} {name}: {value} (threshold {threshold})")
-        for case in report.cases:
-            if not case.passed:
-                typer.echo(f"  failed: {case.case_id} — {case.detail}")
-    # HANDOFF 20 makes the manual gate log in docs/status.md the record that substitutes for CI,
-    # so the useful thing this command can do is emit the line to paste into it. A result nobody
-    # writes down is not a gate.
-    verdict = "MET" if report.met_thresholds else "NOT MET"
-    typer.echo("")
-    typer.echo("Gate-log line for docs/status.md (HANDOFF 20):")
-    typer.echo(
-        f"- {datetime.now(UTC).date().isoformat()} — <your name> — Evaluation set "
-        f"{report.set_version} / corpus {report.corpus_version} against embeddings "
-        f"`{report.embedding_model}`"
-        + (f" and answers `{report.answer_model}`" if report.answer_model else "")
-        + f". Thresholds **{verdict}**: "
-        + ", ".join(f"{name} {value}" for name, value in report.metrics.items())
-        + "."
+    _report(
+        store,
+        result,
+        step="publish",
+        code_versions={"billwatcher": __version__, "static_export": STATIC_EXPORT_VERSION},
+        started_at=started_at,
     )
-    if not report.met_thresholds:
-        typer.echo(
-            "Thresholds not met. Record this before enabling semantic search or RAG.", err=True
-        )
-        raise typer.Exit(1)
-
-
-@app.command("drop-embedding-model")
-def drop_embedding_model(model_id: str, apply: bool = typer.Option(False, "--apply")) -> None:
-    """Remove a superseded model's vectors after its replacement has been validated."""
-    with SessionLocal() as session:
-        removed = drop_superseded_model(session, model_id=model_id, dry_run=not apply)
-        if apply:
-            session.commit()
-        typer.echo(json.dumps({"model_id": model_id, "vectors": removed, "dry_run": not apply}))
-
-
-if __name__ == "__main__":
-    app()

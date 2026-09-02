@@ -1,31 +1,50 @@
+# BillWatcherNext: Parliament's bills, downloaded as files, read into markdown, published as a
+# graph. Every target below is re-runnable, and only `download` touches the network.
+#
+#   make setup     once, on a fresh clone
+#   make download  the live crawl — hours, resumable, safe to interrupt
+#   make build     everything else, offline, from the corpus to a complete docs/
+
 .DEFAULT_GOAL := help
+
 UV ?= uv
-COMPOSE ?= docker compose
-DEV_COMPOSE ?= docker compose -f compose.dev.yaml
-# The PostgreSQL-only test suite needs a disposable database; this one is created by `make db-up`.
-TEST_DATABASE_URL ?= postgresql+psycopg://billwatcher:billwatcher@127.0.0.1:55432/billwatcher_test
-TEST_S3_ENDPOINT ?= http://127.0.0.1:7070
-# Upstream serves an incomplete certificate chain; see docs/upstream.md and `make ca-bundle`.
+# pnpm 7 is pinned by web/package.json's `packageManager` field and fetched by corepack, so the
+# frontend builds identically regardless of which pnpm happens to be on PATH.
+PNPM ?= COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm
+WEB ?= web
+
+# Upstream serves an incomplete certificate chain; see documentation/upstream.md.
 UPSTREAM_INTERMEDIATE_URL ?= http://crt.sectigo.com/SectigoPublicServerAuthenticationCADVR36.crt
 SYSTEM_CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
-BACKUP_DIR ?=
-BLOB_BACKUP_DEST ?=
-RESTORE_PATH ?=
-BLOB_RESTORE_PATH ?=
 
-.PHONY: help quickstart env ca-bundle db-up db-down db-reset seed test-pg setup lock format lint typecheck test test-live check serve migrate scrape scrape-full scrape-archive fetch-documents verify-audit audit-rebuild status completeness anomalies resolve-anomaly acknowledge-anomaly doctor reparse reextract mineru-extract restructure rechunk reembed retention evaluate semantic-index verify-storage prune-blobs fixtures-refresh docker-build compose-up compose-down logs backup backup-blobs restore restore-blobs pipeline-fetch-listings pipeline-parse-listings pipeline-fetch-documents pipeline-import-markdown pipeline-convert-to-akn pipeline-generate-semantic pipeline-verify
+# LANG_CODE, not LANG: `LANG` is the shell's own locale variable, so a bare `make` would silently
+# forward en_US.UTF-8 as the document language.
+LANG_CODE ?= ms
+
+# Where `make coverage` writes its report. Tracked rather than under var/, because the point of a
+# Markdown report is that `git diff` shows coverage moving between two runs.
+COVERAGE_MD ?= documentation/coverage.md
+
+.PHONY: help setup env \
+        download download-listings download-documents \
+        markdown import-markdown import-crosscheck cross-reference \
+        handoff akn graph \
+        publish site build rebuild \
+        coverage verify check test lint typecheck format \
+        web-lint web-typecheck web-test web-format web-format-check dev \
+        ca-bundle clean clean-site
 
 help: ## Show available targets
-	@echo "Start here:  make quickstart   (env + database + migrations + fixture data + server)"
+	@echo "Fresh clone:   make setup && make build"
+	@echo "Live crawl:    make download        (hours; resumable; needs approval)"
 	@echo ""
-	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-quickstart: setup env db-up migrate seed ## One command from a fresh clone to a running site
-	@echo ""
-	@echo "Ready. The site is at http://127.0.0.1:8000 with fixture data loaded."
-	@echo "Stop the server with Ctrl-C; stop the database with 'make db-down'."
-	@echo ""
-	$(MAKE) serve
+# --- setup ---------------------------------------------------------------------------------
+
+setup: env ## Install both locked toolchains: Python via uv, frontend via pnpm
+	$(UV) sync --locked --all-groups
+	cd $(WEB) && $(PNPM) install --frozen-lockfile
 
 env: ## Create .env from the development defaults if it does not exist
 	@if [ -f .env ]; then \
@@ -35,191 +54,121 @@ env: ## Create .env from the development defaults if it does not exist
 		echo "created .env from .env.development"; \
 	fi
 
-db-up: ## Start the local development PostgreSQL and S3 gateway
-	$(DEV_COMPOSE) up -d --wait
-	@$(DEV_COMPOSE) exec -T db psql -q -U billwatcher -d billwatcher \
-		-c "CREATE DATABASE billwatcher_test" 2>/dev/null || true
+# --- stage 1: download (the only live stage) -------------------------------------------------
 
-db-down: ## Stop the local development database, keeping its volume
-	$(DEV_COMPOSE) down
+download: download-listings download-documents coverage ## The whole corpus: listings, bills, every PDF
+	@echo ""
+	@echo "corpus downloaded; run 'make build' to read and publish it"
 
-db-reset: ## Delete the local development database and its data
-	@test "$$CONFIRM_RESET" = "yes" || { echo "Set CONFIRM_RESET=yes to delete dev data"; exit 2; }
-	$(DEV_COMPOSE) down -v
+download-listings: ## Fetch and parse the listings and the whole archive tree; live
+	$(UV) run billwatcher fetch-listings --approve-live $(ARGS)
+	$(UV) run billwatcher parse-listings
 
-ca-bundle: ## Build a trust bundle containing the intermediate the site fails to send
+download-documents: ## Download every document PDF named in the bills; live, resumable
+	$(UV) run billwatcher fetch-documents --approve-live $(ARGS)
+
+# --- stage 2: markdown -----------------------------------------------------------------------
+
+markdown: ## Read every stored PDF locally into markdown; offline, no model; LANG_CODE=ms
+	@# LANG_CODE is the fallback only: each document is read in the language of the listing that
+	@# named it (ADR-040), which the corpus records per document.
+	$(UV) run billwatcher extract-markdown --language "$(LANG_CODE)" $(ARGS)
+
+import-markdown: ## Record a reading produced elsewhere; SRC=path LANG_CODE=ms TOOL=name
+	$(UV) run billwatcher import-markdown --source "$(SRC)" --language "$(LANG_CODE)" \
+		--tool "$(TOOL)" $(ARGS)
+
+import-crosscheck: ## Record a second reading beside the first; SRC=path TOOL=name
+	$(UV) run billwatcher import-crosscheck --source "$(SRC)" --tool "$(TOOL)" $(ARGS)
+
+cross-reference: ## Compare each document's two readings and name where they disagree; offline
+	$(UV) run billwatcher cross-reference $(ARGS)
+
+# --- stage 3: the semantic graph -------------------------------------------------------------
+
+handoff: ## Write one structure work packet per document, for an agent or a person; OUT=dir
+	@test -n "$(OUT)" || { echo "OUT=<directory> is required"; exit 2; }
+	$(UV) run billwatcher structure-handoff --out "$(OUT)" $(ARGS)
+
+akn: ## Markdown -> Akoma Ntoso XML, gated. FROM=<handoff dir> to read answers back
+	$(UV) run billwatcher convert-to-akn $(if $(FROM),--from-handoff "$(FROM)",) $(ARGS)
+
+graph: ## Akoma Ntoso -> ELI JSON-LD + RDF N-Quads; offline
+	$(UV) run billwatcher generate-semantic
+
+# --- stage 4: publish ------------------------------------------------------------------------
+
+publish: ## Write the gate-passing dataset into docs/; additive, never deletes
+	$(UV) run billwatcher publish $(ARGS)
+
+site: ## Build the React frontend into docs/, beside the dataset
+	cd $(WEB) && $(PNPM) run build
+
+build: markdown graph publish site coverage ## The replicable build: corpus in, complete docs/ out
+	@echo ""
+	@echo "docs/ is complete. Commit it to publish; GitHub Pages serves this repository's docs/."
+	@echo "Coverage after this build is in $(COVERAGE_MD)."
+
+rebuild: ## Same as build, but also delete dataset files that are no longer published
+	$(MAKE) markdown akn graph
+	$(UV) run billwatcher publish --prune
+	$(MAKE) site
+
+dev: ## Run the frontend against the published tree, with hot reload
+	cd $(WEB) && $(PNPM) run dev
+
+# --- quality ---------------------------------------------------------------------------------
+
+coverage: ## Report what the corpus holds and what is missing; offline, read-only, never fails
+	$(UV) run billwatcher coverage --markdown "$(COVERAGE_MD)" >/dev/null
+
+verify: ## Re-hash the corpus against its own sidecars, provenance and gate verdicts
+	$(UV) run billwatcher verify $(ARGS)
+
+check: lint typecheck test web-lint web-typecheck web-test web-format-check ## Every offline quality gate
+
+lint: ## Ruff checks
+	$(UV) run ruff check src tests
+
+typecheck: ## Strict mypy
+	$(UV) run mypy src
+
+test: ## The offline Python suite
+	$(UV) run pytest
+
+format: ## Format both toolchains
+	$(UV) run ruff format src tests
+	cd $(WEB) && $(PNPM) run format
+
+web-lint: ## oxlint
+	cd $(WEB) && $(PNPM) run lint
+
+web-typecheck: ## tsc, both project references
+	cd $(WEB) && $(PNPM) run typecheck
+
+web-test: ## The frontend suite: does the page built from the dataset actually render
+	cd $(WEB) && $(PNPM) run test
+
+web-format-check: ## oxfmt, without writing
+	cd $(WEB) && $(PNPM) run format:check
+
+# --- utilities ---------------------------------------------------------------------------------
+
+ca-bundle: ## Build a trust bundle containing the intermediate upstream fails to send
 	@mkdir -p var
-	@echo "Fetching the intermediate named by the leaf certificate's AIA extension..."
 	curl -fsS $(UPSTREAM_INTERMEDIATE_URL) -o var/upstream-intermediate.crt
-	@openssl x509 -inform DER -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem 2>/dev/null \
-		|| openssl x509 -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem
+	@openssl x509 -inform DER -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem \
+		2>/dev/null || openssl x509 -in var/upstream-intermediate.crt -out var/upstream-intermediate.pem
 	@openssl x509 -in var/upstream-intermediate.pem -noout -subject -enddate
 	cat $(SYSTEM_CA_BUNDLE) var/upstream-intermediate.pem > var/upstream-ca.pem
 	@echo ""
 	@echo "Wrote var/upstream-ca.pem. Set this in .env:"
 	@echo "  UPSTREAM_CA_BUNDLE=$(CURDIR)/var/upstream-ca.pem"
-	@echo "Re-run this if the intermediate expires, and drop it once upstream fixes its chain."
 
-seed: ## Ingest the committed fixtures offline; never contacts Parliament
-	$(UV) run billwatcher load-fixtures
+clean: ## Remove build scratch. Never touches corpus/ or docs/
+	rm -rf .pytest_cache .mypy_cache .ruff_cache $(WEB)/node_modules/.tmp $(WEB)/node_modules/.vite
+	find src tests -name '__pycache__' -type d -prune -exec rm -rf {} +
 
-test-pg: ## Run the full suite including the PostgreSQL and S3 archive tests
-	BILLWATCHER_TEST_DATABASE_URL=$(TEST_DATABASE_URL) \
-	BILLWATCHER_TEST_S3_ENDPOINT=$(TEST_S3_ENDPOINT) $(UV) run pytest
-
-setup: ## Install the exact locked development environment
-	$(UV) sync --locked --all-groups
-
-lock: ## Validate uv.lock without changing it
-	$(UV) lock --check
-
-format: ## Format Python sources
-	$(UV) run ruff format src tests migrations
-
-lint: ## Run Ruff checks
-	$(UV) run ruff check src tests migrations
-
-typecheck: ## Run strict mypy
-	$(UV) run mypy src
-
-test: ## Run all offline tests
-	$(UV) run pytest
-
-test-live: ## Run tiny live tests only with BILLWATCHER_LIVE_TEST=1
-	@test "$$BILLWATCHER_LIVE_TEST" = "1" || { echo "Set BILLWATCHER_LIVE_TEST=1 to opt in"; exit 2; }
-	$(UV) run pytest -m live -q
-
-check: lint typecheck test ## Run every offline quality gate
-
-serve: ## Run the local development server
-	$(UV) run billwatcher serve --reload
-
-migrate: ## Upgrade the configured database to Alembic head
-	$(UV) run billwatcher migrate
-
-scrape: ## Explicitly run one approved live incremental crawl
-	$(UV) run billwatcher scrape --approve-live
-
-scrape-full: ## Explicitly run one approved live full crawl, archive included
-	$(UV) run billwatcher scrape --full --approve-live
-
-scrape-archive: ## Explicitly run one approved live archive-only crawl; ARGS=--archive-years=N
-	$(UV) run billwatcher scrape --archive --approve-live $(ARGS)
-
-fetch-documents: ## Step S3 (HANDOFF 27): drain the document queue into the audit tree; live, needs --approve-live
-	$(UV) run billwatcher fetch-documents --approve-live $(ARGS)
-
-verify-audit: ## Re-hash the audit tree against the database; non-zero on divergence (HANDOFF 27.4)
-	$(UV) run billwatcher verify-audit
-
-# --- File-first pipeline: no database, no object store (PipelineStore/FileStore) ---
-
-pipeline-fetch-listings: ## File-first step 1: fetch listings to PIPELINE_DATA_ROOT; live, needs --approve-live; ARGS=--archive-years=N
-	$(UV) run billwatcher pipeline fetch-listings --approve-live $(ARGS)
-
-pipeline-parse-listings: ## File-first step 2: offline, parse stored listings into bills/*/bill.json
-	$(UV) run billwatcher pipeline parse-listings
-
-pipeline-fetch-documents: ## File-first step 3: download document PDFs found in bills/*/bill.json; live, needs --approve-live
-	$(UV) run billwatcher pipeline fetch-documents --approve-live $(ARGS)
-
-pipeline-import-markdown: ## File-first step 4: record markdown produced elsewhere; SRC=path LANG=ms TOOL=name
-	$(UV) run billwatcher pipeline import-markdown --source "$(SRC)" --language "$(LANG)" --tool "$(TOOL)" $(ARGS)
-
-pipeline-convert-to-akn: ## File-first step 5: vLLM-assisted markdown -> Akoma Ntoso XML; needs AKN_LLM_ENABLED=true
-	$(UV) run billwatcher pipeline convert-to-akn
-
-pipeline-generate-semantic: ## File-first step 6: offline, Akoma Ntoso -> ELI JSON-LD + RDF N-Quads
-	$(UV) run billwatcher pipeline generate-semantic
-
-pipeline-verify: ## Re-hash the file-first corpus against its sidecars, provenance and gate verdicts; ARGS=--strict
-	$(UV) run billwatcher pipeline verify $(ARGS)
-
-audit-rebuild: ## Regenerate the audit tree from the database and blob store; byte-identical if already correct
-	$(UV) run billwatcher audit-rebuild
-
-anomalies: ## List unresolved anomalies with their ids; ARGS=--severity=critical
-	$(UV) run billwatcher anomalies $(ARGS)
-
-resolve-anomaly: ## Close a reviewed anomaly: ID=<id> BY=<name> NOTE="what was done"
-	$(UV) run billwatcher resolve-anomaly "$(ID)" --by "$(BY)" --note "$(NOTE)"
-
-acknowledge-anomaly: ## Stop a reviewed critical anomaly failing doctor: ID= BY= NOTE=
-	$(UV) run billwatcher acknowledge-anomaly "$(ID)" --by "$(BY)" --note "$(NOTE)"
-
-status: ## Print runtime coverage, queue, run, and pipeline status
-	$(UV) run billwatcher status
-
-completeness: ## Report candidate bill-numbering gaps in closed archive years (heuristic, not a gate)
-	$(UV) run billwatcher completeness
-
-doctor: ## Fail on critical anomalies or invariant/storage failures
-	$(UV) run billwatcher doctor
-
-reparse: ## Dry-run snapshot replay; pass ARGS=--apply to mutate
-	$(UV) run billwatcher reparse $(ARGS)
-
-reextract: ## Dry-run extraction backfill; pass ARGS=--apply to mutate
-	$(UV) run billwatcher reextract $(ARGS)
-
-mineru-extract: ## Dry-run MinerU markdown reading, written to data/04-text/; ARGS=--apply; needs MINERU_ENABLED=true
-	$(UV) run billwatcher mineru-extract $(ARGS)
-
-restructure: ## Dry-run structural parse of stored documents (Gate L1); ARGS=--apply
-	$(UV) run billwatcher restructure $(ARGS)
-
-rechunk: ## Dry-run chunk rebuild at the current chunker version; ARGS=--apply
-	$(UV) run billwatcher rechunk $(ARGS)
-
-reembed: ## Dry-run embedding backfill for the configured model; ARGS=--apply
-	$(UV) run billwatcher reembed $(ARGS)
-
-evaluate: ## Score the versioned retrieval/answer evaluation set offline
-	$(UV) run billwatcher evaluate
-
-semantic-index: ## Build the pgvector HNSW index; pass ARGS=--apply
-	$(UV) run billwatcher semantic-index $(ARGS)
-
-retention: ## Dry-run retention (transport log rollup, extraction pruning); ARGS=--apply
-	$(UV) run billwatcher retention $(ARGS)
-
-verify-storage: ## Verify every database blob reference on disk
-	$(UV) run billwatcher verify-storage
-
-prune-blobs: ## Dry-run unreferenced blob pruning; pass ARGS=--apply
-	$(UV) run billwatcher prune-blobs $(ARGS)
-
-fixtures-refresh: ## Regenerate fixtures from stored snapshots offline; ARGS=--apply to commit them
-	$(UV) run billwatcher refresh-fixtures $(ARGS)
-
-docker-build: ## Build the locked production image
-	$(COMPOSE) build --pull
-
-compose-up: ## Start the production-shaped stack without deleting volumes
-	$(COMPOSE) up -d
-
-compose-down: ## Stop the stack without deleting volumes
-	$(COMPOSE) down
-
-logs: ## Follow bounded application and worker logs
-	$(COMPOSE) logs --tail=200 -f app worker
-
-backup: ## Dump PostgreSQL; requires BACKUP_DIR
-	@test -n "$(BACKUP_DIR)" || { echo "BACKUP_DIR is required"; exit 2; }
-	@mkdir -p "$(BACKUP_DIR)"
-	$(COMPOSE) exec -T db sh -c 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc' > "$(BACKUP_DIR)/billwatcher-$$(date -u +%Y%m%dT%H%M%SZ).dump"
-
-backup-blobs: ## Copy blobs; requires BLOB_BACKUP_DEST
-	@test -n "$(BLOB_BACKUP_DEST)" || { echo "BLOB_BACKUP_DEST is required"; exit 2; }
-	$(COMPOSE) cp worker:/var/lib/billwatcher/blobs/. "$(BLOB_BACKUP_DEST)"
-
-restore: ## Guarded DB restore; requires RESTORE_PATH and CONFIRM_RESTORE=yes
-	@test -f "$(RESTORE_PATH)" || { echo "RESTORE_PATH must name a dump"; exit 2; }
-	@test "$$CONFIRM_RESTORE" = "yes" || { echo "Set CONFIRM_RESTORE=yes"; exit 2; }
-	$(COMPOSE) exec -T db sh -c 'pg_restore --clean --if-exists -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(RESTORE_PATH)"
-
-restore-blobs: ## Guarded blob restore; requires BLOB_RESTORE_PATH and CONFIRM_RESTORE=yes
-	@test -d "$(BLOB_RESTORE_PATH)" || { echo "BLOB_RESTORE_PATH must name a directory"; exit 2; }
-	@test "$$CONFIRM_RESTORE" = "yes" || { echo "Set CONFIRM_RESTORE=yes"; exit 2; }
-	$(COMPOSE) cp --archive=false "$(BLOB_RESTORE_PATH)/." worker:/var/lib/billwatcher/blobs
-	$(COMPOSE) exec -T --user 0 worker chown -R 10001:10001 /var/lib/billwatcher/blobs
+clean-site: ## Remove ONLY the frontend's own output from docs/, leaving the dataset
+	@test "$$CONFIRM_CLEAN" = "yes" || { echo "Set CONFIRM_CLEAN=yes to delete built site files"; exit 2; }
+	rm -rf docs/assets docs/index.html docs/404.html

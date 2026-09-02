@@ -1,403 +1,325 @@
 # BillWatcherNext
 
-A provenance-first, read-only index of Malaysian Parliament bills.
+Bills of the Malaysian Parliament, downloaded as files, read into markdown, and published as a
+semantic knowledge graph.
 
-It preserves timestamped snapshots of every page it reads and every document it downloads,
-records each new content state instead of overwriting the last one, and serves the result as a
-fast, server-rendered site that works without JavaScript.
+Three stages, one direction, no database and no server:
 
-**Parliament of Malaysia is the authority.** A normalized status here is this index's
-classification, not a legal conclusion, and a bill passed by a chamber is not law.
+```
+  Parliament  ──download──▶  corpus/  ──markdown──▶  corpus/  ──graph──▶  corpus/  ──publish──▶  docs/
+                (live)                  (offline)               (offline)            (offline)
+```
+
+Everything after `download` is offline and re-runnable. Each stage reads files, writes files, and
+records what it did beside what it produced — so a build can be interrupted, resumed, and audited
+after the fact.
 
 ---
 
-## Quickstart
+## End to end
 
-Requirements: Python 3.12.5+, [uv](https://docs.astral.sh/uv/), Docker, and GNU Make.
+Six steps, in order. Only step 3 touches the network; everything else is local, offline and safe to
+re-run. Run `make` on its own for the full list of targets.
 
-```bash
-make quickstart
-```
+### 1. Prerequisites
 
-That runs, in order: `setup` (locked dependencies) → `env` (writes `.env` from
-`.env.development`) → `db-up` (PostgreSQL 16 with pgvector on `127.0.0.1:55432`) → `migrate` →
-`seed` (loads the committed fixtures) → `serve`.
-
-Open <http://127.0.0.1:8000>. Stop the server with Ctrl-C and the database with `make db-down`.
-
-Nothing in that path touches the internet. `seed` ingests fixtures committed to this repository
-as a `fixture`-mode scrape run, with real snapshot and blob provenance, so every page has
-something truthful to show.
-
-### What you should see
-
-| Page | Seeded content |
+| | |
 | --- | --- |
-| `/` | Three bills and a freshness line reporting the **oldest** healthy coverage target |
-| `/bills` | Browsable index with chamber, status, year, and title-language filters |
-| `/search?q=Perlindungan` | A ranked hit with a highlighted passage; `?q=D.R.15/2026` matches the code exactly |
-| `/bills/dr-15-2026` | One bill with two chamber timelines, reading dates, provenance, and document versions |
-| `/changes` | Recent changes, labelled Parliament's versus this index's own corrections |
-| `/status` | Per-target freshness — current listings, archive indexes, and one row per archived year — queue depth, open anomalies, pipeline versions |
-| `/api/v1/bills` | The read-only JSON API |
+| **Python** | 3.12.13 or newer, below 3.14. `uv` installs and pins it — you do not need a system Python. |
+| **[uv](https://docs.astral.sh/uv/)** | Manages the Python toolchain and the locked dependency set. |
+| **Node with corepack** | The repository pins no version; Vite 8 needs Node 20.19+, and it is built here on 24. `corepack` fetches the pinned pnpm 7.33.7, so whichever pnpm is on `PATH` does not matter. |
 
-`D.R.15/2026` appears in both chambers deliberately: it is one bill with two independent
-timelines, which is the case a single flat table would get wrong.
+Nothing else: no database, no object store, no model endpoint.
 
-### Running it again
+### 2. Install and configure
 
-```bash
-make seed     # idempotent: a second load inserts nothing and records no changes
-make db-down  # stop the database, keep the data
-CONFIRM_RESET=yes make db-reset   # delete the dev database and its volume
+```sh
+git clone <this repository> && cd BillWatcherNext
+make setup
 ```
+
+`make setup` runs `make env` first, then installs both locked toolchains — `uv sync --locked` for
+Python and `pnpm install --frozen-lockfile` for the frontend.
+
+`make env` creates `.env` from `.env.development` if you do not already have one, and leaves an
+existing `.env` alone. The development defaults are ready to build with: they confirm the two
+publication rights so that `make publish` will run locally, since building the tree is how the
+publish step is exercised at all. `.env.example` documents every setting with its shipped default,
+and `src/billwatcher/config.py` is the authority.
+
+Two values are worth setting deliberately before a real run:
+
+- `CONTACT_EMAIL` — named in the crawler's User-Agent so Parliament can reach a person about a
+  request. `ENVIRONMENT=production` refuses to start on the placeholder.
+- `SITE_PREFIX` — the domain the published tree claims. See [Configuration](#configuration).
+
+If you intend to crawl, do the certificate step now rather than fifty minutes in:
+
+```sh
+make ca-bundle      # then paste the line it prints into .env
+```
+
+Parliament serves an incomplete certificate chain; `make ca-bundle` builds a trust store containing
+the intermediate it fails to send, and prints the `UPSTREAM_CA_BUNDLE=` line to add. There is
+deliberately no setting that disables verification. See `documentation/upstream.md`.
+
+### 3. Get a corpus
+
+`make build` needs PDFs on disk. If `corpus/` already holds them, skip to step 4.
+
+```sh
+make download
+```
+
+This is the only step that contacts Parliament, and it is slow on purpose: requests are spaced by
+`DOWNLOAD_DELAY_SECONDS`, floored at two seconds in code, and nothing fetches in parallel. It reads
+every listing in **both published languages** — a cold run is roughly 134 listing snapshots and
+~2,550 document requests, about an hour and a half. The last full document crawl fetched 1,219 PDFs
+in 47 minutes.
+
+**Interrupting it is safe, and re-running it resumes.** A closed archive year already stored is
+skipped, and a document already in the corpus is not fetched again; the current listings and the
+current year are always re-fetched, because that is how new bills are discovered. Every step
+narrates itself on stderr.
+
+Live steps refuse to run unless an operator says so in the same breath — `DOWNLOAD_ENABLED=true` in
+`.env`, or `--approve-live`, which the Makefile passes for you.
+
+```sh
+make download-listings                  # just the listings and the archive tree
+make download-documents                 # just the PDFs already named in the bills
+make download ARGS=--archive-years=3    # only the newest N archived years
+```
+
+### 4. Build
+
+```sh
+make build
+```
+
+Offline, from the corpus to a complete `docs/`. It runs five steps in order, and each skips work
+that is already current:
+
+| Step | What it does | Roughly |
+| --- | --- | --- |
+| `make markdown` | Reads every stored PDF locally into markdown. No model in the loop. | 10 min for ~1,200 unread PDFs; **1 second** when nothing changed |
+| `make akn` | Reads a provision structure out of that markdown and renders Akoma Ntoso, gated. | 10 s |
+| `make graph` | Akoma Ntoso to ELI JSON-LD and RDF N-Quads. | seconds |
+| `make publish` | Projects the gate-passing corpus into `docs/`. | 10 s |
+| `make site` | Builds the React frontend into `docs/`, beside the dataset. | seconds |
+
+Each is separately runnable. Every step prints one JSON object on stdout — pipe it into `jq` —
+names each failure on stderr, and leaves a manifest under `corpus/manifests/<step>/` recording what
+it did and which code versions did it.
+
+`make build` finishes with `make coverage`, which writes `documentation/coverage.md`. That file is
+tracked, so `git diff` after a build shows coverage moving.
+
+### 5. Look at what you built
+
+```sh
+make dev        # the frontend against the published tree, with hot reload
+make coverage   # what the corpus holds and what is missing; always exits 0
+make verify     # re-hash the corpus against its own sidecars, provenance and gate verdicts
+```
+
+`make verify` is offline and writes nothing, which is what makes it safe to run between two steps
+that do. It exits non-zero on any issue. A clean run certifies only what it can recompute from
+stored files — it says nothing about whether a reading is a *correct* reading of the printed page.
+
+The published tree is plain files, so `curl` and `jq` work as well as the browser does:
+
+```sh
+jq '{publication_mode, representations, works: (.works | length)}' docs/index.json
+ls docs/akn/my/bill/dr/2024/11/          # msa@.md, eng@.md, and a graph if it passed the gate
+```
+
+### 6. Publish
+
+`docs/` is a complete, self-contained tree: publishing is copying it into the repository that
+serves <https://cheeleong.dev/data-parlimen/> and pushing there (or point `SITE_ROOT` at that
+checkout and build in place). Before that, confirm the tree is what you think it is:
+
+```sh
+git status --short docs
+jq '{publication_mode, representations}' docs/index.json
+```
+
+A path-hosted tree carries no `CNAME` — the domain belongs to whatever serves the root of
+`cheeleong.dev`; a tree published at a domain apex gets one written from `SITE_PREFIX`.
+
+A published tree may be mirrored and cannot be withdrawn. See
+[Publishing is gated](#publishing-is-gated-in-every-environment) — the gate applies locally too,
+because a local publish is one push away from a permanent one.
 
 ---
 
-## Tests
+## Where it stands
 
-```bash
-make check     # lint, strict mypy, and the offline suite (SQLite, no network)
-make test-pg   # the above plus the PostgreSQL-only tests, against the dev database
-```
+From the last full build, over the real corpus:
 
-The offline suite runs entirely on SQLite. Behaviour that only exists on PostgreSQL — the
-weighted `tsvector`, `ts_rank_cd` ranking, `ts_headline` snippets, and pgvector cosine retrieval
-— runs only when `BILLWATCHER_TEST_DATABASE_URL` points at a disposable database, and skips with
-a clear message otherwise. `make test-pg` sets it to the `billwatcher_test` database that
-`make db-up` creates. That fixture drops and recreates the `public` schema, so never aim it at a
-database you care about.
-
-`make test-live` performs a tiny opt-in check against the real Parliament site. It requires
-`BILLWATCHER_LIVE_TEST=1`, obeys the crawl delay, fetches at most two documents, and skips
-cleanly when robots policy, TLS, or upstream availability prevents it. It never runs as part of
-`make test`.
-
----
-
-## Operator interface
-
-What is left to do, and who can do it, is in [`TODO.md`](TODO.md); the dated evidence behind it is
-in [`docs/status.md`](docs/status.md).
-
-`make help` lists everything. The targets that matter:
-
-| Target | What it does |
+| | |
 | --- | --- |
-| `check` | Lint, type check, and test — the gate before any change lands |
-| `doctor` | Exits non-zero while a critical anomaly is unresolved, a current document version is unaccepted, or a stored blob is missing |
-| `status` | Per-target freshness, queue depth, latest run, pipeline versions |
-| `seed` | Offline fixture ingestion |
-| `scrape` | An approved live crawl of the current listings; requires an explicit opt-in |
-| `scrape-archive` / `scrape-full` | The archive, or the archive plus the current listings, with the archive's own larger budget |
-| `anomalies` / `resolve-anomaly` / `acknowledge-anomaly` | The `doctor` work list, and the two ways to close an item with a name and a reason attached |
-| `fixtures-refresh` | Regenerate the committed fixtures from stored snapshots, offline |
-| `reparse` / `reextract` | Replay stored bytes at a newer parser or extractor; dry run by default |
-| `restructure` | Read structure from stored bytes and record each document's Gate L1 verdict |
-| `retention` | Roll transport logs into daily counters and prune old extractions; never deletes archive data |
-| `verify-storage` / `prune-blobs` | Check every blob reference; delete only unreferenced bytes |
-| `backup` / `backup-blobs` / `restore` / `restore-blobs` | Guarded database and blob-store operations |
-| `docker-build` / `compose-up` / `compose-down` / `logs` | The production-shaped stack |
-
-Every mutating backfill is a dry run unless you pass `ARGS=--apply`. No default target crawls
-Parliament or deletes data. There is no GitHub Actions workflow, by design: `make doctor` and the
-manual gate log in `docs/status.md` take its place.
-
----
-
-## Crawling
-
-Live crawling is off by default and needs two separate opt-ins: `SCRAPE_ENABLED=true` and the
-explicit `--approve-live` flag that `make scrape` passes.
-
-The crawler defaults to one request at a time with a two-second delay, refuses to be less
-polite, verifies TLS strictly, allowlists only Parliament hosts, and revalidates every redirect.
-
-Two upstream conditions must be settled before a crawl runs, both recorded in
-`docs/upstream.md`:
-
-1. **The site serves an incomplete TLS certificate chain.** It sends its leaf certificate without
-   the intermediate that signs it, so verification fails. Browsers hide this by fetching the
-   intermediate themselves; Python does not. Supply the intermediate in a bundle and set
-   `UPSTREAM_CA_BUNDLE`. There is no setting that disables verification, and adding one is
-   forbidden by the specification.
-2. **The site publishes no `robots.txt`** — it returns 404. RFC 9309 would read that as
-   unrestricted, but this project requires the decision to be reviewed and recorded first. Once
-   you have checked the site's terms and logged the outcome in `docs/status.md`, set
-   `ROBOTS_MISSING_POLICY=allow`; every run then records an anomaly noting it crawled without a
-   published policy, so the decision stays visible.
-
-A failed run explains itself and prints a command for the full record:
-
-```
-$ make scrape
-FAIL: robots.txt returned 404; no crawl policy is published. ...
-Inspect the run with: uv run billwatcher run-report <run-id>
-```
-
-### What a crawl currently collects
-
-The two current listings ingest fully: 126 bills across both chambers, with reading dates,
-presenters, and document links read out of the hidden per-bill detail table each row carries.
-
-**The archive ingests too, and it is much larger.** `?arkib=yes` shows a search form, but the
-archived listing is not in that page: it is a `dhtmlXTree` whose XML the page loads separately —
-one document per archived year, 1990 to 2024, 67 of them across the two chambers (ADR-014). A
-`make scrape-archive` run reads all of them and publishes **1,269 bills spanning 1990 to 2026**,
-2,256 chamber records, and 4,861 events, with one coverage target per year so a single unreadable
-year is visible on `/status` instead of hiding in an average.
-
-`carian.html`, incidentally, is a full-text search over the *text inside* bill PDFs — page-level
-hits with fragment links. It carries no bill code, status, or date, so it is not crawled. Reading
-the form and assuming it was the archive is the mistake ADR-011 made and ADR-014 corrects.
-
-A crawl also queues every document it finds, and the queue has been drained: **1,295 documents,
-1,264 stored and validated, 27,575 pages, 0.24 GB** — one request every two seconds, each PDF
-hashed, magic-byte validated, stored, and text-extracted.
-
-That is where the archive stops being tidy, and the numbers are the point:
-
-- **31 links are dead**, and Parliament answers them with `HTTP 200`, `text/html`, and a 23-byte
-  `File does not exist (1)`. Validating content rather than trusting a status code is the only
-  reason none of them was stored as a bill document.
-- **22 documents have no extractable text** — scans, concentrated in 2010, 2013 and 2018. Age is
-  not the predictor: a bill from 1995 extracts cleanly. Those 22 are findable by their listing
-  metadata but not by their contents until the optional OCR worker is built.
-- **62 documents are published at more than one URL**, usually one copy per chamber. Identity is the
-  content hash, so all 62 collapse to one stored blob linked from every bill that points at it. URL
-  identity would have counted the archive twice.
-- **No document has a second version yet**, so the versioning machinery is exercised only by
-  fixtures. That is the archive being young, not the code being untested.
-
-The remaining discovery gate in `docs/upstream.md` is whether a revised document keeps its URL
-(A11), which needs the same document observed twice over time. A real contact address is still
-needed before a public deployment.
-
----
-
-## Architecture
-
-```
-  your nginx  ──►  FastAPI + Jinja  ──►  PostgreSQL + pgvector
- (TLS, not in                ▲                    ▲
-  this repo)                 │                    │
-                    scheduled worker  ──►  Parliament pages and PDFs
-                             │
-                             ▼
-             content-addressed blob store (private volume)
-                             │
-                             ▼
-        replay / re-extract / re-chunk / re-embed, all offline
-```
-
-TLS is terminated by an nginx deployed separately (ADR-015). This stack publishes exactly one
-thing — the app on `127.0.0.1:8000` — for that proxy to sit in front of; PostgreSQL and the blob
-gateway are on an internal network and are never reachable from the host. The app sets its own
-security headers, so the proxy must not set copies of them, and it needs `proxy_buffering off` for
-the status page's event stream. `docs/operations.md` has the configuration.
-
-The blob store is not a cache. It is the archival record that makes replay, versioning, and
-post-hoc parser fixes possible, and it is backed up alongside the database.
-
-Design rules the code holds to:
-
-- **Upstream state is mutable; our record is append-only.** Re-downloading changed bytes creates
-  a new document version and preserves the old one, its extracted text, and its metadata.
-- **Absence is an observation, not a deletion.** A bill missing from one crawl is recorded as
-  absent, never removed.
-- **Every derived row names the code that produced it**, so a parser or extractor fix can rebuild
-  exactly the affected rows from stored bytes without re-crawling.
-- **Anomalies are rows, not log lines.** They deduplicate by kind and entity, surface on
-  `/status`, and make `make doctor` fail until resolved.
-
----
-
-## The archive
-
-Every page snapshot and every document byte is stored content-addressed by SHA-256. That store
-is not a cache: it is what makes versioning, replay, and re-extraction possible, and it is backed
-up alongside the database.
-
-Two backends implement one contract. `filesystem` (the default) writes files directly.
-`s3` talks to any S3-compatible service; the deployment runs
-[VersityGW](https://github.com/versity/versitygw) with its POSIX backend pointed at the same
-volume, so the bytes stay on an ordinary filesystem in the same layout while standard S3 tooling
-and off-host backup get a supported interface. The gateway is internal to the Compose network and
-is never published. Switching backends migrates nothing.
-
-### Serving archived documents
-
-The site can serve its stored copy of a bill PDF at
-`/documents/{document_id}/versions/{version_no}`, always beside a link to Parliament's official
-URL. **It is off by default and returns 404**, because publishing mirrored bytes is gated on the
-rights review in assumption A14 (see `docs/decisions/ADR-004` and `ADR-013`). The official link
-never depends on it.
-
-When enabled, only validated versions are served — a quarantined one is kept for the record and
-withheld — and each response carries the content hash as an `ETag`, an immutable `Cache-Control`,
-a canonical `Link` to the official URL, and `X-Robots-Tag: noindex`, because our copy is a
-preservation artifact rather than the authoritative record.
-
-### Serving the legislation corpus
-
-A second pipeline reads each bill's structure and publishes it as Akoma Ntoso XML, ELI JSON-LD and
-RDF N-Quads on permanent, truncatable identifiers — a Work, one Expression per language, one
-Manifestation per format, and a dereferenceable IRI for every provision:
-
-```text
-/akn/my/bill/dr/2026/15                        the bill, in any language
-/akn/my/bill/dr/2026/15/msa@                   the Malay reading;  …/eng@ is the English one
-/akn/my/bill/dr/2026/15/msa@.xml               .jsonld and .nq are the other formats
-/akn/my/bill/dr/2026/15/msa@/~cl_5__subsec_1   one provision of it
-```
-
-**It is off by default and every one of those paths returns 404** (`SERVE_LEGISLATION_CORPUS`), and
-even when it is on, **what is published is structure only**: the FRBR identifiers, the provision
-numbering, the headings, and the graph of what contains what. Every provision's body text is removed
-at the serving boundary — the store holds it, the response does not — because republishing the
-drafter's words is the same rights question that keeps stored PDFs private (`ADR-004`, assumption
-A14). Publishing text is a separate flag with a separate confirmation, deliberately: gating the
-lower-risk artifact while leaving the higher-risk one open would be backwards (`ADR-018`, `ADR-027`).
-
-Provision **headings** are published in structure-only mode. That is a recorded judgement, not an
-oversight: a heading is the same kind of short fragment as a bill's title, which this site already
-publishes everywhere. One constant (`redact.KEEP_HEADINGS`) reverses it if a rights review says so.
-
-"Short" is enforced rather than assumed, and it took a review to notice that it wasn't. Amendment
-bills often print no heading at all and run the whole provision in after its number, so without a
-bound the "heading" was the provision — published in full, in every format, at default settings.
-Two independent layers now apply the same test, one where the tree is parsed and one where the
-response is built, and a provision printed without its own heading is shown without one rather than
-with the first eighty characters of its text.
-
-Turning it on, in order:
-
-1. Build the corpus: `make pipeline-fetch-listings`, `pipeline-parse-listings`,
-   `pipeline-fetch-documents`, then `billwatcher pipeline import-markdown` per document,
-   `make pipeline-convert-to-akn` and `make pipeline-generate-semantic`.
-2. Check it: `billwatcher pipeline verify` — every artifact re-hashed against the record of what it
-   was built from, with nothing unexplained in the store.
-3. Record the rights decision in the `docs/status.md` gate log, then set
-   `SERVE_LEGISLATION_CORPUS=true` **and** `LEGISLATION_CORPUS_RIGHTS_CONFIRMED=true`. Production
-   refuses to start with the first without the second.
-4. Only for full text, and only after the A14 review: `LEGISLATION_PUBLICATION_MODE=full`, which
-   additionally requires `ARCHIVED_DOCUMENT_RIGHTS_CONFIRMED=true`.
-
-Nothing has been built from real data yet. No listing or document has been fetched into the
-pipeline's store, so the corpus is proven against constructed fixtures and one end-to-end run, and
-the fidelity gate's pass rate over Parliament's real typesetting is unmeasured.
-
-## Frontend
-
-Server-rendered HTML with a small amount of progressive enhancement. **Every page is complete
-and usable with JavaScript disabled** — that is a tested property, not an aspiration: the suite
-asserts the content is server-rendered, the filter form is a plain `GET`, and no script appears
-outside `<head>`.
-
-[Datastar](https://data-star.dev) v1.0.2 adds exactly two things, both additive:
-
-- **Search as you type** on `/bills`, debounced, patching only the results region.
-- **A live `/status`** that subscribes to a bounded server-sent event stream, so an operator
-  watching a crawl sees it change.
-
-Each fragment endpoint renders the same Jinja partial the full page includes, so the enhanced
-and unenhanced views cannot drift. Anything HTML can already do — disclosure, navigation, form
-submission — uses HTML, not script.
-
-Datastar is **vendored** into `static/vendor/` with its version and SHA-256 recorded beside it;
-nothing is fetched from a CDN and the site makes no third-party requests. It does require
-`script-src 'unsafe-eval'`, because it compiles `data-*` expressions with the `Function`
-constructor. That trade-off, and why the CSP-safe fork was rejected, is recorded in
-`docs/decisions/ADR-012`. `unsafe-inline` is **not** granted.
-
-The stylesheet has no web fonts, supports light and dark via `prefers-color-scheme`, honours
-`prefers-reduced-motion`, and never signals state by colour alone — every badge carries a text
-label and a shape cue.
-
-## Optional Release 3 features
-
-Semantic search and generated answers sit behind `SEMANTIC_SEARCH_ENABLED` and `RAG_ENABLED`,
-both off. With them off, `/semantic-search`, `/ask`, and `/api/v1/ask` return 404 and nothing
-else changes.
-
-Neither can start without an explicitly configured model. **No embedding or answer model is
-chosen or defaulted here.** ADR-009 selects a self-hosted vLLM OpenAI-compatible endpoint for
-answers; ADR-008 leaves the embedding model decision open. The `deterministic` and `echo`
-providers exist for development and are rejected in production configuration.
-
-Before either flag goes on, `make evaluate` must meet the thresholds in `docs/evals/README.md`
-against the real model, and the result must be recorded in `docs/status.md`.
-`docs/operations.md` has the rollout sequence.
-
----
-
-## Reading the documents themselves
-
-Everything above indexes what Parliament *published about* a bill. A separate pipeline reads what
-those documents *say*: a layout-aware structural reading of each stored PDF, validated against the
-Arrangement of Sections the document carries on its own contents page.
-
-That check — Gate L1 — is the point. Malaysian legislative typography puts structure in position:
-section numbers hang at the left margin and **a marginal note sits in the right margin on the same
-baseline as the provision it annotates**, so a reader that joins a baseline into one line splices
-an annotation into the middle of the legal text and produces something that still looks
-well-formed. Reading geometry rather than characters is what avoids that, and comparing the parsed
-body against the drafter's own table of contents is what proves it worked. A dropped page, a failed
-extraction, or a mis-detected hierarchy shows up as a difference between two independent readings
-of one document.
-
-```bash
-make restructure            # dry run over stored bytes; ARGS=--apply to write
-```
-
-A reading that fails the gate is **stored and never promoted** — it is a review item, not a
-discard — and a newer parser that fails cannot withdraw a reading that passed. Scans are recorded
-as `no_text` rather than quietly filed as "no contents page", because the 22 documents with no
-extractable text are the ones most likely to be wrong.
-
-**This is Stage 1 of a larger specification.** HANDOFF §26 specifies the rest — Akoma Ntoso 3.0,
-amendment extraction, point-in-time consolidation, and an ELI linked-data graph. The Akoma Ntoso and
-ELI half of it now exists for **bills**, in a second, file-only pipeline that keeps its whole record
-in a directory tree rather than the database (HANDOFF §28) and whose output is what "Serving the
-legislation corpus" above describes. Amendment extraction and consolidation remain unstarted, and
-§26.7 records why: Acts and the AGC reprints that would validate a consolidation live on a host this
-project has never contacted, and publishing consolidated law asserts what the law *is*, which needs
-legal sign-off rather than only a rights answer. Nothing consolidated is served, and the gate for it
-is deliberately higher than the one for mirroring bytes.
-
-```bash
-make pipeline-convert-to-akn      # markdown -> Akoma Ntoso, behind a fidelity gate
-make pipeline-generate-semantic   # Akoma Ntoso -> ELI JSON-LD + RDF N-Quads, offline
-```
-
-Structure here is read with a language model, because an Arrangement of Clauses entry is textually
-identical to the provision it lists and markdown carries no page geometry to separate them. That is
-also why nothing it produces is published unchecked: a deterministic gate asks whether the tree
-accounts for the words that were on the page — every provision numbered, numbered once, in sequence
-— and a reading that cannot is kept for review rather than promoted or discarded.
-
-## Project state
-
-`HANDOFF.md` is the normative specification; every "must" in it is a release gate.
-`docs/status.md` is the live ledger of what is done, what is blocked, and what evidence exists.
-
-Releases 1 and 2 are implemented and covered by automated tests. Release 3 is implemented and
-feature-flagged off pending model decisions. Release 4 (§26) is implemented as far as Stage L1 and
-is proven against constructed fixtures only — the corpus-wide pass rate is not yet measured. The
-file-first pipeline (§28) is implemented end to end and has never been run against real data: its
-store is empty, so its gate's pass rate is unmeasured too, and its publication surface is off.
-Still open, and not resolvable in code: approval for a live crawl, external HTTPS verification from
-another network, the document and corpus republication rights reviews, and the dependency and
-container vulnerability reviews.
-
-## Documentation
-
-| File | Contents |
+| Bills | 1,273 |
+| Documents stored | 2,484 of 2,552 referenced (68 absent upstream) |
+| Markdown readings | 2,447 |
+| Readings passing the fidelity gate | **146** |
+| Published works | 1,207 — 2,341 expressions (1,192 Malay, 1,149 English) |
+| — of those, with a JSON-LD/N-Quads graph | 139 |
+
+The gate's pass rate is the open problem, and it is a property of the deterministic parser rather
+than of the corpus: most rejections are the signature of a reader that cannot tell a bill's
+Arrangement of Clauses from its body. Until it closes, this is a **complete corpus of readings with
+a graph over a fraction of it**. `documentation/status.md` records the detail.
+
+## What is where
+
+| Path | What it is |
 | --- | --- |
-| `HANDOFF.md` | The specification and its acceptance criteria |
-| `docs/status.md` | Package ledger, assumption register, decision index, manual gate log |
-| `docs/operations.md` | Running, migrating, retention, backup and restore, rollout |
-| `docs/data-model.md` | Conventions the schema alone does not show |
-| `docs/upstream.md` | What has and has not been confirmed about the source site |
-| `docs/decisions/` | Architecture decision records |
-| `docs/evals/` | The versioned retrieval and answer evaluation set |
+| `src/billwatcher/` | The pipeline. One package per stage: `download`, `markdown`, `graph`, `publish`. |
+| `web/` | The React frontend: a static reader for the published files. |
+| `docs/` | **The published site.** GitHub Pages serves this directory. Committed. |
+| `corpus/` | The pipeline's own record: PDFs, markdown, structures, provenance. Local, never committed. |
+| `tests/` | The Python suite. The frontend's lives in `web/src/__tests__/`. |
+| `documentation/` | Decision records, operational notes, and the project's history. |
+| `legacy/` | The Postgres/FastAPI stack this replaced, frozen where it stood. Not built, not imported. |
+
+### The corpus on disk
+
+The corpus *is* the record, not a projection of a database. Every artefact sits beside the bytes it
+was derived from, with a provenance sidecar saying what produced it:
+
+```
+corpus/
+  listings/<target>-<lang>/           one stored snapshot per fetched listing page
+  bills/<bill-id>/bill.json           one record per bill
+  documents/<bill-id>/<doc-id>/v001/
+    document.pdf                      the stored bytes, verbatim
+    metadata.json                     where they came from
+    document.md                       the reading            + .markdown.provenance.json
+    document.akn.xml                  the structure, if it passed the gate
+    document.akn.rejected.xml         the structure, if it did not
+    document.akn.gate.json            the gate's verdict     + .akn.provenance.json
+    document.jsonld  document.nq      the graph              + .semantic.provenance.json
+  manifests/<step>/<run-id>.json      what each run did, and which code did it
+```
+
+### The published tree
+
+```
+docs/
+  akn/my/bill/dr/<year>/<number>/     msa@.md, eng@.md, msa@.jsonld, msa@.nq
+  definitions/                        the AKN schema, the JSON-LD context, the vocabulary
+  index.json                          the catalogue: every work, its expressions and their files
+  checksums.sha256                    every published file, hashed
+  CNAME                               only at a domain apex: written verbatim from SITE_PREFIX
+  index.html  404.html  assets/       the compiled frontend, built against SITE_PREFIX's path
+```
+
+## The stages
+
+**1. Download** (`src/billwatcher/download/`) — the only stage that touches the network. Fetches
+Parliament's listings and the whole year-indexed archive **in both published languages**, parses
+them into one record per bill, and downloads every document PDF named in those records. Malay and
+English are two Expressions of one bill, not a page translated: the archive names `DR 17 BM.pdf`
+and `DR 17 BI.pdf` (ADR-040). Every request goes through one rate-limited client; every response is
+stored verbatim beside a sidecar saying where it came from. A document already in the corpus is not
+fetched again.
+
+**2. Markdown** (`src/billwatcher/markdown/`) — reads every stored PDF locally, with no model in
+the loop. The reader is geometry-aware, which matters more than it sounds: a marginal note is
+typeset on the same baseline as the provision it annotates, so a reader that joins lines by
+position splices an annotation into the middle of the legal text. Each document is read in the
+language of the listing that named it; `LANG_CODE` (default `ms`) is only the fallback for what
+that leaves unsettled. Readings whose measured shape is far outside the corpus are counted as
+`suspect` and named rather than hidden.
+
+**3. Graph** (`src/billwatcher/graph/`) — reads a provision structure out of that markdown, renders
+Akoma Ntoso XML on stable FRBR identifiers, and serialises the result as ELI JSON-LD and RDF
+N-Quads from one graph, so the two cannot disagree.
+
+Structure extraction has two model-free routes, and which one produced a reading is recorded rather
+than blended away: `make akn` uses the deterministic parser, and `make handoff OUT=…` writes one
+self-contained work packet per document for a coding agent or a person to answer, which
+`make akn FROM=…` reads back through the identical conversion, gate and provenance path. See
+`documentation/operations.md` for the rejection reasons and the handoff loop.
+
+Either way, a reading that cannot account for the markdown it came from is rejected by the fidelity
+gate and never reaches the published dataset. The rejected render is kept beside the verdict.
+
+**4. Publish** (`src/billwatcher/publish/`) — projects the gate-passing corpus into `docs/`.
+
+## Two writers, one directory
+
+`docs/` is written by both halves of the build, and neither may delete the other's files:
+
+| Owner | Entries |
+| --- | --- |
+| `make publish` | `akn/`, `definitions/`, `index.json`, `checksums.sha256`, `CNAME` |
+| `make site` | `index.html`, `404.html`, `assets/`, `.nojekyll` |
+
+Each reconciles only what it owns. The frontend build runs with `emptyOutDir: false` for exactly
+this reason: emptying the directory would delete a corpus that took a live crawl to produce.
+
+`404.html` is a copy of the app. GitHub Pages serves it for any path with no file behind it, which
+is precisely what an FRBR Work IRI is — `/akn/my/bill/dr/2024/11` is a directory holding
+`msa@.jsonld`, not a page. That copy is what makes the identifiers resolve in a browser while real
+files still win over the fallback.
+
+**A build is additive.** `make publish` reports files it no longer publishes and leaves them in
+place; `make rebuild` deletes them. That default was bought expensively: a build run while the
+corpus was mid-repair found nothing to emit and would have deleted the published tree that was, by
+then, the only surviving copy.
+
+## Publishing is gated, in every environment
+
+A published tree may be mirrored and cannot be withdrawn, so `make publish` refuses unless the
+rights decisions have been asserted — including locally, because `docs/` is committed and a local
+publish is one push away from a permanent one.
+
+- `PUBLISH_RIGHTS_CONFIRMED` — publishing at all.
+- `FULL_TEXT_RIGHTS_CONFIRMED` — publishing the source document's own words. Required by
+  `PUBLICATION_MODE=full`, and by publishing markdown at all, since markdown *is* the prose.
+
+Both default to `false`, in `.env.example` and in the code. `.env.development` turns them on
+because building the tree locally is how the publish step is exercised at all.
+
+`PUBLICATION_MODE=metadata` publishes provision numbers, headings and the relationships between
+them, with the text removed at the publication boundary. The redaction is a control that stays in
+place whichever mode is configured, not a mode that deletes it.
+
+## Configuration
+
+Every setting lives in `.env`; `make env` creates one from `.env.development`. `.env.example`
+documents all of them, and `src/billwatcher/config.py` is the authority — a value that cannot work
+fails when configuration loads, not fifty minutes into a download.
+
+`SITE_PREFIX` is worth singling out. It is where the tree is served — a bare domain
+(`bills.example.my`), or `host/path` for a GitHub Pages project repository
+(`cheeleong.dev/data-parlimen`) — and it is the base of every published FRBR IRI, so a citation in
+the dataset dereferences to the page that serves it. At a domain apex it is also written verbatim
+into `CNAME`; under a path no `CNAME` is written, and the path becomes the frontend's base URL.
+It is one setting for all of that because a domain configured twice is a domain that will
+eventually disagree with itself.
+
+## Development
+
+```sh
+make check     # ruff, strict mypy, pytest, oxlint, tsc, vitest, oxfmt
+make format    # ruff format and oxfmt
+make verify    # re-hash the corpus against its own sidecars, provenance and gate verdicts
+```
+
+`make check` covers both toolchains and touches neither `corpus/` nor `docs/`: the test suite pins
+every writable root into a temporary directory, because a test once wrote a full publication into
+the working tree.
+
+## Going further
+
+| | |
+| --- | --- |
+| `documentation/operations.md` | Running the pipeline: the live crawl, the gates, what to do when a step fails. |
+| `documentation/status.md` | Where the project actually stands, and what is open. |
+| `documentation/data-model.md` | The corpus layout, FRBR identity, and what the published graph asserts. |
+| `documentation/upstream.md` | What Parliament's site does, including the incomplete certificate chain. |
+| `documentation/decisions/` | Architecture decision records, ADR-001 onward. |

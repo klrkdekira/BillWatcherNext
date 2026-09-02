@@ -1,0 +1,107 @@
+{
+  "built": "2026-08-29 v2",
+  "main_pdfs": [
+    {
+      "file": "D.R.15_2018_BM.pdf",
+      "md5": "8bb01172c26ba06b3d8f579fe574cbfa",
+      "bytes": 119247
+    },
+    {
+      "file": "D.R.28_2023_BM.pdf",
+      "md5": "911e50670b3e3dd032a80104334845ed",
+      "bytes": 396821
+    },
+    {
+      "file": "D.R.28_2023_EN.pdf",
+      "md5": "b3d785745b7b45edba686a580935aea0",
+      "bytes": 417594
+    },
+    {
+      "file": "D.R.30_2010_BM.pdf",
+      "md5": "6fbce6483cfb276ad1f5992d354ee35f",
+      "bytes": 96798
+    },
+    {
+      "file": "D.R.34_2010_BM.pdf",
+      "md5": "a279e2d82688139c49a560587520e521",
+      "bytes": 116458
+    },
+    {
+      "file": "D.R.39_2010_BM.pdf",
+      "md5": "5e3aa8f1df75799490027a8f7dc821fe",
+      "bytes": 100815
+    },
+    {
+      "file": "D.R.42_2010_BM.pdf",
+      "md5": "b9ee0ca5236f9bb866d0a1b1b76311d0",
+      "bytes": 155494
+    },
+    {
+      "file": "dr-1-2006.pdf",
+      "md5": "ffb4d2d157a9c08bad7f165f13e797b7",
+      "bytes": 203222
+    },
+    {
+      "file": "dr-10-2006_ms.pdf",
+      "md5": "1ca758acfeb63317967e4d55e646dda0",
+      "bytes": 343164
+    },
+    {
+      "file": "dr-16-2004_ms.pdf",
+      "md5": "4ce4a95ec521f064c73650aa15f14d0f",
+      "bytes": 212114
+    },
+    {
+      "file": "dr-19-2017_en.pdf",
+      "md5": "f80812df55dcaedacc8977b4ac721e08",
+      "bytes": 101848
+    },
+    {
+      "file": "dr-2-2006.pdf",
+      "md5": "1dcb32e5c06eaa5a3c9772adfbb04efc",
+      "bytes": 180093
+    },
+    {
+      "file": "dr-29-2002.pdf",
+      "md5": "690bc4136b6c15aa125a09b94870ba4d",
+      "bytes": 21588
+    },
+    {
+      "file": "dr-3-2006.pdf",
+      "md5": "cd8f70d217048cd47a886564183f90c0",
+      "bytes": 274819
+    },
+    {
+      "file": "dr-30-2002.pdf",
+      "md5": "10e3e47bc3a3142d373ed547b4169846",
+      "bytes": 30028
+    },
+    {
+      "file": "dr-31-2002.pdf",
+      "md5": "119ee11ff1f97ac0da58f4dfd0f0f6c7",
+      "bytes": 31588
+    },
+    {
+      "file": "dr-32-2002.pdf",
+      "md5": "7a9ef7c32e1d534a661d0bb5a690cb39",
+      "bytes": 118031
+    },
+    {
+      "file": "dr-33-2002.pdf",
+      "md5": "23bdb0cb651ab250a4535b9e9e943734",
+      "bytes": 172778
+    },
+    {
+      "file": "dr-4-2006.pdf",
+      "md5": "d35cab6d215d76b10d982a465ac3c6a8",
+      "bytes": 197133
+    }
+  ],
+  "substitutes": [
+    {
+      "file": "substitutes/dr-22-2010_MS_substitute_for_EN_job14.pdf",
+      "md5": "f6a5ebf5d633296e3f731e137c52fd31",
+      "bytes": 342847
+    }
+  ]
+}

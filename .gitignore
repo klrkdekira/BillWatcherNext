@@ -9,20 +9,18 @@ __pycache__/
 .coverage
 htmlcov/
 var/
-backups/
-*.db
 
-# Staging output of `make fixtures-refresh`; a regenerated fixture is committed only after review.
-tests/fixtures/parliament/regenerated/
+# The corpus: listings, bills, PDFs, markdown, structures, provenance, manifests. This *is* the
+# pipeline's record, and it is deliberately local — the published projection of it is `docs/`,
+# which IS committed. `make download` rebuilds this from Parliament; nothing else can.
+corpus/
 
-# Audit tree (HANDOFF 27): a derived, rebuildable projection of the database and blob store.
-# Belongs to the Postgres-backed pipeline, currently dormant.
-data/
-
-# The file-first pipeline's own state (billwatcher.pipeline): listings, bills, and documents,
-# as plain files. This *is* the record for that pipeline, not a derived projection.
-pipeline-data/
+# The frontend's dependencies and its own build scratch. `docs/` is where its output goes, and
+# that is committed.
+web/node_modules/
+web/dist/
+node_modules/
 
 # pi goal/loop tooling state
 .pi-glla/
-public-cache/
+docs
