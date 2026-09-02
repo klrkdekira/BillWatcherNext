@@ -20,8 +20,8 @@ Six findings, all blocking, and only one of them carries a threshold:
   silently merging two provisions into one identifier.
 - `sequence_gap` / `sequence_order` — a skipped or backwards number. Malaysian drafting numbers
   provisions continuously, and the one legitimate irregularity (an inserted `5A` between `5` and
-  `6`) is modelled rather than tolerated as slack. A backwards step is the classic
-  table-of-contents bleed signature: 1..12, then 1 again.
+  `6`, or an inserted paragraph `(aa)` between `(a)` and `(b)`) is modelled rather than tolerated
+  as slack. A backwards step is the classic table-of-contents bleed signature: 1..12, then 1 again.
 - `unanchored_run` — a provision run that does not start where the document starts. Comparing
   adjacent numbers is blind to a constant offset, so a tree numbered 3, 4, 5 for a document printed
   1, 2, 3 is continuous by construction while every eId beneath it is wrong.
@@ -64,6 +64,8 @@ from billwatcher.graph.vocabulary import (
     alpha_successor,
     back_matter_heading,
     container_heading,
+    is_doubled_step,
+    is_letter_insertion,
     is_roman,
     provision_number,
     roman_value,
@@ -496,7 +498,11 @@ def _sequence_findings(root: Node, *, unit: str) -> list[Finding]:
         for child in node.children:
             if child.node_type not in NUMBERED_TYPES:
                 continue
-            if child.node_type in RESTARTING_TYPES:
+            if child.node_type in RESTARTING_TYPES or (
+                child.node_type == "part" and node.node_type == "schedule"
+            ):
+                # A Schedule divided into Parts numbers them from I, as a Part numbers its
+                # Chapters: those Parts are the schedule's own run, not the body's.
                 siblings.setdefault(child.node_type, []).append(child)
             elif inside_unit and child.node_type in _UNIT_SCOPED_TYPES and child.node_type != unit:
                 pass
@@ -564,6 +570,15 @@ def _compare(previous: Node, node: Node) -> list[Finding]:
         # rejected as a "sequence_gap" expecting `CI`. Real drafting never mixes the two
         # conventions within one run, so if the letter reading says this pair is exactly
         # consecutive, that is the reading — the roman one below is reached only when it is not.
+        return []
+    if node.node_type in _ROMAN_NUMBERED and is_doubled_step(prev_num, cur_num):
+        # `(cc)` -> `(dd)`: the doubled-letter list older drafting printed beneath `(i)`, `(ii)`.
+        # Both are roman numerals as well, and read that way the step is 200 -> 500.
+        return []
+    if node.node_type in _LETTER_NUMBERED and is_letter_insertion(prev_num, cur_num):
+        # `(a)` -> `(aa)` -> `(b)`: an inserted paragraph, the lettered form of `5` -> `5A` -> `6`.
+        # Walking the alphabet from `a` reaches `aa` twenty-six steps later, which reported a gap
+        # on every reprint carrying an insertion (measured: 131 findings on one signature).
         return []
     expected = _successor(prev_num, node.node_type)
     if expected is None:

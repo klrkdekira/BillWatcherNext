@@ -69,14 +69,78 @@ were left in place by ADR-038 rather than deleted. What the parser stopped doing
   or a Part restarting at 1, is still recorded, because `sequence_order` and `unanchored_run` exist
   to name it and a parser that quietly absorbed it would leave the gate nothing to find.
 
-**What is left is the harder half.** 1,187 readings still fail, and the remaining findings are no
-longer one signature — they include genuinely damaged OCR, bills whose clause numbering the reading
-lost, and structures a line-by-line reader cannot recover. This is where `structure-handoff` earns
-its place: `make handoff OUT=…` writes one packet per document and `make akn FROM=…` reads the
+**What was left was the harder half.** 1,187 readings still failed, and the remaining findings were
+no longer one signature — they included genuinely damaged OCR, bills whose clause numbering the
+reading lost, and structures a line-by-line reader cannot recover. This is where `structure-handoff`
+earns its place: `make handoff OUT=…` writes one packet per document and `make akn FROM=…` reads the
 answers back through the identical gate.
 
+## Gate P1's pass rate: 52% to 78%, on 2026-09-02
+
+An audit of the markdown parser against every stored reading: the current parser and gate were run
+over all 2,479 readings, each failure was traced back to the markdown line that produced it, and
+the failures were grouped by signature before anything was changed. Most of the remaining half was
+not one cause but a dozen printed shapes the line-by-line reader had not been shown, and each was
+measured before it was addressed. `AKN_VERSION` 1.4.0 and `STRUCTURE_GATE_VERSION` 1.2.0:
+
+| | before | after |
+| --- | --- | --- |
+| Passing Gate P1 | 1,292 (52.1%) | **1,933 (78.0%)** |
+| `duplicate_eid` findings | 7,861 | 1,901 |
+| `sequence_order` findings | 6,464 | 954 |
+| `sequence_gap` findings | 2,863 | 840 |
+
+644 documents gained and **three** lost: two where a wrapped line is genuinely ambiguous, and one
+(`dr-19-2024`) whose earlier pass was a tree built from its own explanatory statement — the body
+opening had matched a sentence in the HURAIAN — so the loss is a correction. What the parser
+stopped doing, by how many rejected readings carried the shape:
+
+- **Reading a sentence tail as a heading** (124). `...yang dinyatakan dalam` wrapped to a line
+  reading `Jadual.`, which the reader had promoted to a heading for being short; the false schedule
+  then swallowed every clause after it as a schedule paragraph. A heading is a label and does not
+  end in a full stop, and the line before it broke off mid-sentence.
+- **Reading a wrapped cross-reference as an opener** (285). `...under subsection` / `(1),
+  subsection 13(3) shall have effect...` gave the clause a second subsection (1). A line ending on
+  a structural noun, or a token glued to a comma or conjunction, is the sentence continuing.
+- **Losing every Part after the first** (165). `BAHAGIAN` with its number on the next line —
+  sometimes filed by the reader as a marginal note — never matched. The two lines are one heading.
+- **Breaking the paragraph run on the deeper lists** (265 for `(A)`, `(B)`; more for the doubled
+  `(aa)`, `(bb)` of older drafting, and the inserted `(aa)` between `(a)` and `(b)`). The parser
+  now keeps a stack of the open lists and places each token by the list it continues, case
+  included; the gate models the inserted letter and the doubled step as it already modelled `5A`.
+- **Reading `(l)` as a subsection** (57 as `(1)`, 59 as `(I)`). Only the position after `(k)` is
+  rescued.
+- **Hiding a clause behind its spliced marginal note** (146). `Pindaan 4. Seksyen HB Akta ibu...`:
+  the note is the heading and the number opens the clause, but only for the bill's exact next
+  number and never after an introducing colon, where the same shape is a quoted section.
+- **Missing a quotation introduced mid-line** (65), and **missing the back-matter heading run into
+  its first sentence** (32), which had let the explanatory statement's numbered paragraphs become
+  clauses.
+- **Re-rooting a Part printed inside a Schedule** (the gate now numbers a schedule's Parts as
+  the schedule's own run, as it already did a Part's Chapters), and **stopping the Arrangement short** of a
+  bill whose title block is the bare word `bernama` or whose enacting formula opens `MAKA, OLEH
+  YANG DEMIKIAN` (22 readings had no bounded Arrangement; five remain).
+
+One change is a modelling decision rather than a repair, and is recorded as such in
+`graph.structure._OpenLists`. A list that **restarts under the parent that already holds it** —
+each defined term's own `(a)`, `(b)` in an interpretation clause, or inserted sections' `(1)`,
+`(2)` with their quotation marks lost — is read as the parent's prose. It was the largest single
+remaining cause (514 rejected readings carried one). One `para_a` per parent cannot name two lists
+apart, so the choice was between a rejected tree and a tree that keeps every word and gives up a
+sub-structure it has no element for. Modelling definition lists as their own container (Akoma
+Ntoso's `blockList`) is a decision for the vocabulary, the renderer and the published schema
+together, and has not been made.
+
+**What is left** (545 readings) is now mostly reading damage rather than parser blindness: a
+document duplicated by an overlaid "RAHSIA" watermark layer, clause numbers spliced into the middle
+of a sentence (`menggantikan seksyen 7. seksyen 7`), Part numbers lost to letter-spacing (`FIrst
+s chedule`), quoted replacement schedules whose marks are gone, and treaty schedules whose
+`ARTICLE N` divisions have no node type. The largest remaining finding families are duplicate
+clause numbers (159 readings) and a clause sequence running backwards (205) — the signature of a
+reprinted body or of an Act's sections quoted without marks — then paragraph-letter gaps (193).
+
 The published dataset is now a **corpus of readings** (2,352 markdown expressions) with a **graph
-over half of it**.
+over three quarters of it**.
 
 ## What the reorganisation changed
 

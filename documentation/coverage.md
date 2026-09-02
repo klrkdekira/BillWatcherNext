@@ -165,5 +165,5 @@ dr-9-2006 [en] https://www.parlimen.gov.my/files/billindex/pdf/2006/DR92006E.pdf
 
 ---
 
-Generated 2026-08-30T13:52:28.735755+00:00 · read-only; nothing here was written by
+Generated 2026-09-02T07:38:38.423958+00:00 · read-only; nothing here was written by
 this report. Run `billwatcher coverage` to regenerate.

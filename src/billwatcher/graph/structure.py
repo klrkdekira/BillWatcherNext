@@ -33,12 +33,20 @@ from billwatcher.graph.vocabulary import (
     arrangement_heading,
     back_matter_heading,
     container_heading,
+    continues_run,
+    ends_in_reference,
+    is_doubled_letter,
+    is_roman,
+    is_sentence_tail,
     opens_quotation,
     parenthesised,
     provision_number,
     quotation_marks,
-    resolve_letter,
+    roman_value,
     schedule_heading,
+)
+from billwatcher.graph.vocabulary import (
+    QUOTE_CHARS as _QUOTE_CHARS,
 )
 
 __all__ = [
@@ -161,6 +169,154 @@ def _resumes_clause_sequence(text: str, last_clause: int | None) -> bool:
     return digits is not None and int(digits.group()) == last_clause + 1
 
 
+class _OpenLists:
+    """The lettered and numbered lists open beneath the current provision, outermost first.
+
+    Malaysian drafting nests four depths under a provision — `(1)` subsections, `(a)` paragraphs,
+    `(i)` subparagraphs, and `(A)` beneath those — and a token is placed by the list it *continues*,
+    not by its shape: `(i)` after `(h)` is the ninth paragraph, `(iii)` after `(C)` closes the
+    capital-lettered list and resumes the roman one two levels up. A single "last letter" cannot
+    answer the second case, which is why this is a stack: the walk runs from the innermost open
+    list outward and the first list whose successor matches wins, closing everything deeper.
+
+    A list that *restarts* under a parent that already holds it — a second `(a)` beneath the same
+    subsection, a second `(1)` beneath the same clause — is not structure this tree can hold, and
+    it is read as prose. Two things print that way. An interpretation clause gives each defined
+    term its own `(a)`, `(b)` list, so one subsection carries several lists that no eId scheme with
+    one `para_a` per parent can name apart (measured: 514 rejected readings carried such a
+    restart, the largest remaining cause). And an amendment clause inserting several sections
+    prints each with its own `(1)`, `(2)`; when the quotation marks are lost, those subsections read
+    as the clause's own. In both cases every line stays in the tree as the parent's text — the
+    coverage measure is whole, and what is lost is a sub-structure the gate could otherwise only
+    reject. Modelling definition lists as their own container (AKN's `blockList`) is a decision for
+    the vocabulary, the renderer and the published schema together, and is deliberately not made
+    here.
+    """
+
+    def __init__(self, provision: Node) -> None:
+        self.provision = provision
+        self.nodes: list[Node] = []  # e.g. [subsection, paragraph, subparagraph, subparagraph]
+        self._prose_only: set[int] = set()  # ids of nodes whose lists were flattened to text
+
+    @property
+    def innermost(self) -> Node:
+        return self.nodes[-1] if self.nodes else self.provision
+
+    def place(self, kind: str, token: str) -> Node | None:
+        """Attach a `(token)` opening; `None` means the line is prose of `innermost` instead."""
+        if kind == "subsection":
+            return self._attach(self.provision, "subsection", token, depth=0)
+        return self._place_letter(token)
+
+    def _place_letter(self, token: str) -> Node | None:
+        for depth in range(len(self.nodes) - 1, -1, -1):
+            sibling = self.nodes[depth]
+            if sibling.node_type == "subsection":
+                break
+            if continues_run(sibling.num or "", token, sibling.node_type):
+                parent = self.nodes[depth - 1] if depth else self.provision
+                return self._attach(parent, sibling.node_type, token, depth=depth)
+        # Nothing continued: a new list opens. Capitals and a leading roman `i` nest one level
+        # beneath whatever lettered list is open; a lower-case letter starts the paragraph list
+        # under the subsection or the provision itself.
+        if (
+            token.isupper()
+            or is_doubled_letter(token)
+            or (is_roman(token) and roman_value(token) == 1)
+        ):
+            return self._attach(self.innermost, "subparagraph", token, depth=len(self.nodes))
+        if self.nodes and self.nodes[0].node_type == "subsection":
+            return self._attach(self.nodes[0], "paragraph", token, depth=1)
+        return self._attach(self.provision, "paragraph", token, depth=0)
+
+    def _attach(self, parent: Node, node_type: str, token: str, *, depth: int) -> Node | None:
+        """Create the node under `parent` at stack `depth`, or flatten `parent` on a restart."""
+        if id(parent) in self._prose_only:
+            self.nodes = self.nodes[:depth]
+            return None
+        if any(child.node_type == node_type and child.num == token for child in parent.children):
+            for child in parent.children:
+                parent.paragraphs.extend(_lines_of(child))
+            parent.children = []
+            self._prose_only.add(id(parent))
+            self.nodes = self.nodes[:depth]
+            return None
+        node = Node(node_type, token, None, _eid_of(parent, node_type, token))
+        parent.children.append(node)
+        self.nodes = [*self.nodes[:depth], node]
+        return node
+
+    def paragraph_list_at_k(self) -> bool:
+        """Whether the open paragraph list stands at `(k)`, so the next token should be `(l)`.
+
+        `(l)`, `(1)` and `(I)` are one glyph apart in most faces, and the reading prints the
+        twelfth paragraph as a subsection `(1)` or a capital `(I)` often enough to have rejected
+        over a hundred readings between them. Only this one position is rescued: after `(k)`, a
+        `(1)` cannot be a subsection — a clause with paragraphs directly beneath it does not then
+        open subsections — and a lone capital `(I)` beneath a `(k)` has no list to belong to.
+        """
+        paragraph = next((n for n in reversed(self.nodes) if n.node_type == "paragraph"), None)
+        return paragraph is not None and paragraph.num == "k"
+
+
+def _lines_of(node: Node) -> list[str]:
+    """A node and its descendants back as the printed lines they were read from, in order."""
+    head = f"({node.num})" if node.num else ""
+    lines: list[str] = []
+    if node.paragraphs:
+        lines.append(f"{head} {node.paragraphs[0]}".strip())
+        lines.extend(node.paragraphs[1:])
+    elif head:
+        lines.append(head)
+    for child in node.children:
+        lines.extend(_lines_of(child))
+    return lines
+
+
+def _eid_of(parent: Node, node_type: str, token: str) -> str:
+    piece = f"{EID_PREFIXES[node_type]}_{token}"
+    return f"{parent.eid}__{piece}" if parent.eid else piece
+
+
+# `(c), perenggan baru (d)`, `(2), (3), (4) dan (5)`, `(a) dan (b)`: the token that opens the
+# line is the tail of a cross-reference, not a provision opening — it is glued to a comma or a
+# conjunction leading straight into another token.
+_REFERENCE_TAIL_RE = re.compile(r"^(?:,|(?:dan|and|atau|or|hingga|to)\s+\()")
+
+# A marginal note spliced onto the provision it labels, ahead of the number: `Pindaan 4. Seksyen
+# HB Akta ibu...`, `Keanggotaan 9. ...`. The layout reader separates a note from the text it
+# annotates when it has the geometry to (ADR-016), and this is the residue where it did not. The
+# prefix is short, has no sentence punctuation, and is not itself a structural token; the number is
+# the bill's exact next clause, which is the one thing that makes the reading safe — 146 of the 264
+# readings rejected for a skipped clause carried the missing number in exactly this position.
+_SPLICED_NOTE_RE = re.compile(
+    r"^(?P<note>[^\d(\[.;:\s][^.;:]{0,79}?\.?)\s+(?P<num>\d{1,4}[A-Z]{0,2})\.\s+(?P<rest>\S.*)$"
+)
+
+# A note that closes with its own full stop — `Penalty.`, `Activity.`, in the older typesetting —
+# is accepted only when it is as short as a label: a sentence tail before a number would be body
+# text read as a heading, which ADR-027 publishes under a different rule, so the bound is tight.
+_SPLICED_NOTE_WITH_STOP_MAX_WORDS = 5
+
+
+def _spliced_provision(text: str, last_clause: int | None) -> tuple[str, str, str] | None:
+    """`(note, num, rest)` when a marginal note has been read onto the front of the next clause."""
+    if last_clause is None:
+        return None
+    match = _SPLICED_NOTE_RE.match(text)
+    if match is None:
+        return None
+    digits = re.match(r"\d+", match.group("num"))
+    if digits is None or int(digits.group()) != last_clause + 1:
+        return None
+    note = match.group("note").strip()
+    if not note or note[0].islower() or len(note) > MAX_MARGINAL_NOTE_CHARS:
+        return None
+    if note.endswith(".") and len(note.split()) > _SPLICED_NOTE_WITH_STOP_MAX_WORDS:
+        return None
+    return note, match.group("num").upper(), match.group("rest").strip()
+
+
 def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Node:
     """Build the provision tree from markdown text.
 
@@ -171,37 +327,62 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
     root = Node(node_type="body", num=None, heading=None, eid="")
     containers: list[Node] = []  # open part/chapter/schedule ancestors, root-most first
     provision: Node | None = None
-    open_subsection: Node | None = None
-    open_paragraph: Node | None = None
-    last_letter: tuple[str, str] | None = None
+    lists: _OpenLists | None = None
     in_schedule = False
     in_quotation = False
     last_clause: int | None = None
-
-    def eid_of(parent: Node, node_type: str, token: str) -> str:
-        piece = f"{EID_PREFIXES[node_type]}_{token}"
-        return f"{parent.eid}__{piece}" if parent.eid else piece
-
-    def reset_provision_state() -> None:
-        nonlocal provision, open_subsection, open_paragraph, last_letter
-        provision, open_subsection, open_paragraph, last_letter = None, None, None, None
+    # The previous content line and whether it was printed as a heading: what tells a wrapped
+    # sentence tail (`... dinyatakan dalam` / `Jadual.`) apart from a heading, and a wrapped
+    # reference (`... under subsection` / `(1), subsection 13(3) ...`) apart from an opener.
+    previous_text = ""
+    previous_was_heading = False
 
     def innermost_open() -> Node:
-        if open_paragraph is not None:
-            return open_paragraph
-        if open_subsection is not None:
-            return open_subsection
-        if provision is not None:
-            return provision
+        if lists is not None:
+            return lists.innermost
         if containers:
             return containers[-1]
         return root
 
-    lines = [strip_markdown_line(raw_line) for raw_line in markdown_text.splitlines()]
+    def open_provision(node_type: str, num: str, note: str | None, leading: str) -> None:
+        nonlocal provision, lists, last_clause
+        parent = containers[-1] if containers else root
+        node = Node(node_type, num, note, _eid_of(parent, node_type, num))
+        parent.children.append(node)
+        provision, lists = node, _OpenLists(node)
+        if not in_schedule:
+            digits = re.match(r"\d+", num)
+            if digits is not None:
+                last_clause = int(digits.group())
+        if leading:
+            # Body text that ran in after the provision number. It is the provision's own
+            # prose, so it belongs in its paragraphs — never in `heading`, which is published
+            # under a different rights rule (ADR-027). When it opens a subsection, that
+            # subsection becomes the open one so a following `(2)` continues the same list
+            # rather than attaching to the provision.
+            inline = parenthesised(leading)
+            if inline is not None and inline[0] == "subsection":
+                _, token, remainder = inline
+                child = lists.place("subsection", token)
+                if child is not None and remainder:
+                    child.paragraphs.append(remainder)
+            else:
+                node.paragraphs.append(leading)
+
+    raw_lines = markdown_text.splitlines()
+    lines = [strip_markdown_line(raw_line) for raw_line in raw_lines]
     for index in range(body_start(lines), len(lines)):
         text = lines[index]
         if not text:
             continue
+        is_heading = raw_lines[index].lstrip().startswith("#")
+        # `previous` is the content line before this one; `continues_sentence` says it was prose
+        # rather than a heading, so its ending can be read for whether the sentence ran on.
+        previous, continues_sentence = (
+            previous_text,
+            bool(previous_text) and not previous_was_heading,
+        )
+        previous_text, previous_was_heading = text, is_heading
         if arrangement_heading(text) is not None:
             # Only reachable for a document whose body opening `body_start` could not find, so the
             # Arrangement could not be bounded and the whole document is being read. Skipping the
@@ -222,10 +403,16 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
         # inserts it, so it goes into the introducing provision's paragraphs rather than being
         # dropped: that is both true and what keeps the gate's coverage measure whole.
         #
-        # A span opens only on a line that begins with a mark and carries an odd number of them, so
-        # a defined term (`"revised law" means...`, balanced) is left alone; it shuts on the next
-        # odd-marked line, or on the bill's next clause, whichever comes first.
+        # A span opens only on a line that carries an odd number of marks and either begins with
+        # one or introduces one after a colon or dash (`... yang berikut: "(d) ...`), so a defined
+        # term (`"revised law" means...`, balanced) is left alone; it shuts on the next odd-marked
+        # line, or on the bill's next clause, whichever comes first.
         odd_marks = quotation_marks(text) % 2 == 1
+        # A quotation introduced mid-line — `3. Akta ibu dipinda dengan memasukkan ... yang
+        # berikut: " Akses 53A. (1) ...` — opens *after* this line has been read for what it is:
+        # the clause, paragraph or prose that introduces it. Reading the whole line as quoted
+        # text lost the introducing clause itself (measured, on the first attempt).
+        introduces = odd_marks and opens_quotation(text) and text[0] not in _QUOTE_CHARS
         if in_quotation:
             if not _resumes_clause_sequence(text, last_clause):
                 innermost_open().paragraphs.append(text)
@@ -233,33 +420,65 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
                     in_quotation = False
                 continue
             in_quotation = False
-        elif odd_marks and opens_quotation(text):
+        elif odd_marks and text[0] in _QUOTE_CHARS:
             in_quotation = True
             innermost_open().paragraphs.append(text)
             continue
 
+        if _HEADING_WORD_ALONE_RE.fullmatch(text):
+            # A heading word with its number on the next line — `BAHAGIAN` / `II`, `JADUAL` /
+            # `KEDUA` typeset over two lines (measured: 178 readings, 165 of them rejected because
+            # every Part after the first went unread), or `Jadual` / `Pertama.` as a marginal note
+            # the reading split. Joined, the first reads as the heading it is and the second as
+            # the sentence tail it is; apart, a Part is lost or a first schedule invented.
+            following_index = next(
+                (j for j in range(index + 1, len(lines)) if raw_lines[j].strip()), None
+            )
+            following = _heading_number_line(raw_lines, lines, following_index)
+            if following is not None and following_index is not None:
+                joined = f"{text} {following}"
+                if container_heading(joined) is not None or schedule_heading(joined) is not None:
+                    text = joined
+                    lines[following_index] = ""
         container = container_heading(text)
+        schedule_num = schedule_heading(text) if container is None else None
+        if (container is not None or schedule_num is not None) and (
+            is_sentence_tail(text) and continues_sentence and not _ends_sentence(previous)
+        ):
+            # `... yang dinyatakan dalam` then `Jadual.`: the tail of a sentence that wrapped onto
+            # its own line and was read as a heading for being short. A heading is a label and
+            # does not end in a full stop; a sentence does, and the line before it broke off
+            # mid-sentence. Read as a false schedule, it swallowed every clause after it.
+            innermost_open().paragraphs.append(text)
+            continue
         if container is not None:
             node_type, num, heading = container
-            if node_type == "part":
-                parent, containers = root, []
+            if in_schedule and containers and containers[0].node_type == "schedule":
+                # A Part or Chapter *inside* a Schedule — a treaty's chapters, a Supply Bill's
+                # parts — stays inside it. Leaving the schedule here re-rooted the Part in the body
+                # and turned the schedule's numbered items back into clauses.
+                schedule = containers[0]
+                if node_type == "part" or len(containers) == 1:
+                    parent, containers = schedule, [schedule]
+                else:
+                    parent, containers = containers[1], containers[:2]
+            elif node_type == "part":
+                parent, containers, in_schedule = root, [], False
             elif containers and containers[0].node_type == "part":
-                parent, containers = containers[0], containers[:1]
+                parent, containers, in_schedule = containers[0], containers[:1], False
             else:
-                parent, containers = root, []
-            node = Node(node_type, num, heading or None, eid_of(parent, node_type, num))
+                parent, containers, in_schedule = root, [], False
+            node = Node(node_type, num, heading or None, _eid_of(parent, node_type, num))
             parent.children.append(node)
             containers.append(node)
-            reset_provision_state()
-            in_schedule = False
+            provision, lists = None, None
             continue
 
-        schedule_num = schedule_heading(text)
         if schedule_num is not None:
-            node = Node("schedule", schedule_num, None, eid_of(root, "schedule", schedule_num))
+            node = Node("schedule", schedule_num, None, _eid_of(root, "schedule", schedule_num))
             root.children.append(node)
             containers = [node]
-            reset_provision_state()
+            provision, lists = None, None
             in_schedule = True
             continue
 
@@ -272,65 +491,89 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
                 # without the quotation marks that would have marked it. It is still text the
                 # bill prints, so it joins the prose rather than disappearing.
                 innermost_open().paragraphs.append(text)
+                in_quotation = introduces
                 continue
-            parent = containers[-1] if containers else root
             note, leading = split_marginal_note(rest)
-            node = Node(node_type, num, note, eid_of(parent, node_type, num))
-            parent.children.append(node)
-            provision, open_subsection, open_paragraph, last_letter = node, None, None, None
-            if not in_schedule:
-                digits = re.match(r"\d+", num)
-                if digits is not None:
-                    last_clause = int(digits.group())
-            if leading:
-                # Body text that ran in after the provision number. It is the provision's own
-                # prose, so it belongs in its paragraphs — never in `heading`, which is published
-                # under a different rights rule (ADR-027). When it opens a subsection, that
-                # subsection becomes the open one so a following `(2)` continues the same list
-                # rather than attaching to the provision.
-                inline = parenthesised(leading)
-                if inline is not None and inline[0] == "subsection":
-                    _, token, remainder = inline
-                    child = Node("subsection", token, None, eid_of(node, "subsection", token))
-                    if remainder:
-                        child.paragraphs.append(remainder)
-                    node.children.append(child)
-                    open_subsection = child
-                else:
-                    node.paragraphs.append(leading)
+            open_provision(node_type, num, note, leading)
+            in_quotation = introduces
             continue
 
-        parenthesised_match = parenthesised(text) if provision is not None else None
+        # Not after a colon: `...substituting for section 4 the following section:` is followed by
+        # the Act's section 4, quoted, and when the reading has lost the quotation marks and the
+        # Act's number happens to be the bill's next, the splice rule is the one thing that would
+        # read it as a clause (measured: two readings, both this shape).
+        spliced = (
+            _spliced_provision(text, last_clause)
+            if not in_schedule and not (continues_sentence and previous.endswith(":"))
+            else None
+        )
+        if spliced is not None:
+            note, num, rest = spliced
+            open_provision(unit, num, note, rest)
+            in_quotation = introduces
+            continue
+
+        parenthesised_match = parenthesised(text) if lists is not None else None
         if parenthesised_match is not None:
-            assert provision is not None  # guarded above; narrows for the parent lookups below
+            assert lists is not None  # guarded above; narrows for the placement below
             kind, token, rest = parenthesised_match
-            if kind == "subsection":
-                node = Node("subsection", token, None, eid_of(provision, "subsection", token))
-                provision.children.append(node)
-                open_subsection, open_paragraph, last_letter = node, None, None
-            else:
-                resolved = resolve_letter(
-                    token,
-                    previous=last_letter[0] if last_letter else None,
-                    previous_type=last_letter[1] if last_letter else None,
-                )
-                if resolved == "paragraph":
-                    parent = open_subsection or provision
-                    node = Node("paragraph", token, None, eid_of(parent, "paragraph", token))
-                    parent.children.append(node)
-                    open_paragraph = node
-                else:
-                    parent = open_paragraph or open_subsection or provision
-                    node = Node("subparagraph", token, None, eid_of(parent, "subparagraph", token))
-                    parent.children.append(node)
-                last_letter = (token, resolved)
-            if rest:
-                node.paragraphs.append(rest)
+            if _REFERENCE_TAIL_RE.match(rest) or (
+                continues_sentence and ends_in_reference(previous)
+            ):
+                # `(1), subsection 13(3) shall...` after a line ending `under subsection`: the
+                # number of a cross-reference, wrapped onto the next line, wearing the shape of a
+                # subsection opening. It is the sentence continuing, so it stays prose.
+                lists.innermost.paragraphs.append(text)
+                in_quotation = introduces
+                continue
+            if token in ("1", "I") and lists.paragraph_list_at_k():
+                kind, token = "letter", "l"
+            placed = lists.place(kind, token)
+            if placed is None:
+                lists.innermost.paragraphs.append(text)
+            elif rest:
+                placed.paragraphs.append(rest)
+            in_quotation = introduces
             continue
 
         innermost_open().paragraphs.append(text)
+        in_quotation = introduces
 
     return root
+
+
+# `BAHAGIAN`, `Part`, `Jadual` alone on a line: a heading whose number wrapped onto the next —
+# and that next line has to be the number alone, `II` or `Kedua.`, never `27. Pindaan seksyen`,
+# or the join reads the clause after a stray `Bahagian` as Part 27 (measured: three readings).
+_HEADING_WORD_ALONE_RE = re.compile(r"(?i)bahagian|part|bab|chapter|jadual|schedule")
+_HEADING_NUMBER_ALONE_RE = re.compile(
+    r"(?i)(?:[IVXLCDM]+|\d+[A-Z]?|pertama|kedua|ketiga|keempat|kelima|keenam|ketujuh|kelapan|"
+    r"kesembilan|kesepuluh)\.?"
+)
+
+# The reader files a heading's number as a marginal note when the two share a baseline and the
+# number is short: `## CHAPTER` then `<!-- marginal: II -->`. The comment is furniture to every
+# other rule, but here it is the number the heading is missing.
+_MARGINAL_COMMENT_RE = re.compile(r"^<!--\s*marginal:\s*(?P<text>.*?)\s*-->$")
+
+
+def _heading_number_line(raw_lines: list[str], lines: list[str], index: int | None) -> str | None:
+    """The bare number a heading word's next line carries, from text or a marginal comment."""
+    if index is None:
+        return None
+    comment = _MARGINAL_COMMENT_RE.match(raw_lines[index].strip())
+    candidate = comment.group("text") if comment else lines[index]
+    return candidate if _HEADING_NUMBER_ALONE_RE.fullmatch(candidate) else None
+
+
+# A line that closes its sentence. A colon or a dash does not: both introduce what follows —
+# `Jadual Pertama Akta ibu adalah dipinda—` then `Jadual` / `Pertama.` — so the line after them
+# is the same sentence still running.
+_SENTENCE_END_RE = re.compile(r"[.;!?](?:[\"“”'’)\]]*)$")
+
+
+def _ends_sentence(text: str) -> bool:
+    return _SENTENCE_END_RE.search(text.strip()) is not None
 
 
 def assign_eids(root: Node) -> None:

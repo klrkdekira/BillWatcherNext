@@ -944,3 +944,30 @@ def test_a_failure_verdict_carries_the_error_and_no_tree() -> None:
     assert detail["error"] == "RuntimeError: the endpoint timed out"
     assert detail["min_coverage"] == fidelity.MIN_TEXT_COVERAGE
     assert detail["findings"] == []
+
+
+def test_an_inserted_paragraph_letter_and_a_doubled_letter_step_are_consecutive() -> None:
+    """`(a)` -> `(aa)` -> `(b)` is the lettered `5` -> `5A` -> `6`; `(cc)` -> `(dd)` is the doubled
+    list older drafting printed beneath `(i)`, `(ii)`, not the numerals 200 -> 500."""
+    root = Node("body", None, None, "")
+    clause = Node("clause", "1", None, "cl_1", ["Tajuk"])
+    root.children.append(clause)
+    for letter in ("a", "aa", "b"):
+        clause.children.append(Node("paragraph", letter, None, "", [f"perenggan {letter}"]))
+    roman = Node("subparagraph", "i", None, "", ["subperenggan"])
+    clause.children[-1].children.append(roman)
+    for doubled in ("cc", "dd"):
+        roman.children.append(Node("subparagraph", doubled, None, "", [f"butiran {doubled}"]))
+    assign_eids(root)
+    verdict = fidelity.evaluate(
+        root, "1. Tajuk perenggan a aa b subperenggan butiran cc dd", unit="clause"
+    )
+    assert [f.kind for f in verdict.findings] == []
+
+    # A genuine gap in a lettered run is still a gap.
+    clause.children.append(Node("paragraph", "d", None, "", ["perenggan d"]))
+    assign_eids(root)
+    verdict = fidelity.evaluate(
+        root, "1. Tajuk perenggan a aa b d subperenggan butiran cc dd", unit="clause"
+    )
+    assert [(f.kind, f.expected, f.found) for f in verdict.findings] == [("sequence_gap", "c", "d")]

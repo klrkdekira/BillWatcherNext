@@ -118,3 +118,113 @@ def test_marginal_amendment_annotations_are_captured_in_both_languages() -> None
         ("deletion", "Akta A1"),
     )
     assert amendment_annotations("no annotation here") == ()
+
+
+# --- The classifiers added for AKN_VERSION 1.4.0 ---
+
+
+def test_a_list_continues_by_the_kind_of_list_it_is_and_by_case() -> None:
+    from billwatcher.graph.vocabulary import continues_run
+
+    assert continues_run("h", "i", "paragraph")
+    assert continues_run("a", "aa", "paragraph")  # an inserted paragraph
+    assert continues_run("aa", "b", "paragraph")  # and the list resuming after it
+    assert not continues_run("i", "ii", "paragraph")  # `(ii)` is the roman list, never an insertion
+    assert not continues_run("a", "A", "paragraph")  # case is a different depth
+    assert continues_run("ii", "iii", "subparagraph")
+    assert not continues_run("ii", "b", "subparagraph")
+    assert continues_run("A", "B", "subparagraph")
+    assert continues_run("C", "D", "subparagraph")  # a letter step, though both are numerals
+    assert continues_run("aa", "bb", "subparagraph")
+    assert continues_run("cc", "dd", "subparagraph")  # not 200 -> 500
+    assert not continues_run("C", "iii", "subparagraph")
+
+
+def test_letter_insertions_and_doubled_steps() -> None:
+    from billwatcher.graph.vocabulary import is_doubled_step, is_letter_insertion
+
+    assert is_letter_insertion("a", "aa") and is_letter_insertion("aa", "b")
+    assert not is_letter_insertion("a", "b") and not is_letter_insertion("i", "ii")
+    assert not is_letter_insertion("b", "aa")
+    assert is_doubled_step("aa", "bb") and is_doubled_step("CC", "DD")
+    assert not is_doubled_step("aa", "cc") and not is_doubled_step("aa", "BB")
+    assert not is_doubled_step("ii", "iii")
+
+
+def test_a_line_that_breaks_off_inside_a_reference_is_recognised() -> None:
+    from billwatcher.graph.vocabulary import ends_in_reference
+
+    assert ends_in_reference("Where a detention order is suspended under subsection")
+    assert ends_in_reference("dengan memasukkan, selepas sahaja perenggan")
+    assert ends_in_reference('the words specified in paragraph"')
+    assert not ends_in_reference("the following paragraph:")
+    assert not ends_in_reference("comes into operation on a date to be appointed,")  # a comma alone
+    assert not ends_in_reference("Seseorang hendaklah melaporkan kepada Pesuruhjaya.")
+
+
+def test_a_heading_shaped_line_ending_like_a_sentence_is_told_apart_from_a_label() -> None:
+    from billwatcher.graph.vocabulary import is_sentence_tail
+
+    assert (
+        is_sentence_tail("Jadual.")
+        and is_sentence_tail("Bahagian IV.")
+        and is_sentence_tail('Jadual.".')
+    )
+    assert not is_sentence_tail("JADUAL") and not is_sentence_tail("BAHAGIAN IV")
+
+
+def test_a_quotation_may_be_introduced_mid_line_after_a_colon_or_dash() -> None:
+    from billwatcher.graph.vocabulary import opens_quotation
+
+    assert opens_quotation('"Powers of examination')
+    assert opens_quotation('(c), perenggan-perenggan yang berikut: "(d) melantik anggota')
+    assert opens_quotation("seksyen yang berikut: “Akses")
+    assert not opens_quotation('by substituting for the word "twelve" the word "twenty-four".')
+    assert not opens_quotation('the words "such company, firm,')
+
+
+def test_the_back_matter_heading_may_run_into_the_statements_first_words_and_nothing_else() -> None:
+    from billwatcher.graph.vocabulary import back_matter_heading
+
+    assert back_matter_heading("HURAIAN") and back_matter_heading("EXPLANATORY STATEMENT")
+    assert back_matter_heading("EXPLANATORY STATEMENT This Bill seeks to amend the Act.")
+    assert back_matter_heading("EXPLANATORY STATEMENT the Bill")
+    assert back_matter_heading("HURAIAN Rang Undang-Undang ini bertujuan untuk meminda Akta.")
+    assert back_matter_heading("HURA1AN")  # the reading's own `I`
+    assert not back_matter_heading('Huraian 1—Perkataan "kelakuan" dalam seksyen ini')
+    assert not back_matter_heading("Huraian mengenai barang-barang")
+
+
+def test_a_line_that_merely_begins_with_a_part_reference_is_not_a_part_heading() -> None:
+    assert container_heading("BAHAGIAN II PENDAFTARAN") == ("part", "II", "PENDAFTARAN")
+    assert container_heading("Part II Registration") == ("part", "II", "Registration")
+    assert container_heading("BAHAGIAN III PENUBUHAN, KEANGGOTAAN DAN FUNGSI LEMBAGA") is not None
+    assert container_heading("Bahagian III hingga VI Akta ini dan kesalahan-kesalahan yang") is None
+    assert (
+        container_heading("Bahagian 1 Jadual 4, orang berdaftar itu hendaklah mematuhi apa-")
+        is None
+    )
+
+
+def test_a_schedule_heading_may_carry_its_enabling_provision_in_brackets() -> None:
+    assert schedule_heading("FIRST SCHEDULE [Section 14]") == "1"
+    assert schedule_heading("JADUAL KEDUA [Subseksyen 7(5)]") == "2"
+
+
+def test_the_body_openings_include_the_bare_intituled_word_but_never_a_bare_running_header() -> (
+    None
+):
+    from billwatcher.graph.vocabulary import body_opening
+
+    for opening in (
+        "bernama",
+        "intituled",
+        "ABILL",
+        "A BILL",
+        "MAKA, OLEH YANG DEMIKIAN, DIPERBUAT oleh Parlimen Malaysia seperti yang berikut:",
+        "NOW, THEREFORE, IT IS ENACTED by the Parliament of Malaysia as follows:",
+        "BE IX ENACTED by Duli Yang Maha Mulia",  # the reading's own `T`
+    ):
+        assert body_opening(opening), opening
+    assert not body_opening("BILL")  # the running header on every page of an English bill
+    assert not body_opening("Rang Undang-Undang ini akan melibatkan Kerajaan dalam perbelanjaan")

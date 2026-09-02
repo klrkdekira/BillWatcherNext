@@ -157,13 +157,71 @@ _CONTAINER_TYPE = MappingProxyType(
 )
 
 
+# Words a heading may carry in lower case without being prose: connectives, in both languages.
+_HEADING_FUNCTION_WORDS = frozenset(
+    {
+        "dan",
+        "atau",
+        "yang",
+        "di",
+        "ke",
+        "bagi",
+        "untuk",
+        "dengan",
+        "of",
+        "and",
+        "or",
+        "the",
+        "to",
+        "for",
+        "in",
+        "on",
+        "by",
+        "under",
+        "dalam",
+        "tentang",
+        "relating",
+        "berhubungan",
+    }
+)
+
+
+def _reads_as_prose(heading: str) -> bool:
+    """Whether a heading's text is a sentence fragment rather than a title.
+
+    `Bahagian III hingga VI Akta ini dan kesalahan-kesalahan yang` is the long title wrapped onto a
+    line that begins with a Part reference; `Bahagian 1 Jadual 4, orang berdaftar itu hendaklah
+    mematuhi apa-` is a clause. A title is set in capitals or title case — `BAHAGIAN II
+    PENDAFTARAN`, `Part II Registration` — so a heading that opens with a lower-case word, or runs
+    to several words most of which are lower-case, is the sentence it looks like.
+    """
+    words = heading.split()
+    if not words:
+        return False
+    if words[0][0].islower():
+        return True
+    lower = [
+        word
+        for word in words
+        if word[0].islower() and word.casefold() not in _HEADING_FUNCTION_WORDS
+    ]
+    return len(words) >= 4 and len(lower) > len(words) / 2
+
+
 def container_heading(text: str) -> tuple[str, str, str] | None:
-    """Classify a line as a Part or Chapter heading, returning `(type, num, heading)`."""
+    """Classify a line as a Part or Chapter heading, returning `(type, num, heading)`.
+
+    A line that merely *begins* with a Part reference — a wrapped long title, a clause — is not one:
+    see `_reads_as_prose`.
+    """
     match = _CONTAINER_RE.match(" ".join(text.split()))
     if not match:
         return None
+    heading = match.group("heading").strip(" .")
+    if _reads_as_prose(heading):
+        return None
     node_type = _CONTAINER_TYPE[match.group("word").casefold()]
-    return node_type, match.group("num").upper(), match.group("heading").strip(" .")
+    return node_type, match.group("num").upper(), heading
 
 
 # `Jadual Pertama`, `JADUAL KEDUA`, `First Schedule`, `SCHEDULE`. Schedules restart their own
@@ -173,7 +231,9 @@ _SCHEDULE_RE = re.compile(
     r"^\s*(?:(?P<ordinal_en>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+)?"
     r"(?P<word>jadual|schedule)"
     r"(?:\s+(?P<ordinal_ms>pertama|kedua|ketiga|keempat|kelima|keenam|ketujuh|kelapan|"
-    r"kesembilan|kesepuluh)|\s+(?P<num>[IVXLCDM]+|\d+))?\W*$",
+    r"kesembilan|kesepuluh)|\s+(?P<num>[IVXLCDM]+|\d+))?"
+    # `FIRST SCHEDULE [Section 14]`: the enabling provision, bracketed on the heading line.
+    r"(?:\s*\[[^\]]*\])?\W*$",
     re.IGNORECASE,
 )
 
@@ -228,15 +288,70 @@ def schedule_heading(text: str) -> str | None:
 # mentions the word inline is not mistaken for it. Shared by the structure parser (which must not
 # read the statement's numbered paragraphs as clauses — they restart at the bill's own numbers and
 # collide with the real ones) and the fidelity gate (which excludes the same text from coverage).
+#
+# The heading is matched alone *or* run into the statement's own first words. A printed heading
+# sits on its own line, but the local reading joins it onto the paragraph beneath when the two
+# share a block — `EXPLANATORY STATEMENT This Bill seeks to amend...`, `HURAIAN Rang Undang-Undang
+# ini bertujuan...` — and a heading the parser then failed to see left every numbered paragraph of
+# the statement to be read as a clause (measured: 32 readings rejected for exactly this). What may
+# follow is deliberately narrow: the statement opens, in every bill measured, with "This Bill" /
+# "The ... Bill" or "Rang Undang-Undang". Anything else after the word is not the heading — a Penal
+# Code amendment prints `Huraian 1—Perkataan "kelakuan"...` as an *Explanation* inside a quoted
+# section, and a rule that took any trailing text would cut the body open there. `HURA1AN` is the
+# reading's own `I`, as one bill prints it.
 _BACK_MATTER_HEADING_RE = re.compile(
-    r"^(huraian|implikasi\s+kewangan|explanatory\s+statement|financial\s+implications)$",
+    r"^(?:(?:hura[i1l]an|implikasi\s+kewangan)(?:\s+rang\s+undang-?undang\b.*)?"
+    r"|(?:explanatory\s+statement|financial\s+implications)(?:\s+(?:this|the)\b.*)?)$",
     re.IGNORECASE,
 )
 
 
 def back_matter_heading(text: str) -> bool:
     """Whether this line is the heading that opens a bill's back matter."""
-    return _BACK_MATTER_HEADING_RE.match(text) is not None
+    return _BACK_MATTER_HEADING_RE.match(" ".join(text.split())) is not None
+
+
+# A line that stops mid-reference: `...suspended under subsection` / `...selepas sahaja perenggan`,
+# with the number it points at wrapped onto the next line. That next line — `(1), subsection 13(3)
+# shall...`, `(c), perenggan baru (d) berikut:` — then opens with exactly the token a real
+# subsection or paragraph opens with, and reading it as one gives the provision a second `(1)` and
+# a paragraph run that jumps backwards (measured: 285 rejected readings carried such a line). The
+# words are the structural nouns that take a number in either language. A real opener is never
+# preceded by one of them without punctuation: a sentence that ends on the bare word "subsection"
+# ends with a full stop, and a list is introduced by a colon or a dash.
+_REFERENCE_WORD_RE = re.compile(
+    r"\b(?:sub-?sections?|subseksyen|sections?|seksyen|sub-?paragraphs?|subperenggan|"
+    r"paragraphs?|perenggan|clauses?|fasal|items?|butiran|articles?|perkara|sub-?items?|"
+    r"subbutiran|regulations?|peraturan|subperaturan|rules?|kaedah|subkaedah|schedules?|jadual|"
+    r"parts?|bahagian|chapters?|bab|proviso|provisos)$",
+    re.IGNORECASE,
+)
+
+
+def ends_in_reference(text: str) -> bool:
+    """Whether this line breaks off inside a cross-reference, its number wrapped onto the next.
+
+    True only for a line ending on a structural noun (`under subsection`, `perenggan`). A comma is
+    deliberately not enough: a subsection whose full stop the reading printed as a comma is
+    common, and treating the next `(3)` as its continuation lost real subsections (measured).
+    Trailing quotation marks and brackets are ignored so `...in paragraph"` behaves as
+    `...in paragraph`.
+    """
+    stripped = " ".join(text.split()).rstrip("\"“”')]")
+    return _REFERENCE_WORD_RE.search(stripped) is not None
+
+
+# What a heading-shaped line may end with and still be a heading. A Part or Schedule heading is a
+# label; the reading that produced `Jadual.` or `Bahagian IV.` was the tail of a sentence — `...
+# yang dinyatakan dalam Jadual.` — that wrapped onto its own line and was read as a heading for
+# being short. Measured: 199 such `Jadual.` / `Schedule.` lines across 145 readings, 124 of them
+# rejected, because the false schedule swallowed every clause after it as a schedule paragraph.
+_SENTENCE_TAIL_RE = re.compile(r"[.;:,](?:[\"“”'’)\]]*)$")
+
+
+def is_sentence_tail(text: str) -> bool:
+    """Whether a heading-shaped line ends like a sentence rather than like a label."""
+    return _SENTENCE_TAIL_RE.search(text.strip()) is not None
 
 
 # Where a bill's own text begins — and therefore where an Arrangement of Clauses above it ends.
@@ -260,13 +375,25 @@ def back_matter_heading(text: str) -> bool:
 # block after it, 536 print an enacting formula, and 614 print at least one of the two. The five
 # that print neither are read whole, as before — see `tree.body_start`, which will not truncate a
 # bill on a marker it cannot find.
+#
+# Re-measured over the 22 readings the first set of forms left unbounded: the title block also
+# prints as the bare word `bernama` / `intituled` on its own line (the title itself having been
+# read as the cover's), or as `ABILL` with its space lost — never a bare `BILL`, which is the
+# running header on every page of an English bill and sits inside the Arrangement as readily as
+# after it; and the enacting formula opens `MAKA,
+# OLEH YANG DEMIKIAN, DIPERBUAT oleh Parlimen...` or `NOW, THEREFORE, IT IS ENACTED...`, with the
+# words this pattern used to anchor on several words in. Each added form is a whole-line word or a
+# formula no clause begins with.
 _BODY_OPENING_RE = re.compile(
-    r"^(a\s+bill\b"
+    r"^(a\s*bill\b"
     r"|(suatu\s+)?rang\s+undang-?undang\b(?!\s+ini\b)"
-    r"|be\s+it\s+enacted\b"
+    r"|bernama$"
+    r"|intituled$"
+    r"|be\s+i[tx]\s+enacted\b"
+    r"|(now,?\s+therefore,?\s+)?it\s+is\s+enacted\b"
     r"|enacted\s+by\b"
     r"|diperbuat\s+oleh\b"
-    r"|maka\s+inilah\b)",
+    r"|maka,?\s+(inilah|oleh\s+yang\s+demikian)\b)",
     re.IGNORECASE,
 )
 
@@ -282,13 +409,27 @@ def body_opening(text: str) -> bool:
 # for clauses of the bill gives itself a second clause 13, a sequence that jumps to 95 and back,
 # and the duplicate eIds Gate P1 rejects. Straight and curly double quotes both occur; the single
 # quote is deliberately not here, because an apostrophe would open a span on every possessive.
-_QUOTE_CHARS = '"\u201c\u201d'
+QUOTE_CHARS = '"\u201c\u201d'
+_QUOTE_CHARS = QUOTE_CHARS
 _QUOTE_OPEN_RE = re.compile(f"^[{_QUOTE_CHARS}]")
 
 
+# The quotation may also open mid-line, after the words that introduce it — `...perenggan yang
+# berikut: "(d) melantik anggota...` — with the introducing clause and the first quoted line
+# sharing one printed line. The last mark on such a line follows a colon or a dash and nothing
+# closes it; a mark anywhere else mid-line is a defined term or a quoted word, which the parity
+# test already leaves alone.
+_QUOTE_INTRODUCED_RE = re.compile(f"[:—–-]\\s*[{_QUOTE_CHARS}][^{_QUOTE_CHARS}]*$")
+
+
 def opens_quotation(text: str) -> bool:
-    """Whether this line opens a quotation — the first line of amended text."""
-    return _QUOTE_OPEN_RE.match(text) is not None
+    """Whether this line opens a quotation — the first line of amended text.
+
+    Either the line begins with a mark, or its last mark is introduced by a colon or dash and
+    left unclosed (`...the following paragraph: "(d) ...`). The caller still decides by parity
+    whether the quotation runs on past this line.
+    """
+    return _QUOTE_OPEN_RE.match(text) is not None or _QUOTE_INTRODUCED_RE.search(text) is not None
 
 
 def quotation_marks(text: str) -> int:
@@ -404,6 +545,74 @@ def roman_successor(token: str) -> str:
     return to_roman(roman_value(token) + 1)
 
 
+def is_doubled_letter(token: str) -> bool:
+    """`aa`, `bb`, `CC`: one letter written twice or more, which drafters use two ways."""
+    return len(token) >= 2 and token.isalpha() and len(set(token.casefold())) == 1
+
+
+def is_doubled_step(previous: str, current: str) -> bool:
+    """`aa` -> `bb`, `cc` -> `dd`: consecutive entries of a doubled-letter list.
+
+    The form older drafting used for the list beneath `(i)`, `(ii)`, where a later style prints
+    `(A)`, `(B)`. Both letters of `cc` are roman numerals too, so read as numerals the step is
+    200 -> 500 and a gate would report a gap expecting `cci`; the letter reading is the one drafters
+    meant.
+    """
+    return (
+        is_doubled_letter(previous)
+        and is_doubled_letter(current)
+        and len(previous) == len(current)
+        and previous.isupper() == current.isupper()
+        and current[0].casefold() == alpha_successor(previous[0])
+    )
+
+
+def is_letter_insertion(previous: str, current: str) -> bool:
+    """Whether `current` follows `previous` through an inserted paragraph letter.
+
+    The lettered counterpart of `5` -> `5A` -> `6`: a paragraph inserted after `(a)` is `(aa)`,
+    and the list resumes at `(b)` — `by inserting after paragraph (a) the following paragraph:
+    "(aa) ..."` is how the bill itself puts it. Both steps, `a` -> `aa` and `aa` -> `b`, are
+    consecutive; `aa` -> `ab` (a second insertion) already is under the plain letter order.
+    """
+    left, right = previous.casefold(), current.casefold()
+    if right == "ii":
+        # `(ii)` after `(i)` is the roman list `(i)` opened, never an insertion: an `(i)` read as
+        # the ninth paragraph is the known ambiguity, and this is where it resolves itself.
+        return False
+    if is_doubled_letter(right) and right[0] == left and len(left) == 1:
+        return True
+    return is_doubled_letter(left) and len(right) == 1 and right == alpha_successor(left[0])
+
+
+def continues_run(previous: str, token: str, previous_type: str) -> bool:
+    """Whether `token` is the next entry of the open list `previous` belongs to.
+
+    Case is part of the answer. Malaysian drafting nests four lettered depths — `(a)` paragraphs,
+    `(i)` subparagraphs, and beneath those `(A)`, `(B)` — and `(A)` after `(a)` is a new, deeper
+    list, not the same letter twice. A paragraph list advances only by letter, allowing for an
+    inserted `(aa)`; a subparagraph list advances by roman numeral when it is written in lower-case
+    numerals, by letter when it is written in capitals (`C` -> `D` is a letter step there, as
+    `fidelity._compare` also reads it, even though both are numerals too), and by doubled letter
+    (`aa` -> `bb` -> `cc`) in the older drafting that used that form beneath `(i)`, `(ii)`.
+    """
+    if not previous or previous.isupper() != token.isupper():
+        return False
+    if previous_type == "paragraph":
+        return token.casefold() == alpha_successor(previous) or is_letter_insertion(previous, token)
+    if previous.islower() and is_roman(previous):
+        # `ii` is a doubled letter as well as a numeral, so the numeral reading is tried first:
+        # `(ii)` -> `(iii)` is the roman list advancing, `(cc)` -> `(dd)` the doubled one.
+        if is_roman(token) and token.casefold() == roman_successor(previous):
+            return True
+        return is_doubled_step(previous, token)
+    if is_doubled_letter(previous) and is_doubled_letter(token):
+        return is_doubled_step(previous, token)
+    if token.casefold() == alpha_successor(previous):
+        return True
+    return is_roman(previous) and is_roman(token) and token.casefold() == roman_successor(previous)
+
+
 def resolve_letter(token: str, *, previous: str | None, previous_type: str | None) -> str:
     """Decide whether a letter token opens a paragraph or a subparagraph.
 
@@ -421,15 +630,12 @@ def resolve_letter(token: str, *, previous: str | None, previous_type: str | Non
     misname a node the gate was never asked to check. Left unfixed until real corpus data shows
     whether indentation would help or would itself be an unreliable signal.
     """
-    if previous is not None and previous_type in {"paragraph", "subparagraph"}:
-        if previous_type == "paragraph" and token.casefold() == alpha_successor(previous):
-            return "paragraph"
-        if (
-            previous_type == "subparagraph"
-            and is_roman(token)
-            and token.casefold() == roman_successor(previous)
-        ):
-            return "subparagraph"
+    if (
+        previous is not None
+        and previous_type in {"paragraph", "subparagraph"}
+        and continues_run(previous, token, previous_type)
+    ):
+        return previous_type
     if is_roman(token) and roman_value(token) == 1:
         return "subparagraph"
     return "paragraph"

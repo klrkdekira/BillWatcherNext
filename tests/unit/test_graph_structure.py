@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from billwatcher.frbr import FrbrIdentityError, identity_from_bill
+from billwatcher.graph import fidelity
 from billwatcher.graph.akn_schema import validate_akn
 from billwatcher.graph.render import AKN_NS, frbr_date, render_akn
 from billwatcher.graph.structure import (
@@ -489,3 +490,375 @@ def test_a_back_matter_heading_before_any_provision_does_not_end_the_document() 
     )
     tree = parse_markdown_structure(markdown, unit="clause")
     assert [node.num for node in tree.children] == ["1"]
+
+
+# --- AKN_VERSION 1.4.0: what the parser stopped misreading, pinned on the shapes that failed ---
+
+
+def clause_numbers(root) -> list[str]:
+    found = []
+
+    def walk(node) -> None:
+        for child in node.children:
+            if child.node_type == "clause":
+                found.append(child.num)
+            walk(child)
+
+    walk(root)
+    return found
+
+
+def test_a_cross_reference_wrapped_onto_the_next_line_is_not_a_subsection() -> None:
+    """`(1), subsection 13(3) shall...` after a line ending `under subsection` is the sentence
+    continuing, and reading it as a subsection gave the clause a second `(1)`."""
+    markdown = "\n".join(
+        [
+            "15. (1) The Board may direct that a detention order be suspended.",
+            "(2) Where a detention order is suspended under subsection",
+            "(1), subsection 13(3) shall have effect as if the conditions were imposed.",
+            "(3) The Board may revoke the suspension.",
+        ]
+    )
+    clause = parse_markdown_structure(markdown, unit="clause").children[0]
+    assert [child.num for child in clause.children] == ["1", "2", "3"]
+    assert clause.children[1].paragraphs[-1].startswith("(1), subsection 13(3)")
+
+
+def test_a_token_glued_to_a_comma_or_conjunction_is_a_reference_tail() -> None:
+    markdown = "\n".join(
+        [
+            "2. Akta ibu dipinda—",
+            "(a) dalam perenggan (b), dengan memotong perkataan “dan”;",
+            "(b) dengan memasukkan, selepas sahaja perenggan",
+            "(b), perenggan baru (c) berikut:",
+            "(c) dan (d) hendaklah dibaca bersama.",
+        ]
+    )
+    clause = parse_markdown_structure(markdown, unit="clause").children[0]
+    assert [child.num for child in clause.children] == ["a", "b"]
+    assert clause.children[1].paragraphs == [
+        "dengan memasukkan, selepas sahaja perenggan",
+        "(b), perenggan baru (c) berikut:",
+        "(c) dan (d) hendaklah dibaca bersama.",
+    ]
+
+
+def test_a_sentence_tail_reading_jadual_is_not_a_schedule_heading() -> None:
+    """`...yang dinyatakan dalam` / `Jadual.`: the false schedule swallowed every clause after it.
+    A heading is a label and does not end in a full stop; a heading after a *closed* sentence
+    still is one."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Wang itu diperuntukkan bagi maksud yang dinyatakan dalam",
+            "## Jadual.",
+            "3. Peruntukan lain.",
+            "## JADUAL",
+            "1. Butiran pertama.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3"]
+    assert [child.node_type for child in root.children] == [
+        "clause",
+        "clause",
+        "clause",
+        "schedule",
+    ]
+    assert root.children[1].paragraphs[-1] == "Jadual."
+
+    closed = "1. Tajuk ringkas\n2. Wang itu diperuntukkan.\n## Jadual.\n1. Butiran pertama.\n"
+    root = parse_markdown_structure(closed, unit="clause")
+    assert [child.node_type for child in root.children] == ["clause", "clause", "schedule"]
+
+
+def test_a_paragraph_list_restarting_under_one_parent_is_read_as_that_parents_prose() -> None:
+    """An interpretation clause gives each defined term its own `(a)`, `(b)` list. One `para_a`
+    per parent cannot name them apart, so the lists become the subsection's text — every word
+    kept, no duplicate eId — rather than a rejected tree."""
+    markdown = "\n".join(
+        [
+            "2. Dalam Akta ini—",
+            "“pihak berkuasa” ertinya—",
+            "(a) sesuatu Universiti; atau",
+            "(b) sesuatu Kolej Universiti;",
+            "“Naib Canselor”—",
+            "(a) berhubung dengan Universiti, ertinya Naib Canselor Universiti itu;",
+            "(b) berhubung dengan Kolej Universiti, ertinya pihak berkuasa yang berkenaan.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    clause = root.children[0]
+    assert clause.children == []
+    assert "(a) sesuatu Universiti; atau" in clause.paragraphs
+    assert clause.paragraphs[-1].startswith("(b) berhubung dengan Kolej Universiti")
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_subsections_restarting_under_one_clause_are_the_inserted_sections_prose() -> None:
+    """An amendment inserting several sections prints each with its own `(1)`, `(2)`; with the
+    quotation marks lost they read as the clause's own subsections, twice over."""
+    markdown = "\n".join(
+        [
+            "6. The principal Act is amended by inserting the following sections",
+            "(1) An Inspector may examine any person.",
+            "(2) The person shall answer truthfully.",
+            "(1) The Director General may assess contributions.",
+            "(2) The assessment is sufficient proof of the claim.",
+            "7. Section 13 of the principal Act is amended.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["6", "7"]
+    assert root.children[0].children == []
+    assert sum(text.startswith("(1)") for text in root.children[0].paragraphs) == 2
+
+
+def test_capital_letters_nest_beneath_the_roman_list_and_the_roman_list_resumes() -> None:
+    """`(A)`, `(B)` beneath `(ii)`, then `(iii)` two levels up, then `(b)` three levels up: the
+    stack of open lists, not a single last letter, is what places each token."""
+    markdown = "\n".join(
+        [
+            "2. The principal Act is amended—",
+            "(a) in subsection (3)—",
+            "(i) by substituting for paragraph (a) the following paragraph;",
+            "(ii) in paragraph (b)—",
+            "(A) by substituting for the word “one” the word “two”;",
+            "(B) by deleting the word “and”; and",
+            "(iii) in paragraph (c), by deleting the word “or”;",
+            "(b) by inserting after subsection (10) the following subsection.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    clause = root.children[0]
+    a, b = clause.children
+    assert (a.num, b.num) == ("a", "b")
+    assert [child.num for child in a.children] == ["i", "ii", "iii"]
+    assert [child.num for child in a.children[1].children] == ["A", "B"]
+    assert all(child.node_type == "subparagraph" for child in a.children[1].children)
+    assign_eids(root)
+    assert a.children[1].children[0].eid == "cl_2__para_a__subpara_ii__subpara_A"
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_doubled_letters_are_the_older_drafting_for_the_list_beneath_roman_numerals() -> None:
+    markdown = "\n".join(
+        [
+            "1. The Corporation may make regulations—",
+            "(g) governing discipline, which may include—",
+            "(i) the establishment of a disciplinary board;",
+            "(ii) the procedure for disciplinary proceedings, providing that—",
+            "(aa) an officer is dismissed only after a hearing; and",
+            "(bb) an officer may appeal;",
+            "(h) any other matter.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    g, h = root.children[0].children
+    assert (g.num, h.num) == ("g", "h")
+    assert [child.num for child in g.children[1].children] == ["aa", "bb"]
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_an_inserted_paragraph_aa_sits_between_a_and_b_in_one_list() -> None:
+    markdown = "\n".join(
+        [
+            "1. In this Act “institution” means—",
+            "(a) a University;",
+            "(aa) a University College;",
+            "(b) a branch campus.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [child.num for child in root.children[0].children] == ["a", "aa", "b"]
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_a_ninth_paragraph_i_is_still_the_paragraph_and_ii_after_it_opens_the_roman_list() -> None:
+    """`(ii)` after `(i)` is never an inserted letter: it is the roman list `(i)` opened."""
+    markdown = "\n".join(
+        [
+            "3. The Minister may—",
+            *(f"({letter}) do the thing labelled {letter};" for letter in "abcdefgh"),
+            "(i) do the ninth thing, namely—",
+            "(ii) the second roman entry;",
+            "(j) do the tenth thing.",
+        ]
+    )
+    clause = parse_markdown_structure(markdown, unit="clause").children[0]
+    assert [child.num for child in clause.children] == list("abcdefghij")
+    assert [child.num for child in clause.children[8].children] == ["ii"]
+
+
+def test_a_one_or_a_capital_i_after_paragraph_k_is_the_letter_l() -> None:
+    for misread in ("1", "I"):
+        markdown = "\n".join(
+            [
+                "1. The Academy shall—",
+                *(f"({letter}) pursue objective {letter};" for letter in "abcdefghijk"),
+                f"({misread}) establish relations with overseas bodies;",
+                "(m) do such other things as may be requested.",
+            ]
+        )
+        root = parse_markdown_structure(markdown, unit="clause")
+        assert [child.num for child in root.children[0].children] == list("abcdefghijklm")
+        assign_eids(root)
+        assert fidelity.evaluate(root, markdown, unit="clause").passed, misread
+
+
+def test_a_marginal_note_spliced_ahead_of_the_next_clause_number_is_split_off_it() -> None:
+    """`Pindaan 4. Seksyen 5 Akta ibu...`: the note is the heading, the number opens the clause —
+    but only for the bill's exact next number, and never after an introducing colon, where the
+    same shape is a quoted section of the Act with its marks lost."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "Akta ini bolehlah dinamakan Akta Contoh (Pindaan) 2026.",
+            "Pindaan seksyen 5 2. Seksyen 5 Akta ibu dipinda dengan menggantikan perkataan “tiga”.",
+            "Penalty. 3. Any person who contravenes section 5 commits an offence.",
+            "4. The principal Act is amended by substituting for section 6 the following section:",
+            "Registrar. 5. (1) The Director General shall be the Registrar.",
+            "5. Section 7 of the principal Act is amended.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3", "4", "5"]
+    assert root.children[1].heading == "Pindaan seksyen 5"
+    assert root.children[2].heading == "Penalty."
+    assert root.children[3].paragraphs[-1].startswith("Registrar. 5. (1)")
+
+
+def test_a_quotation_introduced_mid_line_opens_after_the_introducing_clause_is_read() -> None:
+    """`3. Akta ibu dipinda ... yang berikut: "Akses` is clause 3 *and* the start of quoted text;
+    the first attempt read the whole line as quotation and lost the clause."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Tafsiran",
+            "3. Akta ibu dipinda dengan memasukkan selepas seksyen 53 seksyen yang berikut: “Akses",
+            "53A. (1) Mana-mana pegawai eksais boleh mengakses apa-apa komputer.",
+            "(2) Pegawai itu hendaklah merekodkan aksesnya.”.",
+            "4. Seksyen 60 Akta ibu dipinda.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3", "4"]
+    clause_3 = root.children[2]
+    assert clause_3.children == []
+    assert any(text.startswith("53A.") for text in clause_3.paragraphs)
+
+
+def test_a_back_matter_heading_run_into_its_first_sentence_still_ends_the_body() -> None:
+    markdown = "\n".join(
+        [
+            "1. This Act may be cited as the Example Act 2026.",
+            "2. Section 3 of the principal Act is amended.",
+            "EXPLANATORY STATEMENT This Bill seeks to amend the Example Act 1974.",
+            "2. Clause 1 of this Bill contains the short title.",
+        ]
+    )
+    assert clause_numbers(parse_markdown_structure(markdown, unit="clause")) == ["1", "2"]
+
+    # A Penal Code *Explanation* is not the statement: `Huraian 1—...` inside the body reads on.
+    penal = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "Huraian 1—Perkataan “kelakuan” dalam seksyen ini termasuklah perbuatan.",
+            "2. Tafsiran",
+        ]
+    )
+    assert clause_numbers(parse_markdown_structure(penal, unit="clause")) == ["1", "2"]
+
+
+def test_a_heading_word_with_its_number_on_the_next_line_is_one_heading() -> None:
+    """`BAHAGIAN` / `II`, `JADUAL` / `KEDUA`, and `CHAPTER` / `<!-- marginal: II -->` where the
+    reader filed the number as a note; never `Bahagian` / `2. Tafsiran`, which is a clause."""
+    markdown = "\n".join(
+        [
+            "## BAHAGIAN",
+            "## I",
+            "## PERMULAAN",
+            "1. Tajuk ringkas",
+            "## BAHAGIAN",
+            "## II",
+            "## PENDAFTARAN",
+            "2. Pendaftaran",
+            "## CHAPTER",
+            "<!-- marginal: II -->",
+            "## KUASA",
+            "3. Kuasa",
+            "## JADUAL",
+            "KEDUA",
+            "1. Butiran pertama.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [(child.node_type, child.num) for child in root.children] == [
+        ("part", "I"),
+        ("part", "II"),
+        ("schedule", "2"),
+    ]
+    assert [(c.node_type, c.num) for c in root.children[1].children] == [
+        ("clause", "2"),
+        ("chapter", "II"),
+    ]
+
+    stray = "1. Tajuk ringkas\nBahagian\n2. Tafsiran\n"
+    root = parse_markdown_structure(stray, unit="clause")
+    assert clause_numbers(root) == ["1", "2"]
+    assert not any(child.node_type == "part" for child in root.children)
+
+
+def test_a_part_or_chapter_inside_a_schedule_stays_inside_it() -> None:
+    """A Supply Bill's or a treaty's schedule is divided into Parts; re-rooting them in the body
+    turned the schedule's items back into clauses and duplicated the bill's own Part numbers."""
+    markdown = "\n".join(
+        [
+            "## Bahagian I",
+            "1. Tajuk ringkas",
+            "## JADUAL",
+            "## Bahagian I",
+            "1. Item pertama.",
+            "## Bahagian II",
+            "1. Item kedua.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [(child.node_type, child.num) for child in root.children] == [
+        ("part", "I"),
+        ("schedule", "1"),
+    ]
+    schedule = root.children[1]
+    assert [(child.node_type, child.num) for child in schedule.children] == [
+        ("part", "I"),
+        ("part", "II"),
+    ]
+    assert all(part.children[0].node_type == "paragraph" for part in schedule.children)
+    assign_eids(root)
+    assert schedule.children[1].children[0].eid == "sched_1__part_II__para_1"
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_the_arrangement_is_bounded_by_the_bare_intituled_word_and_the_long_enacting_formula() -> (
+    None
+):
+    from billwatcher.graph.tree import body_start, strip_markdown_line
+
+    markdown = "\n".join(
+        [
+            "## SUSUNAN FASAL",
+            "1. Tajuk ringkas",
+            "2. Tafsiran",
+            "bernama",
+            "Suatu Akta untuk mengadakan peruntukan bagi perkara yang berhubungan dengan Mufti.",
+            "MAKA, OLEH YANG DEMIKIAN, DIPERBUAT oleh Parlimen Malaysia seperti yang berikut:",
+            "1. Tajuk ringkas",
+            "2. Tafsiran",
+        ]
+    )
+    lines = [strip_markdown_line(line) for line in markdown.splitlines()]
+    assert lines[body_start(lines)] == "bernama"
+    assert clause_numbers(parse_markdown_structure(markdown, unit="clause")) == ["1", "2"]
