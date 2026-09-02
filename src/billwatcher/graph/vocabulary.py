@@ -21,11 +21,13 @@ NODE_TYPES = frozenset(
         "preamble",
         "part",
         "chapter",
+        "article",
         "section",
         "clause",
         "subsection",
         "paragraph",
         "subparagraph",
+        "list",
         "schedule",
     }
 )
@@ -34,11 +36,13 @@ EID_PREFIXES = MappingProxyType(
     {
         "part": "part",
         "chapter": "chp",
+        "article": "art",
         "section": "sec",
         "clause": "cl",
         "subsection": "subsec",
         "paragraph": "para",
         "subparagraph": "subpara",
+        "list": "list",
         "schedule": "sched",
     }
 )
@@ -48,14 +52,25 @@ AKN_ELEMENTS = MappingProxyType(
         "preamble": "preamble",
         "part": "part",
         "chapter": "chapter",
+        # A treaty set out in a Schedule is divided into Articles (ADR-043).
+        "article": "article",
         "section": "section",
         "clause": "clause",
         "subsection": "subsection",
         "paragraph": "paragraph",
         "subparagraph": "subparagraph",
+        # A lettered list that restarts under one parent — each defined term's own `(a)`, `(b)` in
+        # an interpretation clause — is one of several lists, numbered by position (ADR-043).
+        # Rendered as an hcontainer so its items stay hierarchy elements the gate can check.
+        "list": "hcontainer",
         # A schedule is an hcontainer inside <attachments>, not an element of its own.
         "schedule": "hcontainer",
     }
+)
+
+# The node types whose Akoma Ntoso element is an `hcontainer`, told apart by its `name` attribute.
+HCONTAINER_TYPES = frozenset(
+    kind for kind, element in AKN_ELEMENTS.items() if element == "hcontainer"
 )
 
 assert set(EID_PREFIXES) <= NODE_TYPES
@@ -68,11 +83,13 @@ NODE_LABELS = MappingProxyType(
         "preamble": ("Mukadimah", "Preamble"),
         "part": ("Bahagian", "Part"),
         "chapter": ("Bab", "Chapter"),
+        "article": ("Perkara", "Article"),
         "section": ("Seksyen", "Section"),
         "clause": ("Fasal", "Clause"),
         "subsection": ("Subseksyen", "Subsection"),
         "paragraph": ("Perenggan", "Paragraph"),
         "subparagraph": ("Subperenggan", "Subparagraph"),
+        "list": ("Senarai", "List"),
         "schedule": ("Jadual", "Schedule"),
     }
 )
@@ -145,16 +162,28 @@ def arrangement_heading(text: str) -> tuple[str, str] | None:
     return None
 
 
-# `Bahagian I`, `PART IV`, `Bab 2`, `Chapter 2`. The number may be roman or arabic; both are
-# published. A heading may follow on the same line or the next one.
+# `Bahagian I`, `PART IV`, `Bab 2`, `Chapter 2`, `ARTICLE 5`, `Perkara 5`. The number may be roman
+# or arabic; both are published. A heading may follow on the same line or the next one.
 _CONTAINER_RE = re.compile(
-    r"^\s*(?P<word>bahagian|part|bab|chapter)\s+(?P<num>[IVXLCDM]+|\d+[A-Z]?)\b\W*(?P<heading>.*)$",
+    r"^\s*(?P<word>bahagian|part|bab|chapter|article|perkara)\s+"
+    r"(?P<num>[IVXLCDM]+|\d+[A-Z]?)\b\W*(?P<heading>.*)$",
     re.IGNORECASE,
 )
 
 _CONTAINER_TYPE = MappingProxyType(
-    {"bahagian": "part", "part": "part", "bab": "chapter", "chapter": "chapter"}
+    {
+        "bahagian": "part",
+        "part": "part",
+        "bab": "chapter",
+        "chapter": "chapter",
+        "article": "article",
+        "perkara": "article",
+    }
 )
+
+# How containers nest: a Chapter sits inside a Part, an Article inside either. A new container
+# closes every open one of its own rank or deeper.
+CONTAINER_RANK = MappingProxyType({"part": 1, "chapter": 2, "article": 3})
 
 
 # Words a heading may carry in lower case without being prose: connectives, in both languages.
@@ -411,7 +440,16 @@ def body_opening(text: str) -> bool:
 # quote is deliberately not here, because an apostrophe would open a span on every possessive.
 QUOTE_CHARS = '"\u201c\u201d'
 _QUOTE_CHARS = QUOTE_CHARS
-_QUOTE_OPEN_RE = re.compile(f"^[{_QUOTE_CHARS}]")
+# The curly single quotes, counted apart. An amendment inserting a *definition* nests its marks —
+# `the following definition: ‘ "harvesting" means taking...’` — with the inserted text in single
+# curly quotes and the defined term in double ones inside them, so counting doubles alone found the
+# line balanced and read the definition's own `(a)`, `(b)` as the bill's paragraphs (measured: 70
+# readings). The opening `‘` is never anything but a quotation mark; the closing `’` is also the
+# apostrophe in `Minister’s` and `shareholders’ fund`, so it counts only where a quotation closes:
+# before punctuation, another mark, or the end of the line.
+_SINGLE_OPEN = "\u2018"
+_SINGLE_CLOSE_RE = re.compile('\u2019(?=[.;,:)\\]"\u201d\u2019\u2018]|\\s*$)')
+_QUOTE_OPEN_RE = re.compile(f"^[{_QUOTE_CHARS}{_SINGLE_OPEN}]")
 
 
 # The quotation may also open mid-line, after the words that introduce it — `...perenggan yang
@@ -419,15 +457,16 @@ _QUOTE_OPEN_RE = re.compile(f"^[{_QUOTE_CHARS}]")
 # sharing one printed line. The last mark on such a line follows a colon or a dash and nothing
 # closes it; a mark anywhere else mid-line is a defined term or a quoted word, which the parity
 # test already leaves alone.
-_QUOTE_INTRODUCED_RE = re.compile(f"[:—–-]\\s*[{_QUOTE_CHARS}][^{_QUOTE_CHARS}]*$")
+_QUOTE_INTRODUCED_RE = re.compile(f"[:—–-]\\s*[{_QUOTE_CHARS}{_SINGLE_OPEN}]")
 
 
 def opens_quotation(text: str) -> bool:
     """Whether this line opens a quotation — the first line of amended text.
 
-    Either the line begins with a mark, or its last mark is introduced by a colon or dash and
-    left unclosed (`...the following paragraph: "(d) ...`). The caller still decides by parity
-    whether the quotation runs on past this line.
+    Either the line begins with a mark, or a mark is introduced by a colon or dash somewhere on
+    it (`...the following paragraph: "(d) ...`, `...the following definition: ‘ "harvesting"...`).
+    The caller decides by parity whether the quotation runs on past this line, which is what keeps
+    a definition quoted and closed on one line from opening anything.
     """
     return _QUOTE_OPEN_RE.match(text) is not None or _QUOTE_INTRODUCED_RE.search(text) is not None
 
@@ -442,10 +481,16 @@ def quotation_marks(text: str) -> int:
     search` — carries one, and stays open until the mark that shuts it. Counting also survives the
     mark landing mid-line, which is where an amendment usually puts it — `..."; and`, `...".`.
     """
-    return sum(text.count(mark) for mark in _QUOTE_CHARS)
+    return (
+        sum(text.count(mark) for mark in _QUOTE_CHARS)
+        + text.count(_SINGLE_OPEN)
+        + len(_SINGLE_CLOSE_RE.findall(text))
+    )
 
 
-_PROVISION_NUM_RE = re.compile(r"^\s*(?P<num>\d{1,4}[A-Z]{0,2})\s*\.\s*(?P<rest>.*)$")
+# `(?!\d)`: a digit straight after the stop is a decimal — `26.7936” East`, a coordinate in a
+# schedule of wharves — and not the twenty-sixth item.
+_PROVISION_NUM_RE = re.compile(r"^\s*(?P<num>\d{1,4}[A-Z]{0,2})\s*\.(?!\d)\s*(?P<rest>.*)$")
 
 # `(1)`, `(2A)` open a subsection; `(a)`, `(bb)` a paragraph; `(i)`, `(iv)` a subparagraph.
 # The letter forms genuinely overlap — `i`, `v`, `x`, `l`, `c`, `d` and `m` are each both a
@@ -570,19 +615,28 @@ def is_doubled_step(previous: str, current: str) -> bool:
 def is_letter_insertion(previous: str, current: str) -> bool:
     """Whether `current` follows `previous` through an inserted paragraph letter.
 
-    The lettered counterpart of `5` -> `5A` -> `6`: a paragraph inserted after `(a)` is `(aa)`,
-    and the list resumes at `(b)` — `by inserting after paragraph (a) the following paragraph:
-    "(aa) ..."` is how the bill itself puts it. Both steps, `a` -> `aa` and `aa` -> `b`, are
-    consecutive; `aa` -> `ab` (a second insertion) already is under the plain letter order.
+    The lettered counterpart of `5` -> `5A` -> `6`: a paragraph inserted after `(e)` is `(ea)`,
+    a second one `(eb)`, and the list resumes at `(f)` — `by inserting after paragraph (e) the
+    following paragraph: "(ea) ..."` is how the bill itself puts it. Each of those steps is
+    consecutive. `(aa)` after `(a)` is the same convention at the first letter.
     """
     left, right = previous.casefold(), current.casefold()
     if right == "ii":
         # `(ii)` after `(i)` is the roman list `(i)` opened, never an insertion: an `(i)` read as
         # the ninth paragraph is the known ambiguity, and this is where it resolves itself.
         return False
-    if is_doubled_letter(right) and right[0] == left and len(left) == 1:
-        return True
-    return is_doubled_letter(left) and len(right) == 1 and right == alpha_successor(left[0])
+    if len(left) == 1 and len(right) == 2 and right[0] == left and right[1] == "a":
+        return True  # `(e)` -> `(ea)`, the first paragraph inserted after `(e)`; `(a)` -> `(aa)`
+    if (
+        len(left) == 2
+        and len(right) == 2
+        and right[0] == left[0]
+        and right[1] == alpha_successor(left[1])
+    ):
+        return True  # `(ea)` -> `(eb)`, a second insertion
+    return (
+        len(left) == 2 and len(right) == 1 and right == alpha_successor(left[0])
+    )  # `(eb)` -> `(f)`
 
 
 def continues_run(previous: str, token: str, previous_type: str) -> bool:

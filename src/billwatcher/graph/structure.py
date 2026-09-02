@@ -25,10 +25,12 @@ database-backed reading.
 """
 
 import re
-from typing import Protocol
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol
 
 from billwatcher.graph.tree import Node, body_start, strip_markdown_line
 from billwatcher.graph.vocabulary import (
+    CONTAINER_RANK,
     EID_PREFIXES,
     arrangement_heading,
     back_matter_heading,
@@ -213,8 +215,15 @@ class _OpenLists:
             sibling = self.nodes[depth]
             if sibling.node_type == "subsection":
                 break
+            if sibling.node_type == "list":
+                continue
             if continues_run(sibling.num or "", token, sibling.node_type):
                 parent = self.nodes[depth - 1] if depth else self.provision
+                if parent.node_type == "list":
+                    # The sibling sits inside one of several lists; the node that *holds* the
+                    # lists is what `_attach` continues or renumbers them on.
+                    holder = self.nodes[depth - 2] if depth >= 2 else self.provision
+                    return self._attach(holder, sibling.node_type, token, depth=depth - 1)
                 return self._attach(parent, sibling.node_type, token, depth=depth)
         # Nothing continued: a new list opens. Capitals and a leading roman `i` nest one level
         # beneath whatever lettered list is open; a lower-case letter starts the paragraph list
@@ -230,17 +239,65 @@ class _OpenLists:
         return self._attach(self.provision, "paragraph", token, depth=0)
 
     def _attach(self, parent: Node, node_type: str, token: str, *, depth: int) -> Node | None:
-        """Create the node under `parent` at stack `depth`, or flatten `parent` on a restart."""
+        """Create the node under `parent` at stack `depth`, handling a restart of the same list.
+
+        A restarting *lettered* list — a second `(a)` beneath the parent that already holds one —
+        becomes the next of several lists (ADR-043): the items already there are wrapped as
+        `list_1`, the new item opens `list_2`, and each list numbers its own items, so an
+        interpretation clause's defined terms keep their structure with distinct identifiers. A
+        restarting *subsection* list is different: a clause has one `(1)`, and a second one is an
+        inserted section of another Act whose marks were lost, so the clause's subsections are read
+        as its prose instead.
+        """
         if id(parent) in self._prose_only:
             self.nodes = self.nodes[:depth]
             return None
-        if any(child.node_type == node_type and child.num == token for child in parent.children):
-            for child in parent.children:
-                parent.paragraphs.extend(_lines_of(child))
-            parent.children = []
-            self._prose_only.add(id(parent))
-            self.nodes = self.nodes[:depth]
-            return None
+        existing = [child for child in parent.children if child.node_type == node_type]
+        duplicate = any(child.num == token for child in existing)
+        restarts = bool(existing) and (
+            duplicate
+            or (
+                node_type != "subsection"
+                and _opens_a_list(token)
+                and not continues_run(existing[-1].num or "", token, node_type)
+            )
+        )
+        if restarts:
+            if node_type == "subsection":
+                for child in parent.children:
+                    parent.paragraphs.extend(_lines_of(child))
+                parent.children = []
+                self._prose_only.add(id(parent))
+                self.nodes = self.nodes[:depth]
+                return None
+            if not (parent.children and parent.children[-1].node_type == "list"):
+                first = Node("list", "1", None, _eid_of(parent, "list", "1"))
+                first.children = parent.children
+                parent.children = [first]
+            ordinal = str(len(parent.children) + 1)
+            group = Node("list", ordinal, None, _eid_of(parent, "list", ordinal))
+            parent.children.append(group)
+            node = Node(node_type, token, None, _eid_of(group, node_type, token))
+            group.children.append(node)
+            self.nodes = [*self.nodes[:depth], group, node]
+            return node
+        if parent.children and parent.children[-1].node_type == "list":
+            # The parent already holds several lists: a token that continues the last list's last
+            # item joins that list, and any other — `(a)` again, or a letter out of sequence —
+            # opens the next one.
+            group = parent.children[-1]
+            last = group.children[-1] if group.children else None
+            continues = last is not None and continues_run(last.num or "", token, last.node_type)
+            if any(c.num == token for c in group.children) or (
+                _opens_a_list(token) and not continues
+            ):
+                ordinal = str(len(parent.children) + 1)
+                group = Node("list", ordinal, None, _eid_of(parent, "list", ordinal))
+                parent.children.append(group)
+            node = Node(node_type, token, None, _eid_of(group, node_type, token))
+            group.children.append(node)
+            self.nodes = [*self.nodes[:depth], group, node]
+            return node
         node = Node(node_type, token, None, _eid_of(parent, node_type, token))
         parent.children.append(node)
         self.nodes = [*self.nodes[:depth], node]
@@ -257,6 +314,16 @@ class _OpenLists:
         """
         paragraph = next((n for n in reversed(self.nodes) if n.node_type == "paragraph"), None)
         return paragraph is not None and paragraph.num == "k"
+
+
+def _opens_a_list(token: str) -> bool:
+    """Whether a letter token is the first of a list — `a`, `i`, `A`, `aa` — not a later one.
+
+    What tells a list *restarting* from a list with a hole in it: `(a)` after `(c)` is a new list
+    and gets a container of its own, while `(d)` after `(b)` stays in the run, where the gate can
+    name the missing `(c)`.
+    """
+    return token.casefold() in {"a", "i", "aa"}
 
 
 def _lines_of(node: Node) -> list[str]:
@@ -299,6 +366,51 @@ _SPLICED_NOTE_RE = re.compile(
 _SPLICED_NOTE_WITH_STOP_MAX_WORDS = 5
 
 
+# The full stop after a clause number read as a comma — `3, Maka adalah dengan ini ditubuhkan` —
+# which `provision_number` rightly refuses in general (a bare number and a comma is a list). It is
+# a clause when, and only when, the number is the bill's exact next one.
+_MISPRINTED_STOP_RE = re.compile(r"^(?P<num>\d{1,4}[A-Z]{0,2}),\s+(?P<rest>\S.*)$")
+
+
+def _misprinted_provision(text: str, last_clause: int | None) -> tuple[str, str] | None:
+    """`(num, rest)` for a clause whose number's full stop the reading printed as a comma."""
+    if last_clause is None:
+        return None
+    match = _MISPRINTED_STOP_RE.match(text)
+    if match is None:
+        return None
+    digits = re.match(r"\d+", match.group("num"))
+    if digits is None or int(digits.group()) != last_clause + 1:
+        return None
+    return match.group("num").upper(), match.group("rest").strip()
+
+
+_NOTE_WITH_NUMBER_RE = re.compile(
+    r"^(?P<note>[^\d(\[.;:\s][^.;:]{0,79}?)\s+(?P<num>\d{1,4}[A-Z]{0,2})\.$"
+)
+
+
+def _hanging_number_on_note(note: str, last_clause: int | None) -> tuple[str, str] | None:
+    """`(note, num)` when a marginal note ends in the hanging number of the bill's next clause.
+
+    Only the exact next number, and only when the note does not end in a word that takes a
+    number: `Pindaan seksyen 5.` beside clause 4 is a note about section 5 and not clause 5's
+    number, while `Amendment of 5.` can be nothing but the number — a note does not end in "of".
+    """
+    if last_clause is None:
+        return None
+    match = _NOTE_WITH_NUMBER_RE.match(" ".join(note.split()))
+    if match is None:
+        return None
+    digits = re.match(r"\d+", match.group("num"))
+    if digits is None or int(digits.group()) != last_clause + 1:
+        return None
+    text = match.group("note").strip()
+    if ends_in_reference(text) or text[0].islower():
+        return None
+    return text, match.group("num").upper()
+
+
 def _spliced_provision(text: str, last_clause: int | None) -> tuple[str, str, str] | None:
     """`(note, num, rest)` when a marginal note has been read onto the front of the next clause."""
     if last_clause is None:
@@ -317,12 +429,32 @@ def _spliced_provision(text: str, last_clause: int | None) -> tuple[str, str, st
     return note, match.group("num").upper(), match.group("rest").strip()
 
 
-def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Node:
+# How much deeper than the bill's own clause column a provision number has to sit before it is
+# read as quoted from another Act. A subsection's first-line indent is about an em (12pt at the
+# corpus's body size); a quoted section is block-indented further, 40–80pt in the pages measured.
+# The bound sits between the two with room for a hanging number on either side.
+_QUOTED_DEPTH_TOLERANCE = 18.0
+
+
+def parse_markdown_structure(
+    markdown_text: str,
+    *,
+    unit: str = "clause",
+    blocks: Sequence[Mapping[str, Any]] | None = None,
+) -> Node:
     """Build the provision tree from markdown text.
 
     `unit` is `"clause"` for a bill or `"section"` for an Act (HANDOFF 26.2) — every document in
     this pipeline is a Parliament bill PDF, so the default is `"clause"`; `infer_unit` overrides
     it when the markdown's own Arrangement heading says otherwise.
+
+    `blocks` is the reading's geometry, one record per markdown block (ADR-042). With it, the
+    parser reads depth: a provision number set deeper than the shallowest numbered line on its
+    page — where the bill's own clauses hang — is a section quoted from the Act being amended,
+    and everything at that depth after it is the quoted text, until a line returns to the bill's
+    own column. Quotation marks are still read,
+    but the page's indentation says the same thing more reliably than marks the reading may have
+    lost. Without `blocks` the parser reads exactly as before.
     """
     root = Node(node_type="body", num=None, heading=None, eid="")
     containers: list[Node] = []  # open part/chapter/schedule ancestors, root-most first
@@ -331,6 +463,9 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
     in_schedule = False
     in_quotation = False
     last_clause: int | None = None
+    depths = _depths_for_lines(markdown_text, blocks)
+    quoted_depth: float | None = None  # the depth of the quoted block being read, if any
+    quoted_page: int | None = None  # and the page it was measured on: depths compare per page
     # The previous content line and whether it was printed as a heading: what tells a wrapped
     # sentence tail (`... dinyatakan dalam` / `Jadual.`) apart from a heading, and a wrapped
     # reference (`... under subsection` / `(1), subsection 13(3) ...`) apart from an opener.
@@ -371,9 +506,27 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
 
     raw_lines = markdown_text.splitlines()
     lines = [strip_markdown_line(raw_line) for raw_line in raw_lines]
-    for index in range(body_start(lines), len(lines)):
+    start = body_start(lines)
+    clause_floor = _clause_floors(lines, depths, start) if depths is not None else {}
+    for index in range(start, len(lines)):
         text = lines[index]
         if not text:
+            comment = _MARGINAL_COMMENT_RE.match(raw_lines[index].strip())
+            if comment is not None:
+                note = comment.group("text")
+                if quotation_marks(note) % 2 == 1:
+                    # The printed page puts the opening mark of a quoted section on its
+                    # *marginal note* — `"Cess on rubber.` beside `7. (1) The Minister may...` —
+                    # and the note travels into a comment. The mark is on the paper whichever
+                    # column carried it, so it opens (or closes) the quotation as a body line's
+                    # would.
+                    in_quotation = not in_quotation
+                hanging = _hanging_number_on_note(note, last_clause) if not in_schedule else None
+                if hanging is not None and not in_quotation:
+                    # `Amendment of 5.`: the clause's hanging number, set beside the column on the
+                    # note's own baseline and read onto the end of the note. The body line that
+                    # follows is the clause's text.
+                    open_provision(unit, hanging[1], hanging[0], "")
             continue
         is_heading = raw_lines[index].lstrip().startswith("#")
         # `previous` is the content line before this one; `continues_sentence` says it was prose
@@ -440,6 +593,34 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
                 if container_heading(joined) is not None or schedule_heading(joined) is not None:
                     text = joined
                     lines[following_index] = ""
+        located = depths[index] if depths is not None and not is_heading else None
+        depth = located[0] if located is not None else None
+        if located is not None and depth is not None and not in_schedule:
+            if quoted_depth is not None and located[1] != quoted_page:
+                # Indent is measured from each page's own column, so a depth taken on one page
+                # says nothing on the next: the region ends with its page, and a quoted section
+                # that runs on re-opens it from that page's own floor if it is still set deeper.
+                quoted_depth = None
+            if quoted_depth is not None:
+                if depth >= quoted_depth - _QUOTED_DEPTH_TOLERANCE:
+                    # Still inside the quoted block: the Act's own subsections, paragraphs and
+                    # run-on lines, at the depth the quotation was set at or deeper.
+                    innermost_open().paragraphs.append(text)
+                    continue
+                quoted_depth = None
+            floor = clause_floor.get(located[1])
+            if (
+                floor is not None
+                and depth > floor + _QUOTED_DEPTH_TOLERANCE
+                and provision_number(text) is not None
+            ):
+                # A provision number set well deeper than the bill's own clauses: a section of
+                # the Act being amended, printed inside the clause that inserts it. Its text stays
+                # with that clause; its numbering belongs to the other document.
+                quoted_depth, quoted_page = depth, located[1]
+                innermost_open().paragraphs.append(text)
+                continue
+
         container = container_heading(text)
         schedule_num = schedule_heading(text) if container is None else None
         if (container is not None or schedule_num is not None) and (
@@ -453,21 +634,25 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
             continue
         if container is not None:
             node_type, num, heading = container
-            if in_schedule and containers and containers[0].node_type == "schedule":
-                # A Part or Chapter *inside* a Schedule — a treaty's chapters, a Supply Bill's
-                # parts — stays inside it. Leaving the schedule here re-rooted the Part in the body
-                # and turned the schedule's numbered items back into clauses.
-                schedule = containers[0]
-                if node_type == "part" or len(containers) == 1:
-                    parent, containers = schedule, [schedule]
-                else:
-                    parent, containers = containers[1], containers[:2]
-            elif node_type == "part":
-                parent, containers, in_schedule = root, [], False
-            elif containers and containers[0].node_type == "part":
-                parent, containers, in_schedule = containers[0], containers[:1], False
-            else:
-                parent, containers, in_schedule = root, [], False
+            # A Part, Chapter or Article closes every open container of its own rank or deeper
+            # and opens under the nearest shallower one. Inside a Schedule the schedule stays the
+            # root of that stack — a treaty's chapters and articles, a Supply Bill's parts, belong
+            # to the schedule; leaving it re-rooted them in the body and turned the schedule's
+            # numbered items back into clauses.
+            base = (
+                containers[:1]
+                if in_schedule and containers and containers[0].node_type == "schedule"
+                else []
+            )
+            kept = base + [
+                c
+                for c in containers[len(base) :]
+                if CONTAINER_RANK[c.node_type] < CONTAINER_RANK[node_type]
+            ]
+            parent = kept[-1] if kept else root
+            containers = kept
+            if not base:
+                in_schedule = False
             node = Node(node_type, num, heading or None, _eid_of(parent, node_type, num))
             parent.children.append(node)
             containers.append(node)
@@ -486,6 +671,17 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
         if provision_match is not None:
             num, rest = provision_match
             node_type = "paragraph" if in_schedule else unit
+            if (
+                not rest
+                and last_clause is not None
+                and not _resumes_clause_sequence(text, last_clause)
+            ):
+                # A bare `26.` on a line of its own, with nothing after it, is the tail of a
+                # sentence that wrapped (`...dengan memotong seksyen` / `26.`) unless it is the
+                # bill's exact next number: a provision has text, or at least is the next one.
+                innermost_open().paragraphs.append(text)
+                in_quotation = introduces
+                continue
             if node_type == unit and not _is_clause_number(num, last_clause):
                 # Not a clause: a cited year, or a section of the Act this bill amends printed
                 # without the quotation marks that would have marked it. It is still text the
@@ -510,6 +706,14 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
         if spliced is not None:
             note, num, rest = spliced
             open_provision(unit, num, note, rest)
+            in_quotation = introduces
+            continue
+
+        misprinted = _misprinted_provision(text, last_clause) if not in_schedule else None
+        if misprinted is not None:
+            num, rest = misprinted
+            note, leading = split_marginal_note(rest)
+            open_provision(unit, num, note, leading)
             in_quotation = introduces
             continue
 
@@ -545,7 +749,73 @@ def parse_markdown_structure(markdown_text: str, *, unit: str = "clause") -> Nod
 # `BAHAGIAN`, `Part`, `Jadual` alone on a line: a heading whose number wrapped onto the next —
 # and that next line has to be the number alone, `II` or `Kedua.`, never `27. Pindaan seksyen`,
 # or the join reads the clause after a stray `Bahagian` as Part 27 (measured: three readings).
-_HEADING_WORD_ALONE_RE = re.compile(r"(?i)bahagian|part|bab|chapter|jadual|schedule")
+_HEADING_WORD_ALONE_RE = re.compile(
+    r"(?i)bahagian|part|bab|chapter|article|perkara|jadual|schedule"
+)
+
+
+def _clause_floors(
+    lines: list[str], depths: list[tuple[float, int] | None], start: int
+) -> dict[int, float]:
+    """The shallowest provision-numbered line on each page: where that page's clauses hang.
+
+    Per page, because the reading measures indent from the page's own text column and the
+    columns of a bound book's recto and verso differ; and the shallowest, because a bill's clause
+    number hangs at or left of the column while a section quoted inside the clause is block-
+    indented from it. A page carrying only quoted sections gives their depth as its floor, and
+    they then read as they do without geometry — by the bill's own numbering.
+    """
+    floors: dict[int, float] = {}
+    for index in range(start, len(lines)):
+        placed = depths[index] if index < len(depths) else None
+        if placed is None or not lines[index] or provision_number(lines[index]) is None:
+            continue
+        depth, page = placed
+        if depth < -_HANGING_REACH:
+            # Far into the margin: a numbered stray — a note, a table cell, a page number the
+            # reader kept — not where a clause hangs. Measured: one such line at -113pt set a
+            # page's floor so low that every clause on it read as quoted.
+            continue
+        floors[page] = min(depth, floors.get(page, depth))
+    return floors
+
+
+# How far left of the text column a clause number can hang. A hanging number sits within an em or
+# two of the column; the corpus's widest measured hang is 25pt.
+_HANGING_REACH = 40.0
+
+
+def _depths_for_lines(
+    markdown_text: str, blocks: Sequence[Mapping[str, Any]] | None
+) -> list[tuple[float, int] | None] | None:
+    """Each markdown line's `(block indent, page)`, or None when the geometry does not fit the text.
+
+    The reading writes one block per paragraph and separates blocks with a blank line, so the
+    geometry lines up with `markdown_text.split("\n\n")`; a block that has been edited to span
+    lines still maps every one of its lines to the block's record. Geometry that does not fit is
+    dropped whole rather than applied approximately.
+    """
+    if blocks is None:
+        return None
+    parts = markdown_text.split("\n\n")
+    if len(parts) != len(blocks):
+        return None
+    depths: list[tuple[float, int] | None] = []
+    for position, (part, block) in enumerate(zip(parts, blocks, strict=True)):
+        indent, page = block.get("indent"), block.get("page")
+        value = (
+            (float(indent), int(page))
+            if isinstance(indent, (int, float)) and isinstance(page, int)
+            else None
+        )
+        depths.extend([value] * (len(part.splitlines()) or 1))
+        if position < len(parts) - 1:
+            depths.append(None)
+    if len(depths) != len(markdown_text.splitlines()):
+        return None
+    return depths
+
+
 _HEADING_NUMBER_ALONE_RE = re.compile(
     r"(?i)(?:[IVXLCDM]+|\d+[A-Z]?|pertama|kedua|ketiga|keempat|kelima|keenam|ketujuh|kelapan|"
     r"kesembilan|kesepuluh)\.?"
@@ -623,7 +893,13 @@ class MarkdownStructureExtractor(Protocol):
     model_id: str | None
     prompt_sha256: str | None
 
-    def extract(self, markdown_text: str, *, unit: str) -> Node: ...
+    def extract(
+        self,
+        markdown_text: str,
+        *,
+        unit: str,
+        blocks: Sequence[Mapping[str, Any]] | None = None,
+    ) -> Node: ...
 
 
 class RegexMarkdownStructureExtractor:
@@ -641,8 +917,14 @@ class RegexMarkdownStructureExtractor:
     model_id: str | None = None
     prompt_sha256: str | None = None
 
-    def extract(self, markdown_text: str, *, unit: str) -> Node:
-        return parse_markdown_structure(markdown_text, unit=unit)
+    def extract(
+        self,
+        markdown_text: str,
+        *,
+        unit: str,
+        blocks: Sequence[Mapping[str, Any]] | None = None,
+    ) -> Node:
+        return parse_markdown_structure(markdown_text, unit=unit, blocks=blocks)
 
 
 def infer_language_and_unit(markdown_text: str) -> tuple[str | None, str]:

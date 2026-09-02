@@ -27,7 +27,13 @@ from billwatcher.config import PublicationMode, RepresentationSet, Settings
 from billwatcher.files import sidecar_bytes, write_atomically
 from billwatcher.frbr import FrbrIdentityError, WorkIdentity, identity_from_bill
 from billwatcher.graph.semantic import jsonld_context_definition, parse_akn
-from billwatcher.graph.vocabulary import AKN_ELEMENTS, EID_PREFIXES, NODE_LABELS, NODE_TYPES
+from billwatcher.graph.vocabulary import (
+    AKN_ELEMENTS,
+    EID_PREFIXES,
+    HCONTAINER_TYPES,
+    NODE_LABELS,
+    NODE_TYPES,
+)
 from billwatcher.markdown.reading import (
     SUSPECT_HEADING_RATIO,
     SUSPECT_LONE_LETTER_RATE,
@@ -592,7 +598,7 @@ def _definition_payloads() -> dict[str, bytes]:
                     "en": NODE_LABELS[node_type][1],
                 },
                 "akn_element": AKN_ELEMENTS[node_type],
-                "akn_attributes": {"name": "schedule"} if node_type == "schedule" else {},
+                "akn_attributes": {"name": node_type} if node_type in HCONTAINER_TYPES else {},
                 "eid_prefix": (
                     f"{EID_PREFIXES[node_type]}_" if node_type in EID_PREFIXES else None
                 ),

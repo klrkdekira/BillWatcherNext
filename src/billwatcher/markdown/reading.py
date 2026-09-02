@@ -23,6 +23,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from billwatcher.download.documents import VERSION as DOCUMENT_VERSION
 from billwatcher.download.documents import document_languages
@@ -106,6 +107,8 @@ class LocalReading:
     duration_ms: int
     error: str | None = None
     quality: dict[str, float] = field(default_factory=dict)
+    blocks: tuple[dict[str, Any], ...] = ()
+    """One geometry record per markdown block, in order (ADR-042); see `assemble_markdown`."""
 
     @property
     def suspect(self) -> bool:
@@ -140,9 +143,9 @@ def read_document_markdown(content: bytes) -> LocalReading:
     document = extract_layout(content)
     if document.status == "failed":
         return _result(started, "failed", "", 0, error=document.error)
-    markdown = lines_to_markdown(document.content_lines())
+    markdown, blocks = assemble_markdown(document.content_lines())
     status = "succeeded" if markdown.strip() and _has_body(markdown) else "empty"
-    return _result(started, status, markdown, document.page_count)
+    return _result(started, status, markdown, document.page_count, blocks=blocks)
 
 
 def measure(markdown: str) -> dict[str, float]:
@@ -176,7 +179,18 @@ def measure(markdown: str) -> dict[str, float]:
 
 
 def lines_to_markdown(lines: tuple[Line, ...]) -> str:
-    """Assemble classified lines into markdown, one block per typeset block.
+    """The markdown alone; see `assemble_markdown` for the geometry that goes beside it."""
+    return assemble_markdown(lines)[0]
+
+
+def assemble_markdown(lines: tuple[Line, ...]) -> tuple[str, list[dict[str, Any]]]:
+    """Assemble classified lines into markdown, one block per typeset block — and its geometry.
+
+    The second value is one record per block, in the block's order, so `markdown.split("\n\n")`
+    and the list line up index for index (ADR-042). Each record carries the block's first line's
+    `indent` from the page's text column, its `role`, and the emphasis of its first glyph — the
+    facts the reader measured and the markdown cannot hold, kept beside it rather than encoded into
+    it, so the markdown stays the plain reading a person or another tool can consume unchanged.
 
     Marginal notes become HTML comments rather than text. That is the load-bearing choice here.
     They are annotations on the enacted text, not part of it, so emitting them inline would do
@@ -187,12 +201,25 @@ def lines_to_markdown(lines: tuple[Line, ...]) -> str:
     markers, and can never be spliced into a provision.
     """
     blocks: list[str] = []
+    geometry: list[dict[str, Any]] = []
     paragraph: list[str] = []
+    opener: Line | None = None
     page = 0
 
+    def record(line: Line, kind: str) -> None:
+        geometry.append(
+            {
+                "page": line.page,
+                "indent": round(line.indent, 1),
+                "role": kind,
+                "lead": _lead_emphasis(line),
+            }
+        )
+
     def flush() -> None:
-        if paragraph:
+        if paragraph and opener is not None:
             blocks.append(" ".join(paragraph))
+            record(opener, opener.role)
             paragraph.clear()
 
     for line in lines:
@@ -200,6 +227,7 @@ def lines_to_markdown(lines: tuple[Line, ...]) -> str:
             flush()
             page = line.page
             blocks.append(f"<!-- page {page} -->")
+            record(line, "page")
         text = line.text.strip()
         if not text:
             continue
@@ -212,16 +240,28 @@ def lines_to_markdown(lines: tuple[Line, ...]) -> str:
         if line.role == "marginal":
             flush()
             blocks.append(f"<!-- marginal: {_comment_safe(text)} -->")
+            record(line, "marginal")
         elif line.role in _HEADING_ROLES:
             flush()
             blocks.append(f"{'#' * _heading_level(text)} {text}")
+            record(line, "heading")
         elif line.role in _OPENING_ROLES:
             flush()
+            opener = line
             paragraph.append(text)
         else:
+            if not paragraph:
+                opener = line
             paragraph.append(text)
     flush()
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), geometry
+
+
+def _lead_emphasis(line: Line) -> str:
+    """`bold`, `italic`, `bolditalic` or `` for the face of the block's first glyph."""
+    from billwatcher.markdown.layout import lead_emphasis
+
+    return lead_emphasis(line)
 
 
 def _heading_level(text: str) -> int:
@@ -277,9 +317,16 @@ def _has_body(markdown: str) -> bool:
 
 
 def _result(
-    started: float, status: str, markdown: str, page_count: int, *, error: str | None = None
+    started: float,
+    status: str,
+    markdown: str,
+    page_count: int,
+    *,
+    error: str | None = None,
+    blocks: list[dict[str, Any]] | None = None,
 ) -> LocalReading:
     return LocalReading(
+        blocks=tuple(blocks or ()),
         extractor_name=EXTRACTOR_NAME,
         extractor_version=LOCAL_READING_VERSION,
         mode=MODE,
@@ -419,12 +466,14 @@ def extract_markdown(
         # that cost, which made `make build` over an unchanged corpus twenty minutes of work for
         # zero output. The provenance record answers the same question up front: its `inputs` are
         # the source hash and the producer, both known here without opening the PDF.
+        # A reading this step produced is complete only with its geometry beside it (ADR-042):
+        # a `document.md` at the current version whose sidecar is missing is re-read, not skipped.
         if not needs_rebuild(
             store,
             ref,
             artifact="markdown",
             inputs=_reading_inputs(content, language=doc_language, producer=producer),
-            present=store.has_markdown(**keys),
+            present=store.has_markdown(**keys) and store.has_blocks(**keys),
         ):
             counts["skipped_current"] += 1
             continue
@@ -468,6 +517,7 @@ def extract_markdown(
                 doc_key=ref.doc_key,
                 version=ref.version,
                 markdown_text=reading.markdown,
+                blocks=list(reading.blocks),
             )
         except MarkdownImportError as error:
             counts["failed"] += 1

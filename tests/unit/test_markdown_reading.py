@@ -444,3 +444,72 @@ def test_a_supply_bills_vote_codes_are_labels_not_damage() -> None:
         * 30
     )
     assert measure(schedule)["lone_letter_rate"] == 0.0
+
+
+def test_the_assembly_writes_one_geometry_record_per_markdown_block() -> None:
+    """The sidecar lines up with `markdown.split("\\n\\n")` index for index (ADR-042): page markers
+    and marginal comments are blocks too, and a paragraph's record is its first line's."""
+    from billwatcher.markdown.reading import assemble_markdown
+
+    lines = (
+        Line(
+            page=1,
+            x0=85.0,
+            y=700.0,
+            size=10.0,
+            font="Times",
+            text="1. Tajuk",
+            role="provision",
+            indent=0.0,
+            lead_font="Times-Bold",
+        ),
+        Line(
+            page=1,
+            x0=85.0,
+            y=688.0,
+            size=10.0,
+            font="Times",
+            text="lanjutan baris",
+            role="body",
+            indent=0.0,
+        ),
+        Line(
+            page=1,
+            x0=430.0,
+            y=688.0,
+            size=8.0,
+            font="Times",
+            text="Tajuk ringkas",
+            role="marginal",
+            indent=345.0,
+        ),
+        Line(
+            page=1,
+            x0=133.0,
+            y=670.0,
+            size=10.0,
+            font="Times",
+            text="(a) perenggan",
+            role="provision",
+            indent=48.0,
+        ),
+        Line(
+            page=2,
+            x0=85.0,
+            y=700.0,
+            size=10.0,
+            font="Times",
+            text="2. Tafsiran",
+            role="provision",
+            indent=0.0,
+        ),
+    )
+    markdown, blocks = assemble_markdown(lines)
+    parts = markdown.split("\n\n")
+    assert len(parts) == len(blocks)
+    assert parts[0] == "<!-- page 1 -->" and blocks[0]["role"] == "page"
+    assert parts[1] == "1. Tajuk lanjutan baris"
+    assert blocks[1] == {"page": 1, "indent": 0.0, "role": "provision", "lead": "bold"}
+    assert parts[2].startswith("<!-- marginal:") and blocks[2]["role"] == "marginal"
+    assert blocks[3]["indent"] == 48.0
+    assert parts[4] == "<!-- page 2 -->"

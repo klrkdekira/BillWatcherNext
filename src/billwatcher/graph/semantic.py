@@ -53,7 +53,7 @@ from billwatcher.frbr import (
 )
 from billwatcher.graph.render import AKN_NS
 from billwatcher.graph.tree import Node
-from billwatcher.graph.vocabulary import AKN_ELEMENTS
+from billwatcher.graph.vocabulary import AKN_ELEMENTS, HCONTAINER_TYPES
 from billwatcher.provenance import build_record, needs_rebuild
 from billwatcher.reporting import StepFailure, StepResult, describe_error
 from billwatcher.store import PipelineStore, StoredDocumentRef, keys_for, sha256_of
@@ -131,8 +131,13 @@ def _node_from_element(element: ET.Element) -> Node:
     tag = element.tag.rsplit("}", 1)[-1]
     num_el = element.find(f"{{{AKN_NS}}}num")
     heading_el = element.find(f"{{{AKN_NS}}}heading")
+    node_type = _TAG_TO_NODE_TYPE.get(tag, tag)
+    if tag == "hcontainer":
+        # Several node types render as an hcontainer, told apart by the `name` the renderer wrote.
+        named = element.get("name")
+        node_type = named if named in HCONTAINER_TYPES else "schedule"
     node = Node(
-        node_type=_TAG_TO_NODE_TYPE.get(tag, tag),
+        node_type=node_type,
         num=num_el.text if num_el is not None else None,
         heading=heading_el.text if heading_el is not None else None,
         eid=element.get("eId", ""),

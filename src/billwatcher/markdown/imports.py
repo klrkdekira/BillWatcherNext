@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from billwatcher.download.documents import doc_key as doc_key_for_url
+from billwatcher.files import METADATA_SCHEMA_VERSION, sidecar_bytes
 from billwatcher.frbr import LANGUAGES, valid_slug
 from billwatcher.graph.structure import infer_language_and_unit
 from billwatcher.provenance import build_record
@@ -34,6 +35,7 @@ from billwatcher.reporting import FAILURE_LIMIT, StepFailure, StepResult, descri
 from billwatcher.store import DocumentKeys, PipelineStore, sha256_of
 
 MARKDOWN_FILENAME = "document.md"
+BLOCKS_FILENAME = "document.blocks.json"
 
 # A document key as `documents.doc_key` mints one, checked as a path component rather than against
 # that function's exact hash width: a bulk import reads these out of a directory tree the operator
@@ -47,6 +49,7 @@ _VERSION_DIR_RE = re.compile(r"^v([0-9]{1,6})$")
 # the same mirrored source layout, the same refusals, the same link back to the PDF's sha256.
 # Two copies of those rules would be two places for them to drift apart.
 __all__ = [
+    "BLOCKS_FILENAME",
     "MARKDOWN_FILENAME",
     "ImportReport",
     "ImportedMarkdown",
@@ -115,11 +118,12 @@ class ImportedMarkdown:
     language_disagreement: str | None = None
     wrote_markdown: bool = False
     wrote_provenance: bool = False
+    wrote_blocks: bool = False
 
     @property
     def changed(self) -> bool:
-        """False when the store already held this exact text and this exact provenance."""
-        return self.wrote_markdown or self.wrote_provenance
+        """False when the store already held this exact text, geometry and provenance."""
+        return self.wrote_markdown or self.wrote_provenance or self.wrote_blocks
 
     def as_detail(self) -> dict[str, Any]:
         detail: dict[str, Any] = {
@@ -179,8 +183,14 @@ def import_markdown(
     version: int = 1,
     markdown_path: Path | None = None,
     markdown_text: str | None = None,
+    blocks: list[dict[str, Any]] | None = None,
 ) -> ImportedMarkdown:
     """Record one markdown reading of one already-stored document. The primitive.
+
+    `blocks` is the reading's geometry, one record per markdown block (ADR-042), written beside the
+    text as `document.blocks.json` under the same provenance record. A reading produced elsewhere
+    has none, and importing one withdraws any geometry a previous local reading left behind — a
+    sidecar describing a different text would be worse than no sidecar.
 
     Addressing is by `doc_key` when the operator has it, or by `document_url` — the same URL the
     fetch step downloaded, put through the same `documents.doc_key`, so the two can never disagree
@@ -220,13 +230,20 @@ def import_markdown(
         "language": language,
         **producer.as_inputs(),
     }
-    record = build_record(
-        artifact="markdown", inputs=inputs, outputs={MARKDOWN_FILENAME: text.encode("utf-8")}
-    )
+    outputs = {MARKDOWN_FILENAME: text.encode("utf-8")}
+    geometry = _blocks_record(text, blocks) if blocks is not None else None
+    if geometry is not None:
+        outputs[BLOCKS_FILENAME] = sidecar_bytes(geometry)
+    record = build_record(artifact="markdown", inputs=inputs, outputs=outputs)
 
     wrote_markdown = store.load_markdown(**keys) != text
     wrote_provenance = store.load_provenance(**keys, artifact="markdown") != record
+    wrote_blocks = store.load_blocks(**keys) != geometry
     store.save_markdown(**keys, content=text)
+    if geometry is not None:
+        store.save_blocks(**keys, record=geometry)
+    else:
+        store.withdraw_blocks(**keys)
     store.save_provenance(**keys, artifact="markdown", record=record)
 
     detected, _ = infer_language_and_unit(text)
@@ -243,7 +260,26 @@ def import_markdown(
         language_disagreement=disagreement,
         wrote_markdown=wrote_markdown,
         wrote_provenance=wrote_provenance,
+        wrote_blocks=wrote_blocks,
     )
+
+
+def _blocks_record(text: str, blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    """The geometry sidecar, refused unless it lines up with the text block for block.
+
+    A sidecar the parser would read against the wrong blocks is a reading of some other text: the
+    check is cheap and the alternative is a structure built on misaligned depths.
+    """
+    expected = len(text.split("\n\n"))
+    if len(blocks) != expected:
+        raise MarkdownImportError(
+            f"geometry names {len(blocks)} blocks but the markdown has {expected}"
+        )
+    return {
+        "metadata_schema_version": METADATA_SCHEMA_VERSION,
+        "artifact": "blocks",
+        "blocks": list(blocks),
+    }
 
 
 def import_markdown_tree(

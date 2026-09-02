@@ -17,6 +17,9 @@ from typing import Any
 
 import typer
 
+from billwatcher.audit import audit_structure
+from billwatcher.audit import render_markdown as render_audit_markdown
+from billwatcher.audit import summary_lines as audit_summary_lines
 from billwatcher.config import get_settings
 from billwatcher.coverage import build_report, render_markdown, summary_lines
 from billwatcher.download.documents import DocumentImportError, fetch_documents, import_document
@@ -547,6 +550,36 @@ def coverage_command(
     if markdown_out is not None:
         markdown_out.parent.mkdir(parents=True, exist_ok=True)
         markdown_out.write_text(render_markdown(report), encoding="utf-8")
+        typer.echo(f"wrote {markdown_out}", err=True)
+    typer.echo(json.dumps(report.as_payload()))
+
+
+@app.command("audit-structure")
+def audit_structure_command(
+    markdown_out: Path | None = typer.Option(
+        None,
+        "--markdown",
+        help="Also write the report as Markdown to this path, for diffing between commits",
+    ),
+) -> None:
+    """Parse and gate every stored reading with the code in this checkout, against the recorded
+    verdicts.
+
+    Offline, read-only, always exits 0. This is the measurement a parser change is judged by: how
+    many readings would pass now, which documents that passed would stop, and which finding
+    families remain — the loop that used to live in scratch scripts, made a step.
+    """
+    settings = get_settings()
+    report = audit_structure(
+        _store(),
+        extractor=RegexMarkdownStructureExtractor(),
+        min_text_coverage=settings.structure_gate_min_text_coverage,
+    )
+    for line in audit_summary_lines(report):
+        typer.echo(line, err=True)
+    if markdown_out is not None:
+        markdown_out.parent.mkdir(parents=True, exist_ok=True)
+        markdown_out.write_text(render_audit_markdown(report), encoding="utf-8")
         typer.echo(f"wrote {markdown_out}", err=True)
     typer.echo(json.dumps(report.as_payload()))
 

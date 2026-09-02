@@ -34,7 +34,16 @@ NORMALIZER_VERSION = "1.0.0"
 # rebuild too — the trigger is three consecutive single-letter tokens, which no real sentence
 # produces — and the word-break threshold gains an absolute arm of a quarter em, which is what
 # separates letters from words on a line that is only partly tracked.
-LAYOUT_EXTRACTOR_VERSION = "2.4.0"
+# 2.5.0: a marginal note in the *left* margin — the outer margin of a verso page in the 1990s
+# printings, in small type — is a note, where it used to be sorted into the body by baseline and
+# spliced into the provision it annotates (`Pindaan 4. Seksyen HB Akta ibu...`); the text column's
+# margin is measured per page, because a bound book's verso and recto columns sit at different
+# offsets and one document-wide margin was wrong on half the pages. And a line set in
+# a small-capitals face (`Times-Roman-SC700`) is read as the capitals it prints, its words rebuilt
+# from glyph geometry: `FIrst s chedule` was `FIRST SCHEDULE`, `BAhAgiAN` was `BAHAGIAN`. And text
+# drawn from outside the page box — a mis-registered second layer that duplicated every line of
+# its pages — is not on the page.
+LAYOUT_EXTRACTOR_VERSION = "2.5.0"
 # The local, layout-driven markdown reading (ADR-035). Versioned apart from
 # LAYOUT_EXTRACTOR_VERSION because this is the markdown *assembly* on top of that reading — a
 # change to how roles become markdown re-reads the corpus without the geometry itself having moved.
@@ -52,11 +61,17 @@ LAYOUT_EXTRACTOR_VERSION = "2.4.0"
 # 1.5.0: carrier for LAYOUT_EXTRACTOR_VERSION 2.4.0 (tracked runs inside ordinary lines), and
 # `measure` stops counting the real one-letter words "a"/"A"/"I", reports its sample sizes, and
 # `suspect` refuses to read a ratio taken over almost nothing.
-# 1.6.0: carrier for `vocabulary.container_heading` refusing a line that merely begins with a Part
-# reference (`Bahagian III hingga VI Akta ini...`, a wrapped long title) — `_heading_level` reads
-# that classifier, so such a line is now a `###` provision heading rather than a `##` division. A
-# few lines in a few readings; bumped because the same bytes in must give the same bytes out.
-LOCAL_READING_VERSION = "1.6.0"
+# 1.6.0: carrier for LAYOUT_EXTRACTOR_VERSION 2.5.0 (left-margin notes, small-capitals faces), and
+# for `vocabulary.container_heading` refusing a line that merely begins with a Part reference
+# (`Bahagian III hingga VI Akta ini...`, a wrapped long title) — `_heading_level` reads that
+# classifier, so such a line is now a `###` provision heading rather than a `##` division.
+# 1.7.0: carrier for LAYOUT_EXTRACTOR_VERSION 2.5.0 (left-margin notes, small-capitals faces,
+# off-page text, the text column measured as the leftmost substantial one), and the assembly now
+# writes the reading's geometry beside the markdown, one record per block (`document.blocks.json`,
+# ADR-042), under the same provenance record. 1.6.0 had already been built and committed before
+# either change, so a corpus at 1.6.0 was skipped as current and never got its sidecars — which
+# is why a local reading without one is also treated as stale by the step itself.
+LOCAL_READING_VERSION = "1.7.0"
 # The cross-check comparison (ADR-035 decisions 5 and 6): the tokenisation two readings are
 # compared over and the agreement measure taken across it. Its own version because the threshold
 # and the measure re-judge every pair without either reading having moved.
@@ -92,7 +107,14 @@ CROSSCHECK_VERSION = "1.0.0"
 # and the gate could otherwise only reject them (the largest single remaining cause, 514 readings).
 # Measured over the 2,479 stored readings: 1,292 passing before, 1,933 after; three lost, one of
 # which had passed on a tree built from its own explanatory statement.
-AKN_VERSION = "1.4.0"
+# 1.5.0: the parser reads depth from the reading's geometry (ADR-042) — a provision number set
+# deeper than the bill's own clause column is a section quoted from the Act being amended, and
+# what follows at that depth is the quoted text — so a quotation whose marks the reading lost no
+# longer becomes a second clause 7. Two node types join the vocabulary (ADR-043): a lettered list
+# that restarts under one parent becomes the next of several numbered `list` containers instead of
+# the parent's prose, and `ARTICLE N` / `PERKARA N` inside a Schedule is an `article`. Containers
+# nest by rank (Part, Chapter, Article), inside a Schedule as well as in the body.
+AKN_VERSION = "1.5.0"
 # Gate P1, the AKN fidelity gate: the deterministic check that a provision tree accounts for the
 # markdown it was read from. Its own version because a threshold change re-judges every document
 # without re-rendering any of them.
@@ -102,9 +124,13 @@ AKN_VERSION = "1.4.0"
 # of the body moves with the shared classifiers (`back_matter_heading` run into its first sentence,
 # `container_heading` refusing a wrapped long title, the added body openings). A Schedule's Parts
 # are numbered as the schedule's own run, as a Part's Chapters already were.
-STRUCTURE_GATE_VERSION = "1.2.0"
+# 1.3.0: document-wide runs are scoped to the Schedule they sit in — a Schedule's Parts number from
+# I and a treaty's Articles from 1 whatever the body did, and two Schedules each begin again — and
+# `list` restarts per parent like the lists it holds.
+STRUCTURE_GATE_VERSION = "1.3.0"
 # The Akoma Ntoso -> ELI JSON-LD / RDF N-Quads graph construction (ADR-023, ADR-028).
 SEMANTIC_VERSION = "1.0.0"
 # The corpus -> published site tree projection (ADR-029, ADR-033): definition shapes, catalogue,
 # redaction boundary and checksum format.
-STATIC_EXPORT_VERSION = "1.0.0"
+# 1.1.0: the published structural vocabulary gains `article` and `list` (ADR-043).
+STATIC_EXPORT_VERSION = "1.1.0"

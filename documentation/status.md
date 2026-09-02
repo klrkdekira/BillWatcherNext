@@ -139,6 +139,84 @@ s chedule`), quoted replacement schedules whose marks are gone, and treaty sched
 clause numbers (159 readings) and a clause sequence running backwards (205) — the signature of a
 reprinted body or of an Act's sections quoted without marks — then paragraph-letter gaps (193).
 
+### The reading behind the remaining failures, same day
+
+The 545 readings still rejected are 275 from the 1990s, and their damage was traced back to the
+PDF geometry rather than to the parser. `LAYOUT_EXTRACTOR_VERSION` 2.5.0 (carried by
+`LOCAL_READING_VERSION` 1.6.0) fixes what the geometry showed, each measured over the failing set:
+
+- **Marginal notes in the left margin** (249 of the 546 failing readings have such a column). The
+  1990s printings set the note in the *outer* margin, so on a verso page it sits left of the text
+  column in small type. pdfminer separates it cleanly; the reader knew only a right-hand margin and
+  sorted the note into the body by baseline, so its words landed inside the provision (`Pindaan 4.
+  Seksyen HB Akta ibu adalah dipinda, dalam subsekyen seksyen HB. (2), dengan...`). A line that
+  ends before the column begins is now a note — measured against the page's *own* column, because
+  a bound book's verso and recto margins differ and one document-wide margin was wrong on half the
+  pages.
+- **Small-capitals faces.** `Times-Roman-SC700` prints capitals; the reading carried `FIrst s
+  chedule` and `BAhAgiAN`. The face names itself, so the line is read in capitals with its words
+  rebuilt from glyph geometry.
+- **Text drawn off the page.** One reading carried its last pages twice, the second copy drawn from
+  x = -9 beside `RAHSIA` stamps. Text that begins outside the page box is not printed.
+
+The parser learned the three shapes the corrected reading exposes: a quotation mark carried by a
+marginal note (`"Cess on rubber.` opens the quoted section beside it), the clause's hanging number
+read onto the end of its note (`Amendment of 5.`), and a bare wrapped `26.` or a decimal
+`26.7936”` that are not provision numbers. **Measured by re-reading every failing PDF**: 65 of the
+546 pass on the fresh reading, and 2 of a 300-document sample of passing readings stop passing —
+both quoted sections of an Act whose marks the reading lost, which the splice had been hiding.
+Realising this in the corpus needs `make markdown` (every PDF is re-read, about twenty minutes)
+followed by `make build`; the pass rates above were measured before that re-read.
+
+What still fails after the fresh reading is no longer a reading defect at all: an Act consolidated
+whole inside a Schedule, treaty `ARTICLE N` divisions, and sections quoted from a principal Act
+with their marks lost — the modelling decisions named above.
+
+### Fixing it for good: geometry beside the markdown, two node types, and an audit step
+
+Every parser fix above recovered information the reader had and the markdown boundary discarded.
+ADR-042 and ADR-043 (same day) change the shape rather than adding rules:
+
+- **The reading's geometry is kept beside the markdown** as `document.blocks.json`, one record per
+  markdown block — page, indent from the page's text column, role, lead emphasis — written by the
+  same import under the same provenance record, and re-hashed by `verify`. The markdown itself is
+  unchanged, so ADR-021's import path is untouched and a reading from elsewhere still enters
+  without geometry.
+- **The parser reads depth from it.** A provision number set deeper than the shallowest numbered
+  line on its page — where the bill's own clauses hang — is a section quoted from the Act being
+  amended, and what follows at that depth is the quoted text. That is the largest remaining
+  rejection cause after the audit, and quotation marks the reading lost no longer decide it. The
+  text column is now the *leftmost* column carrying a real share of a page's text rather than the
+  most populous one, because a page of quoted text made the quotation's column the reference.
+- **`list` and `article` join the vocabulary.** A lettered list restarting under one parent — each
+  defined term's own `(a)`, `(b)` — becomes the next of several numbered `list` containers
+  (`cl_2__list_2__para_c`) instead of the parent's prose; `ARTICLE N` / `PERKARA N` inside a
+  Schedule is an `article`; containers nest by rank inside a Schedule as in the body, and the gate
+  scopes its document-wide runs per Schedule. The curly single quote that wraps an inserted
+  *definition* (`‘ “harvesting” means…’`) is now counted as a quotation mark, a closing `’` only
+  before punctuation or the end of the line, so `shareholders’ fund` is not one.
+- **`make audit`** (`billwatcher audit-structure`) parses and gates every stored reading with the
+  checkout's code against the recorded verdicts and writes `documentation/structure-audit.md`,
+  tracked. The loop that found every fix in this file is now a step.
+
+**Measured, over every PDF re-read with the new reader** (2,479 documents):
+
+| | passing Gate P1 |
+| --- | --- |
+| Stored readings, parser as committed in `cd72c46` | 1,933 |
+| Fresh reading, text only | 1,952 |
+| Fresh reading with geometry | **1,972 (79.5%)** |
+
+Geometry passes 21 readings the text alone cannot and loses one, a bill printing two clauses
+`6A`. Against the stored verdicts the fresh reading gains 97 and loses 58, and the losses are the
+honest cost of two changes: 22 carry a finding inside a `list` container, where the old reading
+flattened an interleaved quoted sub-list into prose and the container now shows the interleaving,
+and 13 are sections quoted without indentation *or* surviving marks, which the spliced marginal
+note used to hide from the parser. Over the stored readings alone, with no geometry, the parser
+would pass 1,936 (`documentation/structure-audit.md`). The corpus takes the new reading on the
+next `make markdown`, which writes the sidecars (`LOCAL_READING_VERSION` 1.7.0), then `make akn`
+and `make audit`.
+
 The published dataset is now a **corpus of readings** (2,352 markdown expressions) with a **graph
 over three quarters of it**.
 

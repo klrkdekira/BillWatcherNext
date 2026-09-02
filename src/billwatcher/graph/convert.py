@@ -112,8 +112,16 @@ def convert_to_akn(
         # did not regenerate would leave the document published at an IRI asserting the wrong one.
         bill_record = store.load_bill(ref.bill_slug)
         markdown_provenance = store.load_provenance(**keys, artifact="markdown")
+        geometry = store.load_blocks(**keys)
+        source_files = [{"file": "document.md", "sha256": sha256_of(markdown)}]
+        if geometry is not None:
+            # The reading's geometry is an input to the structure (ADR-042): a re-read that moves
+            # a block's depth can change what is quoted and what is a clause.
+            source_files.append(
+                {"file": "document.blocks.json", "sha256": sha256_of(sidecar_bytes(geometry))}
+            )
         inputs = {
-            "source_files": [{"file": "document.md", "sha256": sha256_of(markdown)}],
+            "source_files": source_files,
             "bill_sha256": sha256_of(sidecar_bytes(bill_record or {})),
             "markdown_provenance_sha256": sha256_of(sidecar_bytes(markdown_provenance or {})),
             "code_version": AKN_VERSION,
@@ -136,7 +144,10 @@ def convert_to_akn(
             if bill is None:
                 raise FrbrIdentityError(f"no bill record for {ref.bill_slug!r}")
             identity = identity_from_bill(bill, doc_type="act" if unit == "section" else "bill")
-            tree = extractor.extract(markdown, unit=unit)
+            blocks = geometry.get("blocks") if geometry is not None else None
+            tree = extractor.extract(
+                markdown, unit=unit, blocks=blocks if isinstance(blocks, list) else None
+            )
             assign_eids(tree)
             verdict = fidelity.evaluate(tree, markdown, unit=unit, min_coverage=min_text_coverage)
             xml_bytes = render_akn(tree, identity=identity, language=language, bill=bill)

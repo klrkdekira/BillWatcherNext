@@ -24,13 +24,16 @@ LANG_CODE ?= ms
 # Where `make coverage` writes its report. Tracked rather than under var/, because the point of a
 # Markdown report is that `git diff` shows coverage moving between two runs.
 COVERAGE_MD ?= documentation/coverage.md
+# Where `make audit` writes the structure audit: tracked for the same reason, so a parser change's
+# reach shows in `git diff`.
+AUDIT_MD ?= documentation/structure-audit.md
 
 .PHONY: help setup env \
         download download-listings download-documents \
         markdown import-markdown import-crosscheck cross-reference \
         handoff akn graph \
         publish site build rebuild \
-        coverage verify check test lint typecheck format \
+        coverage audit verify check test lint typecheck format \
         web-lint web-typecheck web-test web-format web-format-check dev \
         ca-bundle clean clean-site
 
@@ -121,6 +124,9 @@ dev: ## Run the frontend against the published tree, with hot reload
 
 coverage: ## Report what the corpus holds and what is missing; offline, read-only, never fails
 	$(UV) run billwatcher coverage --markdown "$(COVERAGE_MD)" >/dev/null
+
+audit: ## Parse and gate every stored reading with this checkout's code, against the recorded verdicts
+	$(UV) run billwatcher audit-structure --markdown "$(AUDIT_MD)" >/dev/null
 
 verify: ## Re-hash the corpus against its own sidecars, provenance and gate verdicts
 	$(UV) run billwatcher verify $(ARGS)

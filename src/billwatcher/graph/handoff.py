@@ -22,6 +22,7 @@ against a different document's text cannot be silently attached to this one.
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -337,7 +338,15 @@ class FileStructureExtractor:
         if not self.answers:
             self.answers = load_answers(self.root)
 
-    def extract(self, markdown_text: str, *, unit: str) -> Node:
+    def extract(
+        self,
+        markdown_text: str,
+        *,
+        unit: str,
+        blocks: Sequence[Mapping[str, Any]] | None = None,
+    ) -> Node:
+        # `blocks` is the local reading's geometry (ADR-042); an answer written elsewhere was
+        # produced from the markdown alone and is read back the same way.
         payload = self.answers.get(_digest(markdown_text))
         if payload is None:
             # `StructureUnavailable`, not an error: a handoff corpus is answered incrementally, so

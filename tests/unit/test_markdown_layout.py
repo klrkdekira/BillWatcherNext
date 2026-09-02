@@ -10,6 +10,7 @@ from tests.support.pdfs import (
     BODY,
     MARGIN,
     MARGINAL,
+    SMALL_CAPS,
     Placement,
     amending_bill,
     build_pdf,
@@ -436,3 +437,96 @@ def test_a_tracked_run_inside_an_ordinary_line_is_rejoined_in_place() -> None:
     texts = " ".join(line.text for line in tracked.lines)
     assert "B i l l" not in texts
     assert "Bill" in texts
+
+
+def test_a_marginal_note_in_the_left_margin_is_a_note_and_not_spliced_into_the_body() -> None:
+    """The 1990s printings set the note in the *outer* margin, so on a verso page it is left of
+    the text column, in small type. Sorted into the body by baseline it read as `Pindaan 4.
+    Seksyen 6A Akta ibu adalah dipinda, dalam subseksyen seksyen 6A. (2), dengan...`."""
+    body, note = 190.0, 135.0
+    document = extract_layout(
+        build_pdf(
+            [
+                [
+                    Placement(
+                        body, 700.0, "3. Seksyen 5 Akta ibu adalah dipinda dengan", size=12.5
+                    ),
+                    Placement(body, 685.0, "menggantikan perkataan yang berikut.", size=12.5),
+                    Placement(note, 640.5, "Pindaan", size=8.6),
+                    Placement(
+                        body,
+                        640.0,
+                        "4. Seksyen 6A Akta ibu adalah dipinda, dalam subseksyen",
+                        size=12.5,
+                    ),
+                    Placement(note, 631.0, "seksyen 6A.", size=8.6),
+                    Placement(
+                        body,
+                        626.0,
+                        "(2), dengan menggantikan perkataan-perkataan yang lain.",
+                        size=12.5,
+                    ),
+                ]
+            ],
+            width=523.0,
+            height=738.0,
+        )
+    )
+    roles = {line.text: line.role for line in document.lines}
+    assert roles["Pindaan"] == "marginal"
+    assert roles["seksyen 6A."] == "marginal"
+    assert roles["4. Seksyen 6A Akta ibu adalah dipinda, dalam subseksyen"] == "provision"
+    assert not any("Pindaan 4." in text or "seksyen 6A. (2)" in text for text in roles)
+
+
+def test_a_hanging_provision_number_left_of_the_margin_is_not_a_left_margin_note() -> None:
+    """A number hanging at x=72 with its sentence running on past the body column is a
+    provision; only a line that *ends* before the column begins is in the margin."""
+    document = extract_layout(sample_act())
+    assert not any(
+        line.role == "marginal" and line.text.startswith(("1.", "2.", "3."))
+        for line in document.lines
+    )
+
+
+def test_a_small_capitals_face_reads_as_the_capitals_it_prints() -> None:
+    """`Times-Roman-SC700` prints capitals; the reading carried `FIrst s chedule`, its case mixed
+    and a word broken wherever word inference measured a small glyph's gap against a small
+    glyph's width. The face names itself, so the line is read as it prints."""
+    document = extract_layout(
+        build_pdf(
+            [
+                [
+                    Placement(
+                        BODY, 700.0, "First Schedule", size=10.0, font=SMALL_CAPS, tracking=0.3
+                    ),
+                    Placement(BODY, 680.0, "1. An ordinary provision beneath it.", size=11.0),
+                ]
+            ]
+        )
+    )
+    texts = [line.text for line in document.lines]
+    assert "FIRST SCHEDULE" in texts
+    assert "1. An ordinary provision beneath it." in texts
+
+
+def test_text_drawn_off_the_left_edge_of_the_page_is_not_on_the_page() -> None:
+    """A mis-registered second text layer, drawn from x = -9 beside `RAHSIA` stamps, read every
+    clause on its pages twice. Text that begins outside the page box is not printed — unless
+    the whole page sits there, which is a coordinate quirk and not an empty page."""
+    document = extract_layout(
+        build_pdf(
+            [
+                [
+                    Placement(BODY, 700.0, "36. Menteri boleh meminda Jadual Pertama."),
+                    Placement(-9.0, 686.0, "36. Menteri boleh meminda Jadual Pertama."),
+                    Placement(-9.0, 672.0, "RAHSIA"),
+                ],
+                [Placement(-20.0, 700.0, "1. Every line of this page sits at negative x.")],
+            ]
+        )
+    )
+    texts = [line.text for line in document.lines]
+    assert texts.count("36. Menteri boleh meminda Jadual Pertama.") == 1
+    assert "RAHSIA" not in texts
+    assert "1. Every line of this page sits at negative x." in texts

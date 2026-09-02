@@ -72,6 +72,7 @@ CODE_VERSIONS = {"akn": AKN_VERSION, "semantic": SEMANTIC_VERSION}
 _LOADERS: dict[str, Callable[[PipelineStore, dict[str, Any]], bytes | None]] = {
     "document.pdf": lambda store, keys: store.load_document(**keys),
     "document.md": lambda store, keys: _encoded(store.load_markdown(**keys)),
+    "document.blocks.json": lambda store, keys: _sidecar(store.load_blocks(**keys)),
     "document.akn.xml": lambda store, keys: store.load_akn(**keys),
     "document.jsonld": lambda store, keys: store.load_jsonld(**keys),
     "document.nq": lambda store, keys: store.load_rdf(**keys),
@@ -519,6 +520,10 @@ def _load(store: PipelineStore, ref: StoredDocumentRef, filename: str) -> bytes 
 
 def _encoded(text: str | None) -> bytes | None:
     return None if text is None else text.encode("utf-8")
+
+
+def _sidecar(record: dict[str, Any] | None) -> bytes | None:
+    return None if record is None else sidecar_bytes(record)
 
 
 def _mapping(value: Any) -> dict[str, Any]:

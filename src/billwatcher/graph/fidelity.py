@@ -89,7 +89,7 @@ NUMBERED_TYPES = frozenset(EID_PREFIXES)
 # `Bab 1` is correct drafting, and treating chapters as one document-wide run rejected it. Clauses
 # and sections are the exception that motivates the whole distinction: they run continuously across
 # Part boundaries even though the parser nests them under the open Part.
-RESTARTING_TYPES = frozenset({"chapter", "subsection", "paragraph", "subparagraph"})
+RESTARTING_TYPES = frozenset({"chapter", "subsection", "paragraph", "subparagraph", "list"})
 
 # How each type is numbered, which decides how two of its numbers are compared. Malaysian drafting
 # numbers Parts and Chapters in roman (`BAHAGIAN I`, `BAHAGIAN II`) and subparagraphs in roman too,
@@ -491,32 +491,34 @@ def _sequence_findings(root: Node, *, unit: str) -> list[Finding]:
     mistyping is not.
     """
     findings: list[Finding] = []
-    document_wide: dict[str, list[Node]] = {}
+    # Document-wide runs are scoped to the Schedule they sit in: a Schedule's Parts number from I
+    # and a treaty's Articles from 1 whatever the body did, and two Schedules each begin again.
+    document_wide: dict[tuple[str, int | None], list[Node]] = {}
 
-    def collect(node: Node, *, inside_unit: bool) -> None:
+    def collect(node: Node, *, inside_unit: bool, scope: int | None) -> None:
         siblings: dict[str, list[Node]] = {}
         for child in node.children:
             if child.node_type not in NUMBERED_TYPES:
                 continue
-            if child.node_type in RESTARTING_TYPES or (
-                child.node_type == "part" and node.node_type == "schedule"
-            ):
-                # A Schedule divided into Parts numbers them from I, as a Part numbers its
-                # Chapters: those Parts are the schedule's own run, not the body's.
+            if child.node_type in RESTARTING_TYPES:
                 siblings.setdefault(child.node_type, []).append(child)
             elif inside_unit and child.node_type in _UNIT_SCOPED_TYPES and child.node_type != unit:
                 pass
             else:
-                document_wide.setdefault(child.node_type, []).append(child)
-            collect(child, inside_unit=inside_unit or child.node_type == unit)
+                document_wide.setdefault((child.node_type, scope), []).append(child)
+            collect(
+                child,
+                inside_unit=inside_unit or child.node_type == unit,
+                scope=id(child) if child.node_type == "schedule" else scope,
+            )
         for group in siblings.values():
             findings.extend(_check_run(group))
 
-    collect(root, inside_unit=False)
-    for node_type in sorted(document_wide):
-        run = document_wide[node_type]
+    collect(root, inside_unit=False, scope=None)
+    for node_type, scope in sorted(document_wide, key=lambda key: (key[0], key[1] or 0)):
+        run = document_wide[(node_type, scope)]
         findings.extend(_check_run(run))
-        if node_type == unit:
+        if node_type == unit and scope is None:
             findings.extend(_anchor_finding(run))
     return findings
 

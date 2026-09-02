@@ -144,6 +144,8 @@ def test_letter_insertions_and_doubled_steps() -> None:
     from billwatcher.graph.vocabulary import is_doubled_step, is_letter_insertion
 
     assert is_letter_insertion("a", "aa") and is_letter_insertion("aa", "b")
+    assert is_letter_insertion("e", "ea") and is_letter_insertion("ea", "eb")
+    assert is_letter_insertion("eb", "f") and not is_letter_insertion("eb", "g")
     assert not is_letter_insertion("a", "b") and not is_letter_insertion("i", "ii")
     assert not is_letter_insertion("b", "aa")
     assert is_doubled_step("aa", "bb") and is_doubled_step("CC", "DD")

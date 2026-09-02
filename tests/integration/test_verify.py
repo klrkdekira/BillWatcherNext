@@ -58,7 +58,7 @@ class LossyExtractor(RegexMarkdownStructureExtractor):
 
     name = "stub-lossy"
 
-    def extract(self, markdown_text: str, *, unit: str) -> Node:
+    def extract(self, markdown_text: str, *, unit: str, blocks: object = None) -> Node:
         return super().extract(markdown_text.replace(DROPPED_SUBSECTION, ""), unit=unit)
 
 

@@ -92,6 +92,25 @@ _MARGIN_OFFSET = 0.45
 # A marginal note is short. A long line starting right of the column is an indented block.
 _MARGIN_MAX_CHARS = 80
 
+# The 1990s printings set the marginal note in the *outer* margin, so on every other page it is
+# to the left of the text column, in small type — `Pindaan` / `seksyen 6A.` beside `4. Seksyen 6A
+# Akta ibu...`. pdfminer separates it cleanly; the reader then sorted it into the body by baseline,
+# because the only margin it knew was the right-hand one, and the note's words landed inside the
+# provision they annotate (`Pindaan 4. Seksyen HB Akta ibu adalah dipinda, dalam subsekyen seksyen
+# HB. (2), dengan...`). Measured: the residue of the parser audit's 546 rejected readings is 275
+# documents from the 1990s, and this shape is in most of them. A left-margin line is one that
+# *ends* before the body column begins and starts well left of it — the end test is what tells it
+# from a provision number hanging at the margin with its sentence running on to the right.
+_LEFT_MARGIN_OFFSET = 0.06
+_LEFT_MARGIN_CLEARANCE = 2.0
+
+# A small-capitals face: `Times-Roman-SC700`, the small caps at 70% of the size. Its glyphs are
+# capitals on the page, but the reading carried them as a mix of cases (`FIrst s chedule`,
+# `BAhAgiAN`, `JAdUAL PertAmA`) with a word break wherever pdfminer's word inference measured a
+# small glyph's gap against a small glyph's width. The face names itself, so the line is set as it
+# prints — in capitals — and its words are rebuilt from geometry as a tracked line's are.
+_SMALL_CAPS_FONT = re.compile(r"-SC\d*$|smallcaps|smcp", re.IGNORECASE)
+
 # A heading is set larger than the body. Below this ratio the difference is font rounding.
 _HEADING_SIZE_RATIO = 1.08
 
@@ -156,6 +175,16 @@ class Line:
     role: str
     lead_font: str | None = None
     opens_block: bool = False
+    x1: float = 0.0
+    """Where the line ends. `0.0` means the reader that built this line did not record it."""
+    indent: float = 0.0
+    """How far right of its page's text column the line begins, in points; negative hangs left.
+
+    The one geometric fact the structure parser needs and the markdown cannot carry (ADR-042): a
+    provision number set deeper than the bill's own clauses is a section quoted from another Act,
+    a token at the depth of the paragraph list it continues is a paragraph, and neither can be told
+    from the text alone.
+    """
     """Whether a block of vertical space precedes this line, separating it from the one above.
 
     Carried on the line because only the reader can measure it — it is a fact about this
@@ -250,38 +279,59 @@ def _page_lines(page: LTPage, number: int) -> list[Line]:
     pdfminer already separates the margin column into its own line, because a marginal note is
     horizontally distant from the text it sits beside. Ordering is imposed here rather than
     trusted, since a two-column baseline must read left before right.
+
+    A line that *begins* outside the page box is not on the printed page. One reading carried a
+    second copy of its last pages' text drawn from x = -9, beside `RAHSIA` stamps at the same
+    offset — a mis-registered layer, invisible on paper and duplicated in the text — and read every
+    clause and schedule heading on those pages twice. Only when the page has text inside the box
+    is text outside it discarded: a page whose every line sits at negative x is a coordinate quirk,
+    not an empty page.
     """
+    items = [
+        item
+        for element in page
+        if isinstance(element, LTTextContainer)
+        for item in element
+        if isinstance(item, LTTextLine)
+    ]
+    left_edge = float(page.bbox[0])
+    on_page = [item for item in items if float(item.x0) >= left_edge - _OFF_PAGE_TOLERANCE]
+    if on_page:
+        items = on_page
     lines: list[Line] = []
-    for element in page:
-        if not isinstance(element, LTTextContainer):
+    for item in items:
+        text = normalize_text(item.get_text())
+        if not text:
             continue
-        for item in element:
-            if not isinstance(item, LTTextLine):
-                continue
-            text = normalize_text(item.get_text())
-            if not text:
-                continue
-            glyphs = [glyph for glyph in item if isinstance(glyph, LTChar)]
-            if _looks_tracked(text):
-                text = normalize_text(_rejoin_tracked(glyphs)) or text
-            lines.append(
-                Line(
-                    page=number,
-                    x0=float(item.x0),
-                    y=float(item.y0),
-                    # The modal glyph size, so one superscript does not demote a heading.
-                    size=_modal(round(float(glyph.size), 1) for glyph in glyphs),
-                    # The modal face, for the same reason: a bold provision number at the head of
-                    # an otherwise roman sentence must not make the whole line read as a heading.
-                    font=_modal_font(glyphs),
-                    text=text,
-                    role="body",
-                    lead_font=str(glyphs[0].fontname) if glyphs else None,
-                )
+        glyphs = [glyph for glyph in item if isinstance(glyph, LTChar)]
+        font = _modal_font(glyphs)
+        if _is_small_caps(font):
+            text = (normalize_text(_rejoin_tracked(glyphs)) or text).upper()
+        elif _looks_tracked(text):
+            text = normalize_text(_rejoin_tracked(glyphs)) or text
+        lines.append(
+            Line(
+                page=number,
+                x0=float(item.x0),
+                x1=float(item.x1),
+                y=float(item.y0),
+                # The modal glyph size, so one superscript does not demote a heading.
+                size=_modal(round(float(glyph.size), 1) for glyph in glyphs),
+                # The modal face, for the same reason: a bold provision number at the head of
+                # an otherwise roman sentence must not make the whole line read as a heading.
+                font=font,
+                text=text,
+                role="body",
+                lead_font=str(glyphs[0].fontname) if glyphs else None,
             )
+        )
     lines.sort(key=lambda line: (-line.y, line.x0))
     return lines
 
+
+# How far left of the page box a line may begin and still count as printed on the page: a rounding
+# margin, not a tolerance for overhang.
+_OFF_PAGE_TOLERANCE = 1.0
 
 # How close two baselines have to be, in points, to count as the same printed line. A running head
 # and the page number beside it are set on one baseline; pdfminer reports them a fraction of a
@@ -336,6 +386,11 @@ def _rejoin_tracked(glyphs: list[LTChar]) -> str:
             pieces.append(" ")
         pieces.append(glyph.get_text())
     return "".join(pieces)
+
+
+def _is_small_caps(font: str | None) -> bool:
+    """Whether a face is a small-capitals face, by its own name."""
+    return bool(font) and _SMALL_CAPS_FONT.search(str(font).rsplit("+", 1)[-1]) is not None
 
 
 def _carries_text(text: str) -> bool:
@@ -411,7 +466,8 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
     # Weighted by how much text sits at each size and margin, not by how many lines do. Counting
     # lines lets a page of short marginal notes outvote the body column that holds the document.
     body_size = _body_size(lines)
-    body_margin = _weighted_modal((round(line.x0), len(line.text)) for line in lines)
+    body_margin = _text_column((round(line.x0), len(line.text)) for line in lines)
+    page_margins = _page_margins(lines, fallback=body_margin)
     emphasis_is_readable = _bold_share(lines) < _MAX_BOLD_SHARE
     leading = _leading(lines)
     gaps = _gaps_before(lines)
@@ -423,6 +479,7 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
         box = boxes.get(line.page)
         height = box.height if box else 1.0
         width = box.width if box else 1.0
+        body_margin = page_margins.get(line.page, body_margin)
         relative_y = line.y / height if height else 0.0
         in_header = relative_y >= _HEADER_BAND
         in_footer = relative_y <= _FOOTER_BAND
@@ -474,6 +531,15 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
             # genuine running head sits at the body margin, not far to the right of it, so this
             # ordering does not risk misreading one as a note.
             role = "marginal"
+        elif (
+            _in_left_margin(line, body_margin, width)
+            and len(line.text) <= _MARGIN_MAX_CHARS
+            and _carries_text(line.text)
+        ):
+            # The outer-margin note of a verso page: left of the text column, and wholly so. It
+            # comes after the provision test, so a hanging number that begins left of the margin
+            # and runs on into its sentence has already been claimed.
+            role = "marginal"
         elif (_furniture_key(line.text), in_header) in furniture:
             role = "header" if in_header else "footer"
         elif is_bare_unit_label(line.text) and line.size < body_size * _HEADING_SIZE_RATIO:
@@ -513,9 +579,63 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
                 text=line.text,
                 role=role,
                 lead_font=line.lead_font,
+                x1=line.x1,
+                indent=round(line.x0 - body_margin, 1),
             )
         )
     return tuple(classified)
+
+
+# A page has to carry this much text before its own margin is trusted over the document's: a cover
+# or a half-empty last page has no column to measure.
+_PAGE_MARGIN_MIN_CHARS = 400
+
+
+def _page_margins(lines: list[Line], *, fallback: float) -> dict[int, float]:
+    """Where the text column begins on each page.
+
+    A bound book's verso and recto pages are set to different margins — the column sits nearer
+    the spine on each — so one document-wide margin is wrong on half the pages, and a marginal
+    note in the outer margin of a verso page then measured as *inside* the recto column. Every
+    test that reads position against the column (the provision hang, both margin columns) reads
+    it against the page's own.
+    """
+    by_page: dict[int, list[tuple[float, int]]] = {}
+    for line in lines:
+        by_page.setdefault(line.page, []).append((round(line.x0), len(line.text)))
+    return {
+        page: (
+            _text_column(pairs)
+            if sum(weight for _, weight in pairs) >= _PAGE_MARGIN_MIN_CHARS
+            else fallback
+        )
+        for page, pairs in by_page.items()
+    }
+
+
+# The share of a page's (or document's) characters a column has to carry to count as a column of
+# text at all, rather than a hanging number, a marginal note or a stray line.
+_COLUMN_MIN_SHARE = 0.12
+
+
+def _text_column(pairs: Iterable[tuple[float, int]]) -> float:
+    """Where the text column begins: the leftmost x0 carrying a real share of the characters.
+
+    Not the x0 carrying the *most* characters, which is what this used to be and what went wrong
+    on a page of quoted text: an amendment page is mostly the block-indented sections it inserts,
+    so the modal column was the quotation's, the bill's own clause on that page measured as
+    hanging sixty points into the margin, and the structure parser's depth reading (ADR-042) took
+    the document's clause column from it. The body column is the leftmost one that holds text;
+    everything set to the right of it — subsections, paragraphs, quotations — is indented from it.
+    """
+    totals: dict[float, int] = {}
+    for value, weight in pairs:
+        totals[value] = totals.get(value, 0) + weight
+    if not totals:
+        return 0.0
+    floor = sum(totals.values()) * _COLUMN_MIN_SHARE
+    substantial = [value for value, total in totals.items() if total >= floor]
+    return float(min(substantial)) if substantial else _weighted_modal(totals.items())
 
 
 def _in_margin_column(line: Line, body_margin: float, width: float) -> bool:
@@ -526,6 +646,19 @@ def _in_margin_column(line: Line, body_margin: float, width: float) -> bool:
     disagree is a marginal note read as a provision.
     """
     return line.x0 - body_margin > width * _MARGIN_OFFSET
+
+
+def _in_left_margin(line: Line, body_margin: float, width: float) -> bool:
+    """Whether the line sits wholly in the left-hand margin, before the text column begins.
+
+    Only a line whose end was recorded can be placed here; a `Line` built without `x1` is never
+    in the left margin, which keeps every earlier reading of the same geometry unchanged.
+    """
+    return (
+        line.x1 > line.x0
+        and line.x1 <= body_margin - _LEFT_MARGIN_CLEARANCE
+        and body_margin - line.x0 > width * _LEFT_MARGIN_OFFSET
+    )
 
 
 def _opens_a_provision(
@@ -587,6 +720,11 @@ def _emphasis(font: str | None) -> str:
     weight = "bold" if _BOLD_FONT.search(name) else ""
     slant = "italic" if _ITALIC_FONT.search(name) else ""
     return weight + slant
+
+
+def lead_emphasis(line: Line) -> str:
+    """The emphasis of a line's first glyph, as `_emphasis` names it: what marks `2.` or `(a)`."""
+    return _emphasis(line.lead_font)
 
 
 def _is_bold(font: str | None) -> bool:

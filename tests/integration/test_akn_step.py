@@ -73,7 +73,7 @@ class BodyOnlyExtractor:
     model_id = "test-model"
     prompt_sha256 = "0" * 64
 
-    def extract(self, markdown_text: str, *, unit: str) -> Node:
+    def extract(self, markdown_text: str, *, unit: str, blocks: object = None) -> Node:
         body = markdown_text[markdown_text.index("## BAHAGIAN") :]
         return parse_markdown_structure(body, unit=unit)
 
@@ -411,7 +411,7 @@ def test_an_extractor_failure_is_counted_and_named_not_raised(tmp_path) -> None:
         model_id = "test-model"
         prompt_sha256 = None
 
-        def extract(self, markdown_text: str, *, unit: str) -> Node:
+        def extract(self, markdown_text: str, *, unit: str, blocks: object = None) -> Node:
             raise RuntimeError("endpoint unreachable")
 
     store = FileStore(tmp_path)
@@ -451,7 +451,7 @@ def test_a_tree_gate_p1_already_rejects_is_not_also_run_through_schema_validatio
         model_id = "test-model"
         prompt_sha256 = None
 
-        def extract(self, markdown_text: str, *, unit: str) -> Node:
+        def extract(self, markdown_text: str, *, unit: str, blocks: object = None) -> Node:
             clause = Node("clause", "4", "Tafsiran", "")
             clause.children = [
                 Node("paragraph", None, None, "", paragraphs=['"Pesuruhjaya" ertinya...']),
@@ -606,7 +606,7 @@ def test_a_re_read_that_raises_also_withdraws_the_reading_that_was_already_publi
     class FailingExtractor(RegexMarkdownStructureExtractor):
         name = "stub-llm"
 
-        def extract(self, markdown_text: str, *, unit: str) -> Node:
+        def extract(self, markdown_text: str, *, unit: str, blocks: object = None) -> Node:
             raise RuntimeError("endpoint unreachable")
 
     store = FileStore(tmp_path)

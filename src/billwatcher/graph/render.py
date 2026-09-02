@@ -13,17 +13,33 @@ serialisation at the end of the pipeline. ADR-030 makes the same split at the st
 regenerates the corpus in seconds without re-reading a single document.
 """
 
+import re
 from typing import Any
 from xml.etree import ElementTree as ET
 
 from billwatcher.frbr import AKN_LANGUAGES, COUNTRY, WorkIdentity
 from billwatcher.graph.tree import Node
-from billwatcher.graph.vocabulary import AKN_ELEMENTS
+from billwatcher.graph.vocabulary import AKN_ELEMENTS, HCONTAINER_TYPES
 
 # The standard's own namespace, quoted from the OASIS schema this output is validated against.
 AKN_NS = "http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
 
-__all__ = ["AKN_NS", "AknSchemaError", "frbr_date", "render_akn"]
+__all__ = ["AKN_NS", "AknSchemaError", "frbr_date", "render_akn", "xml_text"]
+
+
+# What XML 1.0 refuses inside text: the C0 controls other than tab, newline and return, the
+# surrogates, and the two noncharacters. A PDF's text layer can carry them — found live: a font
+# that produced U+0018 wherever the digit 1 was printed, 171 times in one reading — and
+# `ElementTree` writes them out unescaped, producing a document that calls itself XML and no parser
+# will open, so a tree that passed the gate recorded a failed render. Each is replaced with U+FFFD
+# rather than deleted: the reading had a character there, and the replacement says so where a
+# deletion would quietly turn `1967` into `967`.
+_XML_FORBIDDEN_RE = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def xml_text(value: str) -> str:
+    """`value` with each character XML cannot carry replaced by U+FFFD; otherwise untouched."""
+    return _XML_FORBIDDEN_RE.sub("\ufffd", value)
 
 
 class AknSchemaError(RuntimeError):
@@ -97,7 +113,7 @@ def render_akn(root: Node, *, identity: WorkIdentity, language: str, bill: dict[
     if title:
         preface = ET.SubElement(doc_el, f"{{{AKN_NS}}}preface")
         block = ET.SubElement(preface, f"{{{AKN_NS}}}longTitle", {"eId": "longTitle"})
-        ET.SubElement(block, f"{{{AKN_NS}}}p").text = title
+        ET.SubElement(block, f"{{{AKN_NS}}}p").text = xml_text(title)
 
     # AKN puts a preamble before the body, not inside it — the extractor's own prompt offers
     # `preamble` as a node type, so a correct reading can contain one, and appending it into
@@ -107,7 +123,9 @@ def render_akn(root: Node, *, identity: WorkIdentity, language: str, bill: dict[
         preamble = ET.SubElement(doc_el, f"{{{AKN_NS}}}preamble")
         for node in preamble_nodes:
             container = ET.SubElement(preamble, f"{{{AKN_NS}}}p")
-            container.text = " ".join(part for part in [node.heading, *node.paragraphs] if part)
+            container.text = xml_text(
+                " ".join(part for part in [node.heading, *node.paragraphs] if part)
+            )
 
     body = ET.SubElement(doc_el, f"{{{AKN_NS}}}body")
     for child in root.children:
@@ -159,18 +177,18 @@ def _render_node(node: Node) -> ET.Element:
     looked fine locally failed the schema.
     """
     attrs = {"eId": node.eid}
-    if node.node_type == "schedule":
-        attrs["name"] = "schedule"
+    if node.node_type in HCONTAINER_TYPES:
+        attrs["name"] = node.node_type
     element = ET.Element(f"{{{AKN_NS}}}{AKN_ELEMENTS[node.node_type]}", attrs)
     if node.num:
-        ET.SubElement(element, f"{{{AKN_NS}}}num").text = node.num
+        ET.SubElement(element, f"{{{AKN_NS}}}num").text = xml_text(node.num)
     if node.heading:
-        ET.SubElement(element, f"{{{AKN_NS}}}heading").text = node.heading
+        ET.SubElement(element, f"{{{AKN_NS}}}heading").text = xml_text(node.heading)
     if node.paragraphs:
         wrapper = "intro" if node.children else "content"
         container = ET.SubElement(element, f"{{{AKN_NS}}}{wrapper}")
         for text in node.paragraphs:
-            ET.SubElement(container, f"{{{AKN_NS}}}p").text = text
+            ET.SubElement(container, f"{{{AKN_NS}}}p").text = xml_text(text)
     for child in node.children:
         element.append(_render_node(child))
     if not node.paragraphs and not node.children:

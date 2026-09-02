@@ -19,8 +19,17 @@ A4_HEIGHT = 842.0
 # are registered under. Weight is load-bearing, not decoration: a section heading is set in the
 # same size as the provision beneath it and differs only in being bold, so a fixture that can only
 # write one face cannot express the shape the classifier reads.
-FONTS = {"F1": "Times-Roman", "F2": "Times-Bold", "F3": "Times-Italic"}
-ROMAN, BOLD, ITALIC = "F1", "F2", "F3"
+FONTS = {
+    "F1": "Times-Roman",
+    "F2": "Times-Bold",
+    "F3": "Times-Italic",
+    # A small-capitals face, named the way the corpus's own PDFs name it. Not a base-14 face, so
+    # `build_pdf` gives it a descriptor and uniform widths of its own; what the test needs from it
+    # is the name pdfminer reports, not its metrics.
+    "F4": "Times-Roman-SC700",
+}
+ROMAN, BOLD, ITALIC, SMALL_CAPS = "F1", "F2", "F3", "F4"
+_BASE14 = {"Times-Roman", "Times-Bold", "Times-Italic"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +70,23 @@ def build_pdf(
         objects.append(body)
         return len(objects)
 
-    font_ids = {
-        name: add(b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % base.encode())
-        for name, base in FONTS.items()
-    }
+    def font_object(base: str) -> bytes:
+        if base in _BASE14:
+            return b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % base.encode()
+        # pdfminer has no metrics for a face it does not know, so a non-standard face carries a
+        # descriptor and a width for every code, or every glyph would be zero points wide.
+        descriptor = add(
+            b"<< /Type /FontDescriptor /FontName /%s /Flags 32 /FontBBox [0 -200 1000 900] "
+            b"/ItalicAngle 0 /Ascent 700 /Descent -200 /CapHeight 700 /StemV 80 "
+            b"/MissingWidth 500 >>" % base.encode()
+        )
+        widths = b" ".join([b"500"] * 224)
+        return (
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /%s /FirstChar 32 /LastChar 255 "
+            b"/Widths [%s] /FontDescriptor %d 0 R >>" % (base.encode(), widths, descriptor)
+        )
+
+    font_ids = {name: add(font_object(base)) for name, base in FONTS.items()}
     pages_id = add(b"")  # reserved; the Pages node needs its kids' ids
     page_ids: list[int] = []
 

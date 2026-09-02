@@ -572,10 +572,10 @@ def test_a_sentence_tail_reading_jadual_is_not_a_schedule_heading() -> None:
     assert [child.node_type for child in root.children] == ["clause", "clause", "schedule"]
 
 
-def test_a_paragraph_list_restarting_under_one_parent_is_read_as_that_parents_prose() -> None:
+def test_a_paragraph_list_restarting_under_one_parent_becomes_the_next_of_several_lists() -> None:
     """An interpretation clause gives each defined term its own `(a)`, `(b)` list. One `para_a`
-    per parent cannot name them apart, so the lists become the subsection's text — every word
-    kept, no duplicate eId — rather than a rejected tree."""
+    per parent cannot name them apart, so each list is a numbered container of its own (ADR-043):
+    the structure is kept, the identifiers are distinct, and the gate passes."""
     markdown = "\n".join(
         [
             "2. Dalam Akta ini—",
@@ -585,14 +585,19 @@ def test_a_paragraph_list_restarting_under_one_parent_is_read_as_that_parents_pr
             "“Naib Canselor”—",
             "(a) berhubung dengan Universiti, ertinya Naib Canselor Universiti itu;",
             "(b) berhubung dengan Kolej Universiti, ertinya pihak berkuasa yang berkenaan.",
+            "(c) berhubung dengan mana-mana institusi lain, ertinya ketuanya.",
         ]
     )
     root = parse_markdown_structure(markdown, unit="clause")
     clause = root.children[0]
-    assert clause.children == []
-    assert "(a) sesuatu Universiti; atau" in clause.paragraphs
-    assert clause.paragraphs[-1].startswith("(b) berhubung dengan Kolej Universiti")
+    assert [(child.node_type, child.num) for child in clause.children] == [
+        ("list", "1"),
+        ("list", "2"),
+    ]
+    assert [item.num for item in clause.children[0].children] == ["a", "b"]
+    assert [item.num for item in clause.children[1].children] == ["a", "b", "c"]
     assign_eids(root)
+    assert clause.children[1].children[2].eid == "cl_2__list_2__para_c"
     assert fidelity.evaluate(root, markdown, unit="clause").passed
 
 
@@ -862,3 +867,203 @@ def test_the_arrangement_is_bounded_by_the_bare_intituled_word_and_the_long_enac
     lines = [strip_markdown_line(line) for line in markdown.splitlines()]
     assert lines[body_start(lines)] == "bernama"
     assert clause_numbers(parse_markdown_structure(markdown, unit="clause")) == ["1", "2"]
+
+
+def test_a_quotation_mark_carried_by_a_marginal_note_still_opens_the_quotation() -> None:
+    """The printed page puts the opening mark of an inserted section on its marginal note. Read
+    into a comment, the mark was invisible and the Ordinance's section 7 became clause 7."""
+    markdown = "\n".join(
+        [
+            "1. Short title",
+            "2. The Ordinance is amended by inserting after section 6 the following section:",
+            '<!-- marginal: "Cess on -->',
+            "7. (1) The Minister may after consultation with the Minister of Finance make orders.",
+            "<!-- marginal: rubber. -->",
+            '(2) An order under subsection (1) shall be published in the Gazette.".',
+            "3. Section 25 of the Ordinance is amended.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3"]
+    assert any(text.startswith("7. (1)") for text in root.children[1].paragraphs)
+
+
+def test_a_clause_number_whose_full_stop_reads_as_a_comma_is_still_the_next_clause() -> None:
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Tafsiran",
+            "3, Maka adalah dengan ini ditubuhkan suatu akademi bernama Akademi Sains Malaysia.",
+            "4. Matlamat Akademi",
+            "7, 8 dan 9 hendaklah dibaca bersama.",  # not the next number: a list, left as prose
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3", "4"]
+    assert root.children[2].paragraphs[0].startswith("Maka adalah")
+    assert root.children[3].paragraphs == ["7, 8 dan 9 hendaklah dibaca bersama."]
+
+
+def test_a_bare_number_line_is_a_wrapped_sentence_tail_unless_it_is_the_next_clause() -> None:
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Akta ibu adalah dipinda dengan memotong seksyen",
+            "4.",
+            "3. Akta ibu adalah dipinda dalam seksyen 27.",
+            "4.",
+            "Akta ibu adalah dipinda dengan memasukkan seksyen baharu.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3", "4"]
+    assert root.children[1].paragraphs[-1] == "4."
+    assert root.children[3].paragraphs == [
+        "Akta ibu adalah dipinda dengan memasukkan seksyen baharu."
+    ]
+
+
+def test_a_decimal_is_not_a_provision_number() -> None:
+    from billwatcher.graph.vocabulary import provision_number
+
+    assert provision_number("26.7936” East to 99˚ 47’ 13.1856” East") is None
+    assert provision_number("26. Akta ibu dipinda.") == ("26", "Akta ibu dipinda.")
+
+
+def test_a_clause_number_read_onto_the_end_of_its_marginal_note_still_opens_the_clause() -> None:
+    """`Amendment of 5.` is the note and the hanging number set beside it on one baseline; the
+    number is the bill's next, and "of" is not a word a note ends on. `Pindaan seksyen 5.` beside
+    clause 4 is a note about section 5, and is left alone."""
+    markdown = "\n".join(
+        [
+            "4. Section 30 of the principal Act is amended.",
+            "<!-- marginal: Amendment of 5. -->",
+            "Section 35 of the principal Act is amended by inserting a new subsection.",
+            "<!-- marginal: section 35. -->",
+            "<!-- marginal: Pindaan seksyen 6. -->",
+            "Seksyen 6 Akta ibu dipinda.",
+            "6. Seksyen 7 Akta ibu dipinda.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["4", "5", "6"]
+    assert root.children[1].heading == "Amendment of"
+    assert root.children[1].paragraphs == [
+        "Section 35 of the principal Act is amended by inserting a new subsection.",
+        "Seksyen 6 Akta ibu dipinda.",
+    ]
+
+
+# --- ADR-042: depth from the reading's geometry; ADR-043: articles and lists ---
+
+
+def blocks_for(markdown: str, indents: list[float]) -> list[dict[str, object]]:
+    """One geometry record per block of `markdown`, at the given indents."""
+    parts = markdown.split("\n\n")
+    assert len(parts) == len(indents)
+    return [{"page": 1, "indent": indent, "role": "body", "lead": ""} for indent in indents]
+
+
+def test_a_provision_number_set_deeper_than_the_clause_column_is_a_quoted_section() -> None:
+    """The Act's section 4, printed block-indented inside the clause that inserts it, carries no
+    quotation marks the reading kept. Its depth says what the marks would have: it is text of
+    clause 2, and clause 3 is the bill's next clause."""
+    markdown = "\n\n".join(
+        [
+            "1. This Act may be cited as the Example (Amendment) Act 2026.",
+            "2. The principal Act is amended by inserting after section 6 the following section:",
+            "4. (1) The Minister may make orders for the imposition of a cess.",
+            "(2) An order under subsection (1) shall be published in the Gazette.",
+            "(a) on rubber; and",
+            "(2) The insertion takes effect on the appointed date.",
+            "3. Section 25 of the principal Act is amended.",
+        ]
+    )
+    indents = [0.0, 0.0, 48.0, 60.0, 72.0, 12.0, 0.0]
+    root = parse_markdown_structure(markdown, unit="clause", blocks=blocks_for(markdown, indents))
+    assert clause_numbers(root) == ["1", "2", "3"]
+    clause_2 = root.children[1]
+    assert [child.num for child in clause_2.children] == ["2"]
+    assert any(text.startswith("4. (1)") for text in clause_2.paragraphs)
+    assert any(text.startswith("(a) on rubber") for text in clause_2.paragraphs)
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+    # Without geometry the same text reads as it always did: section 4 is close enough to the
+    # bill's own sequence to be taken for its clause 4.
+    assert "4" in clause_numbers(parse_markdown_structure(markdown, unit="clause"))
+
+
+def test_geometry_that_does_not_line_up_with_the_markdown_is_ignored_whole() -> None:
+    markdown = "1. Tajuk ringkas\n\n2. Tafsiran\n"
+    root = parse_markdown_structure(
+        markdown,
+        unit="clause",
+        blocks=[{"indent": 0.0}],  # two blocks, one record
+    )
+    assert clause_numbers(root) == ["1", "2"]
+
+
+def test_a_treatys_articles_inside_a_schedule_are_articles_and_number_from_one_per_schedule() -> (
+    None
+):
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "## JADUAL PERTAMA",
+            "## CHAPTER I",
+            "## ARTICLE 1",
+            "1. The sending State shall have the right to use its flag.",
+            "2. The receiving State shall facilitate the acquisition of premises.",
+            "## ARTICLE 2",
+            "1. Consular premises shall be inviolable.",
+            "## CHAPTER II",
+            "## ARTICLE 3",
+            "1. The consular post may communicate with nationals.",
+            "## JADUAL KEDUA",
+            "## PERKARA 1",
+            "1. Perjanjian ini hendaklah mula berkuat kuasa pada tarikh yang ditetapkan.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    first, second = (child for child in root.children if child.node_type == "schedule")
+    chapter_one, chapter_two = first.children
+    assert [(c.node_type, c.num) for c in chapter_one.children] == [
+        ("article", "1"),
+        ("article", "2"),
+    ]
+    assert [(c.node_type, c.num) for c in chapter_two.children] == [("article", "3")]
+    assert [item.node_type for item in chapter_one.children[0].children] == [
+        "paragraph",
+        "paragraph",
+    ]
+    assert [(c.node_type, c.num) for c in second.children] == [("article", "1")]
+    assign_eids(root)
+    assert chapter_one.children[1].children[0].eid == "sched_1__chp_I__art_2__para_1"
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_an_article_reference_that_opens_a_sentence_is_not_an_article_heading() -> None:
+    from billwatcher.graph.vocabulary import container_heading
+
+    assert container_heading("ARTICLE 5") == ("article", "5", "")
+    assert container_heading("Perkara 5 hendaklah dibaca bersama dengan Perkara 6.") is None
+
+
+def test_a_control_character_in_the_reading_does_not_make_the_xml_unparseable() -> None:
+    """A PDF's font produced U+0018 wherever it printed the digit 1; written out raw it made a
+    document that called itself XML and no parser would open, so a tree that passed the gate
+    recorded a failed render. The character is replaced, not deleted: `1967` does not become
+    `967`."""
+    markdown = "1. Tajuk ringkas\n\nAkta ini bolehlah dinamakan Akta Contoh \x18967.\n"
+    root = parse_markdown_structure(markdown, unit="clause")
+    assign_eids(root)
+    identity = identity_from_bill(BILL, doc_type="bill")
+    xml_bytes = render_akn(root, identity=identity, language="ms", bill=BILL)
+    document = ET.fromstring(xml_bytes)
+    paragraph = next(iter(document)).find(
+        f"{{{AKN_NS}}}body/{{{AKN_NS}}}clause/{{{AKN_NS}}}content/{{{AKN_NS}}}p"
+    )
+    assert paragraph is not None
+    assert paragraph.text == "Akta ini bolehlah dinamakan Akta Contoh \ufffd967."
+    assert validate_akn(xml_bytes) == []

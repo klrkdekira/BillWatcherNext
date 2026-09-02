@@ -34,6 +34,7 @@ KNOWN_FILENAMES = frozenset(
         "document.pdf",
         "metadata.json",
         "document.md",
+        "document.blocks.json",
         "document.markdown.provenance.json",
         "document.crosscheck.md",
         "document.crosscheck.provenance.json",
@@ -133,6 +134,15 @@ class PipelineStore(Protocol):
     def save_markdown(
         self, *, bill_slug: str, doc_key: str, version: int, content: str
     ) -> None: ...
+
+    def has_blocks(self, *, bill_slug: str, doc_key: str, version: int) -> bool: ...
+    def load_blocks(
+        self, *, bill_slug: str, doc_key: str, version: int
+    ) -> dict[str, Any] | None: ...
+    def save_blocks(
+        self, *, bill_slug: str, doc_key: str, version: int, record: dict[str, Any]
+    ) -> None: ...
+    def withdraw_blocks(self, *, bill_slug: str, doc_key: str, version: int) -> None: ...
 
     def has_crosscheck(self, *, bill_slug: str, doc_key: str, version: int) -> bool: ...
     def load_crosscheck(self, *, bill_slug: str, doc_key: str, version: int) -> str | None: ...
@@ -332,6 +342,34 @@ class FileStore:
     def save_markdown(self, *, bill_slug: str, doc_key: str, version: int, content: str) -> None:
         directory = self._document_dir(bill_slug=bill_slug, doc_key=doc_key, version=version)
         _write_if_changed(directory / "document.md", content.encode("utf-8"))
+
+    # --- the geometry beside the markdown (ADR-042) ---
+    #
+    # Part of the `markdown` artifact rather than an artifact of its own: it is written by the same
+    # import, under the same provenance record, and it describes the same reading block for block.
+    # A reading imported from elsewhere has none, and one written by the local reader has exactly
+    # one — which is why the writer can withdraw it when a foreign reading replaces a local one.
+
+    def has_blocks(self, *, bill_slug: str, doc_key: str, version: int) -> bool:
+        directory = self._document_dir(bill_slug=bill_slug, doc_key=doc_key, version=version)
+        return (directory / "document.blocks.json").exists()
+
+    def load_blocks(self, *, bill_slug: str, doc_key: str, version: int) -> dict[str, Any] | None:
+        path = (
+            self._document_dir(bill_slug=bill_slug, doc_key=doc_key, version=version)
+            / "document.blocks.json"
+        )
+        return _read_json(path) if path.exists() else None
+
+    def save_blocks(
+        self, *, bill_slug: str, doc_key: str, version: int, record: dict[str, Any]
+    ) -> None:
+        directory = self._document_dir(bill_slug=bill_slug, doc_key=doc_key, version=version)
+        _write_if_changed(directory / "document.blocks.json", sidecar_bytes(record))
+
+    def withdraw_blocks(self, *, bill_slug: str, doc_key: str, version: int) -> None:
+        directory = self._document_dir(bill_slug=bill_slug, doc_key=doc_key, version=version)
+        (directory / "document.blocks.json").unlink(missing_ok=True)
 
     # --- the second, independent reading kept for cross-reference (ADR-035) ---
     #
