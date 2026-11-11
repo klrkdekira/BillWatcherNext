@@ -141,6 +141,7 @@ part.
 ```sh
 make verify              # re-hash everything against its own sidecars and provenance
 make verify ARGS=--strict   # also report artifacts that are stale rather than damaged
+make audit               # parse and gate every stored reading with this checkout's code
 ```
 
 Offline, writes nothing, exits non-zero on any issue — which is what makes it safe to run between
@@ -148,6 +149,16 @@ two steps that do. A clean run certifies only what it can recompute from stored 
 nothing about whether a reading is a *correct* reading of the printed page; that is Gate P1's
 separate and weaker judgement, and the cross-check that could answer it properly was dropped in
 ADR-039.
+
+`make audit` is the other half, and the one to run before and after any change to the structure
+parser, the gate or the reader. It parses every stored reading with the code in this checkout,
+judges it with Gate P1, and compares the result with the verdict the last `make akn` left beside
+the document — without writing anything to the corpus. It takes seconds, and writes
+`documentation/structure-audit.md`, which is tracked: the findings grouped by family, and by name
+every reading that would now pass though recorded failing, or fail though recorded passing. The
+second list should be empty before a parser change is kept. After the change, `make akn` re-judges
+the corpus for real (raise `AKN_VERSION` or `STRUCTURE_GATE_VERSION` in `version.py` so the stored
+verdicts are seen as stale), and a second `make audit` should then report no difference at all.
 
 ## Publishing
 

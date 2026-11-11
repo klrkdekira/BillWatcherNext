@@ -105,6 +105,17 @@ Provisions relate by `eli:has_part` / `eli:is_part_of`, carry `eli:number` and, 
 printed one, a `schema:name` heading tagged with its language. The expression node carries
 `eli:is_realized_by` back to the work, `eli:language`, and `eli:jurisdiction`.
 
+A provision's identifier is its path through the tree, and the tree has a place for every printed
+shape the gate can check. Beyond the usual hierarchy — Part, Chapter, clause, subsection,
+paragraph, subparagraph, Schedule — two node types exist for drafting that restarts its own
+numbering (ADR-043, ADR-044). A `list` holds one of several runs under a single parent: each
+defined term's own `(a)`, `(b)` in an interpretation clause, or a Schedule's items that begin
+again at `1.` (`sched_1__list_2__para_3`). An `article` is `ARTICLE N` / `PERKARA N` of a treaty
+set out in a Schedule. A lettered list introduced by an item's own closing dash is not a `list`
+but nests beneath that item (`cl_10__para_d__para_a`). A Schedule or parent with a single run is
+identified exactly as it was before either decision, so no identifier moved. Not modelled: a table
+as a table (its numbered rows are read as a list), and an Act consolidated whole inside a Schedule.
+
 The graph asserts structure and identity. It does not assert that a reading is a correct reading of
 the printed page — that is Gate P1's separate and weaker judgement, and `index.json`'s `reading`
 block is where the pipeline says how much it trusts its own work.

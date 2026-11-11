@@ -989,9 +989,9 @@ def test_a_provision_number_set_deeper_than_the_clause_column_is_a_quoted_sectio
     assign_eids(root)
     assert fidelity.evaluate(root, markdown, unit="clause").passed
 
-    # Without geometry the same text reads as it always did: section 4 is close enough to the
-    # bill's own sequence to be taken for its clause 4.
-    assert "4" in clause_numbers(parse_markdown_structure(markdown, unit="clause"))
+    # Without geometry the colon that introduces the insertion says the same thing: a numbered
+    # line straight after `...the following section:` is the section quoted, not clause 4.
+    assert clause_numbers(parse_markdown_structure(markdown, unit="clause")) == ["1", "2", "3"]
 
 
 def test_geometry_that_does_not_line_up_with_the_markdown_is_ignored_whole() -> None:
@@ -1067,3 +1067,278 @@ def test_a_control_character_in_the_reading_does_not_make_the_xml_unparseable() 
     assert paragraph is not None
     assert paragraph.text == "Akta ini bolehlah dinamakan Akta Contoh \ufffd967."
     assert validate_akn(xml_bytes) == []
+
+
+# --- the second audit's shapes (AKN_VERSION 1.6.0) -------------------------------------------
+
+
+def test_a_straight_single_quoted_insertion_is_the_introducing_paragraphs_text() -> None:
+    """`' "term" means ...;'`: the older typesetting's quotation marks. Its inner `(a)`, `(b)`
+    are the definition's, not the bill's, and the bill's `(b)` still follows its `(a)`."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Seksyen 3 Akta ibu dipinda—",
+            "(a) dengan memasukkan takrif yang berikut:",
+            '\' "secret" means information relating to—',
+            "(a) any manufacturing process;",
+            "(b) any product; or",
+            "(c) any idea of duplication;';",
+            '(b) dengan memotong takrif "fence".',
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    clause_2 = root.children[1]
+    assert [child.num for child in clause_2.children] == ["a", "b"]
+    assert any("any product" in text for text in clause_2.children[0].paragraphs)
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_a_numbered_line_after_the_introducing_colon_is_the_section_quoted() -> None:
+    """`...seksyen yang berikut:` then `3A. An officer...`: the inserted section with its marks
+    lost. Its number is the principal Act's, whatever it is — even the bill's own next number, as
+    clause 18 substituting section 19 prints — and its text stays with the clause."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Ordinan dipinda dengan memasukkan selepas seksyen 3 seksyen yang berikut:",
+            "3A. An officer appointed under subsection (1A) shall not exercise any power.",
+            "(2) The officer shall report to the Director.",
+            "3. Seksyen 4 Ordinan dipinda dengan memotong subseksyen (2).",
+            "4. Akta ibu dipinda dengan menggantikan seksyen 5 dengan seksyen yang berikut:",
+            "5. Every company shall keep a register.",
+            "5. Akta ibu dipinda dengan memotong seksyen 22.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3", "4", "5"]
+    assert any(text.startswith("3A.") for text in root.children[1].paragraphs)
+    assert root.children[1].children == []
+    assert any("keep a register" in text for text in root.children[3].paragraphs)
+    # The fragment `the following section:` set above the clause it belongs to is not an
+    # introduction: the clause after it still opens.
+    swapped = (
+        "1. Tajuk ringkas\n2. Seksyen 5 dipinda.\nthe following section:\n3. Seksyen 6 dipinda."
+    )
+    assert clause_numbers(parse_markdown_structure(swapped, unit="clause")) == ["1", "2", "3"]
+
+
+def test_a_number_running_backwards_with_an_insertion_letter_is_a_quoted_section() -> None:
+    """`7B.` after clause 11 cannot be this bill's clause; a plain backwards number is left to the
+    gate, because an Arrangement read as a second body prints plain numbers."""
+    markdown = (
+        "1. Tajuk ringkas\n2. Akta ibu dipinda.\n1B. Notwithstanding section 1A.\n3. Penalti."
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3"]
+    plain = "1. Tajuk ringkas\n2. Akta ibu dipinda.\n1. Notwithstanding section 6.\n3. Penalti."
+    assert clause_numbers(parse_markdown_structure(plain, unit="clause")) == ["1", "2", "1", "3"]
+
+
+def test_the_open_parts_heading_printed_again_is_a_running_head() -> None:
+    markdown = "\n".join(
+        [
+            "## BAHAGIAN I",
+            "1. Tajuk ringkas",
+            "## BAHAGIAN I",
+            "2. Tafsiran",
+            "## JADUAL PERTAMA",
+            "1. Butiran pertama.",
+            "## JADUAL PERTAMA",
+            "2. Butiran kedua.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [(child.node_type, child.num) for child in root.children] == [
+        ("part", "I"),
+        ("schedule", "1"),
+    ]
+    assert clause_numbers(root) == ["1", "2"]
+    assert [child.num for child in root.children[1].children] == ["1", "2"]
+
+
+def test_a_part_reference_wrapped_onto_a_heading_line_is_the_sentence_continuing() -> None:
+    """`...kesalahan di bawah` then `Bahagian IV Akta Suruhanjaya Pencegahan Rasuah`, set as a
+    heading for being short and title-cased, while Part IV is not the bill's next Part."""
+    markdown = "\n".join(
+        [
+            "## BAHAGIAN II",
+            "1. Tajuk ringkas",
+            "2. Pengelasan aduan adalah seperti yang berikut:",
+            "(a) jika aduan melibatkan apa-apa kesalahan di bawah",
+            "## Bahagian IV Akta Suruhanjaya Pencegahan Rasuah",
+            "Malaysia 2009, aduan itu hendaklah dirujuk;",
+            "(b) jika aduan lain, aduan itu hendaklah ditolak.",
+            "## BAHAGIAN III",
+            "3. Penalti.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [child.num for child in root.children] == ["II", "III"]
+    assert [child.num for child in root.children[0].children[1].children] == ["a", "b"]
+
+
+def test_a_glued_subsection_opener_is_split_onto_its_own_line() -> None:
+    """`...ditetapkan oleh Majlis. (2) Mesyuarat agung...` is two subsections the reading joined;
+    `1. (1) Akta ini...` and `Registrar, 8. (1) ...` are one provision opening with its first."""
+    markdown = "\n\n".join(
+        [
+            "1. (1) Akta ini bolehlah dinamakan Akta Contoh. (2) Akta ini mula berkuat kuasa "
+            "pada tarikh yang ditetapkan.",
+            "(3) Prosedur bagi mesyuarat hendaklah mengikut peraturan.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [child.num for child in root.children[0].children] == ["1", "2", "3"]
+
+
+def test_the_glyph_confusions_of_the_older_typeface_are_read_at_their_one_possible_position() -> (
+    None
+):
+    """`(h)` straight after `(a)` is `(b)`, `(I)` beneath `(h)` is `(i)`, and `Cd)`, `( 1)`,
+    `(3 The` and `(1.0)` are the brackets the reading garbled — each accepted only where the
+    sequence leaves no other reading."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. ( 1) Lembaga hendaklah—",
+            "(a) menerima wang;",
+            "(h) membuat perjanjian;",
+            "(c) memperoleh hak;",
+            "Cd) menyediakan bantuan;",
+            "(e) menugaskan orang;",
+            "(f) memberikan perakuan;",
+            "(g) mengutip;",
+            "(h) memegang;",
+            "(I) menyediakan bantuan kewangan;",
+            "(j) menugaskan mana-mana orang.",
+            "(2 Lembaga boleh melantik pegawai.",
+            "(3) Lembaga hendaklah melaporkan.",
+            "(4.) Lembaga boleh membuat peraturan.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    clause_2 = root.children[1]
+    assert [child.num for child in clause_2.children] == ["1", "2", "3", "4"]
+    assert [child.num for child in clause_2.children[0].children] == list("abcdefghij")
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_a_schedules_restarting_items_are_the_next_of_several_lists() -> None:
+    """ADR-044: an Illustration's steps numbered from 1 again beneath paragraph 5."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "## JADUAL",
+            "1. Butiran pertama.",
+            "2. Butiran kedua.",
+            "Misalan",
+            "1. Jika sewa ialah RM50, maka R = RM50.",
+            "2. Jika kadar tahunan ialah RM108, maka M = RM150.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    schedule = root.children[1]
+    assert [child.node_type for child in schedule.children] == ["list", "list"]
+    assert [[item.num for item in group.children] for group in schedule.children] == [
+        ["1", "2"],
+        ["1", "2"],
+    ]
+    assign_eids(root)
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_a_list_introduced_by_an_items_own_dash_nests_beneath_that_item() -> None:
+    """ADR-044: `(d) dalam subseksyen (3)—` then `(a)`, `(b)` is `(d)`'s list, and `(e)` after it
+    continues `(d)`; a restart after a defined term's prose is still a sibling list."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Seksyen 4 Akta ibu dipinda—",
+            "(a) dalam subseksyen (1), dengan memotong perkataan “dan”;",
+            "(b) dalam subseksyen (2), dengan memotong perkataan “atau”;",
+            "(c) dalam subseksyen (2A), dengan memotong perkataan “jika”;",
+            "(d) dalam subseksyen (3)—",
+            "(a) dalam perenggan (a), dengan memotong perkataan “and”; dan",
+            "(b) dalam perenggan (b), dengan memotong perkataan “or”;",
+            "(e) dengan memotong subseksyen (4).",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    clause = root.children[1]
+    assert [child.num for child in clause.children] == ["a", "b", "c", "d", "e"]
+    assert [child.num for child in clause.children[3].children] == ["a", "b"]
+    assign_eids(root)
+    assert clause.children[3].children[0].eid == "cl_2__para_d__para_a"
+    assert fidelity.evaluate(root, markdown, unit="clause").passed
+
+
+def test_a_schedule_heading_followed_by_the_bills_next_clause_is_a_marginal_note() -> None:
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Majlis hendaklah terdiri daripada tiga anggota.",
+            "## Schedule.",
+            "3. (1) The provisions of the Schedule shall apply to members of the Council.",
+            "## SCHEDULE",
+            "1. The Council shall meet four times a year.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert clause_numbers(root) == ["1", "2", "3"]
+    assert [child.node_type for child in root.children] == [
+        "clause",
+        "clause",
+        "clause",
+        "schedule",
+    ]
+
+
+def test_a_reference_pair_wrapped_onto_two_lines_does_not_open_a_paragraph() -> None:
+    """`...substituting for paragraphs (a) and` / `(b) the following paragraphs:`, and `(1)(d),
+    perenggan-perenggan baru`, and `(b); or` — each the number of a reference, wrapped."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Seksyen 5 Akta ibu dipinda—",
+            "(a) dalam subseksyen (1), dengan memotong perkataan “dan”;",
+            "(b) dalam subseksyen (2), dengan menggantikan perenggan (a) dan",
+            "(b) dengan perenggan yang berikut:",
+            "“(a) tiada apa-apa;",
+            "(b) tiada apa-apa lagi.”; dan",
+            "(c) dengan memotong subseksyen (3).",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [child.num for child in root.children[1].children] == ["a", "b", "c"]
+
+
+def test_a_marginal_note_carrying_the_closing_mark_ends_the_quotation() -> None:
+    """`“29A CONSTITUTION OF A` / `<!-- marginal: RM200.00”. -->`: the quoted table's closing
+    mark sits in the margin column beside its last row, and the paragraph after it is the
+    bill's own."""
+    markdown = "\n".join(
+        [
+            "1. Tajuk ringkas",
+            "2. Jadual Pertama Akta ibu dipinda—",
+            "(a) dengan memotong butiran 10;",
+            "(b) dengan memasukkan selepas butiran 29 butiran yang berikut:",
+            "“29A CONSTITUTION OF A COMPANY",
+            "<!-- marginal: RM200.00”. -->",
+            "(c) dalam subbutiran 32(a), dengan memotong perkataan “duty”.",
+        ]
+    )
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [child.num for child in root.children[1].children] == ["a", "b", "c"]
+
+
+def test_a_heading_word_with_a_stray_space_inside_it_is_still_the_heading() -> None:
+    markdown = "1. Tajuk ringkas\n## P A RT II\n2. Tafsiran\n## SECOND S CHEDULE\n1. Audiologist"
+    root = parse_markdown_structure(markdown, unit="clause")
+    assert [(child.node_type, child.num) for child in root.children] == [
+        ("clause", "1"),
+        ("part", "II"),
+        ("schedule", "2"),
+    ]

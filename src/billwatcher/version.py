@@ -43,7 +43,13 @@ NORMALIZER_VERSION = "1.0.0"
 # from glyph geometry: `FIrst s chedule` was `FIRST SCHEDULE`, `BAhAgiAN` was `BAHAGIAN`. And text
 # drawn from outside the page box — a mis-registered second layer that duplicated every line of
 # its pages — is not on the page.
-LAYOUT_EXTRACTOR_VERSION = "2.5.0"
+# 2.6.0: a page number never wears brackets, is among the first or last lines printed on its page,
+# and has no bracketed text beside it on its baseline. `(c)` or `(3)` at the very top of a page —
+# the paragraph or subsection that happens to open it — and `7.` at the very bottom — a clause
+# number hanging on the last baseline, its `(1)` beside it — were read as page numbers, and the
+# line beside either as the running head, so the first or last line of the page was lost
+# (measured: 16 readings rejected by Gate P1 for exactly the paragraph that opened a page).
+LAYOUT_EXTRACTOR_VERSION = "2.6.0"
 # The local, layout-driven markdown reading (ADR-035). Versioned apart from
 # LAYOUT_EXTRACTOR_VERSION because this is the markdown *assembly* on top of that reading — a
 # change to how roles become markdown re-reads the corpus without the geometry itself having moved.
@@ -71,7 +77,9 @@ LAYOUT_EXTRACTOR_VERSION = "2.5.0"
 # ADR-042), under the same provenance record. 1.6.0 had already been built and committed before
 # either change, so a corpus at 1.6.0 was skipped as current and never got its sidecars — which
 # is why a local reading without one is also treated as stale by the step itself.
-LOCAL_READING_VERSION = "1.7.0"
+# 1.8.0: carrier for LAYOUT_EXTRACTOR_VERSION 2.6.0 (a bracketed token at the top of a page, or a
+# number with a provision's text beside it at the bottom, is not a page number).
+LOCAL_READING_VERSION = "1.8.0"
 # The cross-check comparison (ADR-035 decisions 5 and 6): the tokenisation two readings are
 # compared over and the agreement measure taken across it. Its own version because the threshold
 # and the measure re-judge every pair without either reading having moved.
@@ -114,7 +122,24 @@ CROSSCHECK_VERSION = "1.0.0"
 # that restarts under one parent becomes the next of several numbered `list` containers instead of
 # the parent's prose, and `ARTICLE N` / `PERKARA N` inside a Schedule is an `article`. Containers
 # nest by rank (Part, Chapter, Article), inside a Schedule as well as in the body.
-AKN_VERSION = "1.5.0"
+# 1.6.0: the parser stops misreading another set of printed shapes, each measured over the corpus
+# before it was touched (documentation/status.md, "Second audit"). Quotations: a straight-single-
+# quoted insertion (`' "term" means...;'`), a curly-single opening (`‘ “value”—`), a mark carried
+# by a marginal note closing as well as opening, a quoted word wrapped across two lines, and the
+# bill's own next Part heading ending a quotation that never closed. Quoted sections: a numbered
+# line after `...the following section:` — with or without its marginal note spliced ahead of the
+# number — is the section quoted, and so is a Part or Schedule heading after that colon; a number
+# that runs backwards with an insertion letter (`7B` after clause 11) cannot be this bill's. Wraps:
+# a provision number or Part heading opening a line that continues the unfinished sentence before
+# it, the second half of a reference pair (`paragraphs (a) and` / `(b) ...`), `(b); or`, and a
+# glued `(2)` mid-line split onto its own line. Furniture: the running head of the open Part or
+# Schedule printed again, `Schedule.` as a clause's marginal note, and a heading word with a stray
+# space inside it. Misprints, each accepted only at the one position it must be: `(h)` for `(b)`
+# straight after `(a)`, `(I)` for the next lower-case letter, `( 1)`, `(3 The`, `(1.0)`, `Cd)`,
+# `{f)`, `4 1.` and `(3.)`. Two modelling changes, ADR-044: a Schedule's numbered items that
+# restart under it are one of several `list` containers, and a lettered list introduced by an
+# item's own dash nests beneath that item.
+AKN_VERSION = "1.6.0"
 # Gate P1, the AKN fidelity gate: the deterministic check that a provision tree accounts for the
 # markdown it was read from. Its own version because a threshold change re-judges every document
 # without re-rendering any of them.
@@ -127,7 +152,12 @@ AKN_VERSION = "1.5.0"
 # 1.3.0: document-wide runs are scoped to the Schedule they sit in — a Schedule's Parts number from
 # I and a treaty's Articles from 1 whatever the body did, and two Schedules each begin again — and
 # `list` restarts per parent like the lists it holds.
-STRUCTURE_GATE_VERSION = "1.3.0"
+# 1.4.0: a paragraph run printed in roman numerals (`(i)`, `(ii)`... directly beneath a clause) is
+# judged as the numerals it prints rather than walked as letters, and the coverage view begins at
+# the first structural marker after the enacting formula in every printed form of it — including
+# one split over two lines, and mid-sentence (`PURSUANT to Article 76..., ENACTED by`) — and
+# never at a year wrapped onto its own line (`2009. [ ]`).
+STRUCTURE_GATE_VERSION = "1.4.0"
 # The Akoma Ntoso -> ELI JSON-LD / RDF N-Quads graph construction (ADR-023, ADR-028).
 SEMANTIC_VERSION = "1.0.0"
 # The corpus -> published site tree projection (ADR-029, ADR-033): definition shapes, catalogue,

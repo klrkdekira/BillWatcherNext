@@ -164,8 +164,20 @@ def arrangement_heading(text: str) -> tuple[str, str] | None:
 
 # `Bahagian I`, `PART IV`, `Bab 2`, `Chapter 2`, `ARTICLE 5`, `Perkara 5`. The number may be roman
 # or arabic; both are published. A heading may follow on the same line or the next one.
+def _spaced(word: str) -> str:
+    """A pattern for `word` with the reading's stray spaces inside it: `P A RT`, `S CHEDULE`.
+
+    The layout reader rejoins letterspaced lines from glyph geometry, but a heading set in a
+    display face still comes through with a space or two inside the word now and then, and a
+    heading that is not recognised turns a Schedule's items into clauses.
+    """
+    return r"\s?".join(re.escape(letter) for letter in word)
+
+
 _CONTAINER_RE = re.compile(
-    r"^\s*(?P<word>bahagian|part|bab|chapter|article|perkara)\s+"
+    r"^\s*(?P<word>"
+    + "|".join(_spaced(w) for w in ("bahagian", "part", "bab", "chapter", "article", "perkara"))
+    + r")\s+"
     r"(?P<num>[IVXLCDM]+|\d+[A-Z]?)\b\W*(?P<heading>.*)$",
     re.IGNORECASE,
 )
@@ -227,7 +239,9 @@ def _reads_as_prose(heading: str) -> bool:
     words = heading.split()
     if not words:
         return False
-    if words[0][0].islower():
+    if words[0][0].islower() or words[0][0] in ",;":
+        # `Part III, IV, V or VI, by order published...`: a list of Parts referred to, wrapped
+        # onto its own line. A title does not begin with a comma.
         return True
     lower = [
         word
@@ -249,7 +263,7 @@ def container_heading(text: str) -> tuple[str, str, str] | None:
     heading = match.group("heading").strip(" .")
     if _reads_as_prose(heading):
         return None
-    node_type = _CONTAINER_TYPE[match.group("word").casefold()]
+    node_type = _CONTAINER_TYPE[match.group("word").replace(" ", "").casefold()]
     return node_type, match.group("num").upper(), heading
 
 
@@ -258,7 +272,7 @@ def container_heading(text: str) -> tuple[str, str, str] | None:
 # second section 1.
 _SCHEDULE_RE = re.compile(
     r"^\s*(?:(?P<ordinal_en>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+)?"
-    r"(?P<word>jadual|schedule)"
+    r"(?P<word>" + _spaced("jadual") + "|" + _spaced("schedule") + r")"
     r"(?:\s+(?P<ordinal_ms>pertama|kedua|ketiga|keempat|kelima|keenam|ketujuh|kelapan|"
     r"kesembilan|kesepuluh)|\s+(?P<num>[IVXLCDM]+|\d+))?"
     # `FIRST SCHEDULE [Section 14]`: the enabling provision, bracketed on the heading line.
@@ -370,12 +384,24 @@ def ends_in_reference(text: str) -> bool:
     return _REFERENCE_WORD_RE.search(stripped) is not None
 
 
+# The words that take an Act's number: `Akta 3.` in a margin is the citation of Act 3, not a note
+# ending in the hanging number of clause 3. Kept apart from `_REFERENCE_WORD_RE`: a body line that
+# ends on "Act" is a sentence that wrapped, and the `(2)` beneath it is the next subsection, not a
+# reference's number (measured: three readings lost a subsection when the two were merged).
+_CITATION_WORD_RE = re.compile(r"\b(?:acts?|akta|ordinances?|ordinan)$", re.IGNORECASE)
+
+
+def ends_in_citation(text: str) -> bool:
+    """Whether this line ends on the word an Act's number follows: `...Akta`, `...under the Act`."""
+    return _CITATION_WORD_RE.search(" ".join(text.split())) is not None
+
+
 # What a heading-shaped line may end with and still be a heading. A Part or Schedule heading is a
 # label; the reading that produced `Jadual.` or `Bahagian IV.` was the tail of a sentence — `...
 # yang dinyatakan dalam Jadual.` — that wrapped onto its own line and was read as a heading for
 # being short. Measured: 199 such `Jadual.` / `Schedule.` lines across 145 readings, 124 of them
 # rejected, because the false schedule swallowed every clause after it as a schedule paragraph.
-_SENTENCE_TAIL_RE = re.compile(r"[.;:,](?:[\"“”'’)\]]*)$")
+_SENTENCE_TAIL_RE = re.compile(r"[.;:,—–](?:[\"“”'’)\]]*)$")
 
 
 def is_sentence_tail(text: str) -> bool:
@@ -427,9 +453,35 @@ _BODY_OPENING_RE = re.compile(
 )
 
 
-def body_opening(text: str) -> bool:
-    """Whether this line opens the bill's own text, closing any Arrangement above it."""
-    return _BODY_OPENING_RE.match(" ".join(text.split())) is not None
+# The title-block forms alone: the ones a running head can also print. The enacting-formula forms
+# need no confirmation — no running head reads `DIPERBUAT oleh Parlimen`.
+_TITLE_BLOCK_RE = re.compile(
+    r"^(a\s*bill\b|(suatu\s+)?rang\s+undang-?undang\b(?!\s+ini\b))", re.IGNORECASE
+)
+
+# What follows a real title block within a few lines: the word introducing the long title, the
+# long title itself, or the enacting formula.
+_TITLE_BLOCK_CONFIRMATION_RE = re.compile(
+    r"^(bernama\b|intituled\b|suatu\s+akta\b|an\s+act\b|be\s+i[tx]\s+enacted\b|it\s+is\s+enacted\b"
+    r"|enacted\s+by\b|diperbuat\s+oleh\b|maka,?\s+(inilah|oleh\s+yang\s+demikian)\b)",
+    re.IGNORECASE,
+)
+
+
+def body_opening(text: str, *, title_block_only: bool = False) -> bool:
+    """Whether this line opens the bill's own text, closing any Arrangement above it.
+
+    With `title_block_only`, whether it does so as a title block (`A BILL`, `RANG UNDANG-UNDANG`)
+    rather than as the enacting formula — the forms a running head can also print, which
+    `tree.body_start` therefore confirms against the lines that follow.
+    """
+    pattern = _TITLE_BLOCK_RE if title_block_only else _BODY_OPENING_RE
+    return pattern.match(" ".join(text.split())) is not None
+
+
+def confirms_title_block(text: str) -> bool:
+    """Whether this line is what a title block is followed by: `bernama`, the long title, ..."""
+    return _TITLE_BLOCK_CONFIRMATION_RE.match(" ".join(text.split())) is not None
 
 
 # An amendment bill prints the text it inserts into the principal Act inside quotation marks, and
@@ -468,7 +520,52 @@ def opens_quotation(text: str) -> bool:
     The caller decides by parity whether the quotation runs on past this line, which is what keeps
     a definition quoted and closed on one line from opening anything.
     """
-    return _QUOTE_OPEN_RE.match(text) is not None or _QUOTE_INTRODUCED_RE.search(text) is not None
+    return begins_with_mark(text) or _QUOTE_INTRODUCED_RE.search(text) is not None
+
+
+def begins_with_mark(text: str) -> bool:
+    """Whether the line's first character is a quotation mark — double, or the curly single `‘`.
+
+    The curly single is the mark an amendment inserting a *definition* opens with (`‘ “value”—`),
+    and a parser that tested the first character against the double marks alone let that line's
+    odd count pass without opening anything, so the definition's own `(a)`, `(b)` were read as
+    the bill's paragraphs (measured: the paragraph run then jumped backwards from `(xxvi)`).
+    """
+    return _QUOTE_OPEN_RE.match(text) is not None
+
+
+# The older typesetting quotes an inserted definition in *straight* single quotes, with the
+# defined term in doubles inside: `' "amusement device" means any contrivance...;'`. The straight
+# single is also the apostrophe, so it cannot be counted with the other marks; what makes these two
+# positions unambiguous is that no apostrophe opens a line ahead of a double mark, and none closes
+# a line straight after punctuation. `*` is the reading's own rendering of the opening mark in one
+# face (`* "Director of Marine" means...`), and `''` of the mark before a bracketed paragraph
+# (`''(ha) melantik ahli-ahli...`); the raw line is tested because the markdown reader would
+# otherwise strip the `*` as a bullet.
+_STRAIGHT_OPEN_RE = re.compile(r"^\s*['*](?=\s*[\"“‘('])")
+_STRAIGHT_CLOSE_RE = re.compile(
+    r"(?<=[.;,:\"”’)\]])['’](?=[.;,:)\]]|\s|$)"
+    # `...Konvensyen Montreal;";` — the closing straight mark read as a double one. A double mark
+    # right after the semicolon or stop that ends a definition, and nothing but punctuation after
+    # it, closes an insertion; a definition's own marks wrap its term at the front.
+    r"|(?<=[.;])[\"”](?=[;.]?\s*$)"
+)
+
+
+def opens_straight_quotation(raw_line: str) -> bool:
+    """Whether this line opens a straight-single-quoted insertion: `' "term" means ...`."""
+    return _STRAIGHT_OPEN_RE.match(raw_line.strip().lstrip("#")) is not None
+
+
+def closes_straight_quotation(text: str) -> bool:
+    """Whether this line carries the mark that ends a straight-single-quoted insertion.
+
+    `...;'`, `...;';`, or `...[Act 443]', which is` — anywhere on the line, because the reading
+    sometimes sets the words after the mark ahead of it, and a close that had to end the line
+    left the span open to the next clause (measured: one Chapter heading swallowed that way).
+    The curly `’` closes it too: the reading renders the same printed mark either way.
+    """
+    return _STRAIGHT_CLOSE_RE.search(text) is not None
 
 
 def quotation_marks(text: str) -> int:
@@ -498,8 +595,15 @@ _PROVISION_NUM_RE = re.compile(r"^\s*(?P<num>\d{1,4}[A-Z]{0,2})\s*\.(?!\d)\s*(?P
 # it is cannot be decided from the token alone; `resolve_letter` decides it from the sequence the
 # token continues. Guessing here is how a paragraph list silently becomes a subparagraph list,
 # which changes every eId beneath it.
-_SUBSECTION_RE = re.compile(r"^\s*\((?P<num>\d{1,3}[A-Z]{0,2})\)\s*(?P<rest>.*)$")
-_LETTER_RE = re.compile(r"^\s*\((?P<num>[A-Za-z]{1,4})\)\s*(?P<rest>.*)$")
+# A space inside the brackets — `( 1)`, `( d)` — is the reading's, not the drafter's.
+_SUBSECTION_RE = re.compile(r"^\s*\(\s?(?P<num>\d{1,3}[A-Z]{0,2})\s?\)\s*(?P<rest>.*)$")
+# A letter token is one or two letters (`a`, `aa`, `ea`, `A`) or a roman numeral (`viii`, `xviii`);
+# `(Kagu)` and `(Boas)` in a schedule of species are words in brackets, not the fourth paragraph.
+# The reading sometimes spaces the letters of a numeral apart — `( i i i)` — so they are gathered.
+_LETTER_RE = re.compile(
+    r"^\s*\(\s?(?P<num>[A-Za-z]{1,2}|[ivxlc]{3,7}|[IVXLC]{3,7}|(?:[ivx] ?){2,6})\s?\)"
+    r"\s*(?P<rest>.*)$"
+)
 
 _ROMAN_VALUES = MappingProxyType({"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000})
 _ROMAN_NUMERALS = (
@@ -543,7 +647,7 @@ def parenthesised(text: str) -> tuple[str, str, str] | None:
         return "subsection", match.group("num").upper(), match.group("rest").strip()
     match = _LETTER_RE.match(text)
     if match:
-        return "letter", match.group("num"), match.group("rest").strip()
+        return "letter", match.group("num").replace(" ", ""), match.group("rest").strip()
     return None
 
 

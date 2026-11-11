@@ -1,14 +1,14 @@
 # Structure audit
 
-Parser `AKN_VERSION` 1.5.0, gate `STRUCTURE_GATE_VERSION` 1.3.0, over every stored reading, without writing anything. "Recorded" is the verdict the last `convert-to-akn` run left beside the document; "would pass" is what the code in this checkout decides now.
+Parser `AKN_VERSION` 1.6.0, gate `STRUCTURE_GATE_VERSION` 1.4.0, over every stored reading, without writing anything. "Recorded" is the verdict the last `convert-to-akn` run left beside the document; "would pass" is what the code in this checkout decides now.
 
 | | |
 | --- | --- |
 | Readings audited | 2,479 |
 | — with block geometry | 2,479 |
-| Would pass Gate P1 | 1,972 |
-| Recorded as passing | 1,971 |
-| Would pass, recorded failing | 1 |
+| Would pass Gate P1 | 2,200 |
+| Recorded as passing | 2,200 |
+| Would pass, recorded failing | 0 |
 | Would fail, recorded passing | 0 |
 | No recorded verdict | 0 |
 | Parser raised | 0 |
@@ -19,21 +19,22 @@ Documents carrying at least one finding of the family, and the total number of f
 
 | Family | Documents | Findings |
 | --- | --- | --- |
-| `paragraph/sequence_gap` | 223 | 465 |
-| `provision/sequence_order` | 155 | 265 |
-| `paragraph/sequence_order` | 130 | 230 |
-| `container/sequence_order` | 122 | 243 |
-| `container/duplicate_eid` | 116 | 276 |
-| `provision/duplicate_eid` | 113 | 796 |
-| `provision/sequence_gap` | 108 | 153 |
-| `container/sequence_gap` | 90 | 130 |
-| `paragraph/duplicate_eid` | 68 | 420 |
-| `subsection/sequence_gap` | 60 | 89 |
-| `provision/unanchored_run` | 29 | 29 |
-| `subsection/duplicate_eid` | 29 | 92 |
-| `subsection/sequence_order` | 14 | 17 |
-| `document/low_text_coverage` | 10 | 10 |
-| `subparagraph/duplicate_eid` | 4 | 9 |
+| `paragraph/sequence_gap` | 120 | 247 |
+| `provision/sequence_order` | 75 | 131 |
+| `provision/sequence_gap` | 72 | 84 |
+| `provision/duplicate_eid` | 58 | 365 |
+| `container/sequence_gap` | 52 | 79 |
+| `paragraph/sequence_order` | 35 | 39 |
+| `container/sequence_order` | 31 | 34 |
+| `subsection/sequence_gap` | 27 | 32 |
+| `container/duplicate_eid` | 22 | 100 |
+| `subsection/duplicate_eid` | 14 | 47 |
+| `paragraph/duplicate_eid` | 12 | 65 |
+| `subparagraph/sequence_gap` | 10 | 10 |
+| `subsection/sequence_order` | 9 | 13 |
+| `document/low_text_coverage` | 3 | 3 |
+| `provision/unanchored_run` | 3 | 3 |
+| `subparagraph/duplicate_eid` | 3 | 8 |
 
 ## Would fail, recorded passing
 
@@ -41,4 +42,4 @@ None.
 
 ## Would pass, recorded failing
 
-- `dr-44-2007/doc-21109d59/v001`
+None.

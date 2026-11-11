@@ -27,8 +27,8 @@ for documents upstream does not publish.
 
 | Language | Referenced | Stored | Markdown | No text layer | Akoma Ntoso | Semantic |
 | --- | --: | --: | --: | --: | --: | --: |
-| `ms` | 1,282 | 1,259 | 1,247 | 12 | 976 | 976 |
-| `en` | 1,256 | 1,230 | 1,218 | 12 | 983 | 983 |
+| `ms` | 1,282 | 1,259 | 1,247 | 12 | 1,101 | 1,101 |
+| `en` | 1,256 | 1,230 | 1,218 | 12 | 1,086 | 1,086 |
 | `unsettled` | 14 | 14 | 14 | 0 | 13 | 13 |
 
 ### Fidelity gate verdicts
@@ -36,8 +36,8 @@ for documents upstream does not publish.
 | Verdict | Readings |
 | --- | --: |
 | `empty_tree` | 1 |
-| `mismatch` | 506 |
-| `passed` | 1,972 |
+| `mismatch` | 278 |
+| `passed` | 2,200 |
 
 ### Published dataset
 
@@ -84,8 +84,8 @@ for documents upstream does not publish.
 
 ### Not yet run — actionable
 
-- 271 `ms` reading(s) without Akoma Ntoso
-- 235 `en` reading(s) without Akoma Ntoso
+- 146 `ms` reading(s) without Akoma Ntoso
+- 132 `en` reading(s) without Akoma Ntoso
 - 1 `unsettled` reading(s) without Akoma Ntoso
 
 ### Scanned — needs the cross-check tier, not another run
@@ -105,7 +105,7 @@ for documents upstream does not publish.
 - `dr-33-2025 (en): doc-3e39ae75, doc-6d73f773`
 - `dr-33-2025 (ms): doc-3001abdb, doc-ea08a68e`
 
-119 of these also collide among promoted Akoma Ntoso, which is what `verify` reports.
+123 of these also collide among promoted Akoma Ntoso, which is what `verify` reports.
 
 ## Absent documents, named
 
@@ -165,5 +165,5 @@ dr-9-2006 [en] https://www.parlimen.gov.my/files/billindex/pdf/2006/DR92006E.pdf
 
 ---
 
-Generated 2026-09-02T13:57:36.309310+00:00 · read-only; nothing here was written by
+Generated 2026-09-02T15:39:13.286317+00:00 · read-only; nothing here was written by
 this report. Run `billwatcher coverage` to regenerate.

@@ -220,6 +220,60 @@ and `make audit`.
 The published dataset is now a **corpus of readings** (2,352 markdown expressions) with a **graph
 over three quarters of it**.
 
+## Gate P1's pass rate: 79.5% to 88.7%, on 2026-09-02 (second audit)
+
+The same loop as the first audit, run again after ADR-042/043: every stored reading parsed and
+gated, each finding traced to the markdown line that produced it, failures grouped by signature,
+the pass set diffed after every change (and several changes reverted because the diff showed them
+firing on correct drafting: a roman `(iv)` that continues the bill's open list also opens every
+inserted paragraph's own list, and a line ending `(4) or";` is a closed quotation, not the first
+half of a wrapped reference pair). Details of each rule are in `version.py` beside `AKN_VERSION`
+1.6.0 and `STRUCTURE_GATE_VERSION` 1.4.0.
+
+Two of the causes were the reader's, not the parser's, and both are the page-number rule in
+`markdown.layout` (`LAYOUT_EXTRACTOR_VERSION` 2.6.0):
+
+- `(c)` or `(3)` at the very top of a page — the paragraph that happens to open it — read as a
+  page number, and the text beside it on the baseline as the running head, so the first line of
+  the page was gone (16 readings failing for exactly that paragraph).
+- `7.` hanging on a page's last baseline with `(1) Segala tanah...` beside it read as a page
+  number too, and `17.` beneath the `70` already printed at the top of its page. A page number
+  now has to be at the edge of its page, alone on its baseline or beside a short title, and one
+  per edge. One printing numbers its verso pages `4.` beside `Rang Undang-Undang`, which is why the
+  full stop stays allowed and the position decides.
+
+The parser's own causes, largest first: quotation marks the parser did not count (the straight
+single quote of the older typesetting, `' "term" means...;'`, and a curly opening `‘`), and
+quotations that never closed (a closing mark on a marginal note, an apostrophe read for a closing
+mark) swallowing the Part heading or paragraphs after them; sections quoted from a principal Act
+after `...seksyen yang berikut:` read as clauses, with or without a spliced marginal note ahead of
+the number; the running head of the open Part or Schedule read as a second Part or Schedule;
+wrapped sentence tails read as Part headings or clauses; the glyph confusions of the 1990s face
+(`(h)` for `(b)` straight after `(a)`, `(I)` for `(i)`, `Cd)`, `( 1)`, `(3 The`); and two shapes
+the tree had no place for, now ADR-044: a Schedule's numbered items restarting under it, and a
+lettered list introduced by an item's own dash.
+
+**Measured over every PDF re-read with the new reader** (2,479 readings):
+
+| | passing Gate P1 |
+| --- | --- |
+| Stored readings, parser as committed in `189bc8a` | 1,972 (79.5%) |
+| Same readings, this parser and gate | 2,196 |
+| Fresh reading, this parser and gate | **2,200 (88.7%)** |
+
+In `documentation/coverage.md` terms, after the full build: Akoma Ntoso for 1,101 of 1,247 Malay
+readings and 1,086 of 1,218 English ones (from 976 and 983), and a graph for every one of them.
+
+229 gained, one lost — a bill whose `(vii)` follows `(v)` with no `(vi)` printed, which the old
+tree had hidden by typing `(vii)` as a paragraph the gate could not compare. What still fails
+(279) is, in order of size: paragraphs and clauses whose opening line is absent from the PDF's own
+text layer (checked against `pdftotext`), so no reader recovers them; genuine misprints in the
+bill (`25.` printed twice, `(h)` for `(d)`); numbered rows and column headers inside Schedule
+tables, which ADR-044 reads as lists but cannot make continuous; committee-stage amendment papers
+(`Clause 1`, `New clause 4A`) that no extractor here models; and bills that replace whole Parts of
+a principal Act, whose quoted sections fall inside the clause lookahead and cannot be told from
+the bill's clauses once the marks are lost.
+
 ## What the reorganisation changed
 
 - The Postgres/FastAPI stack moved to `legacy/`, frozen. See `legacy/README.md`.
@@ -248,7 +302,8 @@ over three quarters of it**.
   to history. A version bump that re-derives the whole corpus rewrites the whole tree. Whether to
   accept that, squash it, or publish from an orphan branch is recorded in
   `history/TODO.md §0` and is still open.
-- **`public-cache/` is left in the working tree deliberately, and should not be deleted casually.**
+- **`public-cache/` — no longer in the working tree as of 2026-11-10; what follows is the record of
+  what it held.** It was left in the working tree deliberately, not to be deleted casually.
   It is the old export root of a step that no longer exists, so nothing writes it any more. It held
   84 files that could not be regenerated — JSON-LD for 2024–2026 bills whose structures were read by
   the LLM-assisted path dropped in ADR-039, and which the deterministic parser could not get past
@@ -260,8 +315,9 @@ over three quarters of it**.
   directory-sized one. It is untracked and will
   show up in `git status`; keep it out of any `git add .` until it has been looked at.
 
-- **`make verify` currently exits non-zero on 91 issues**, all one condition: 91 bills each have
-  two stored documents that would mint the same Expression IRI. Publication selection is
+- **`make verify` currently exits non-zero on 123 issues** (91 on 2026-08-30; 123 since the
+  second audit of 2026-09-02, re-measured 2026-11-10), all one condition: that many bill-and-language
+  pairs each have two stored documents that would mint the same Expression IRI. Publication selection is
   deterministic so the published tree is stable, but the underlying data has not been reviewed.
   This predates the reorganisation; it stood at 42 before `AKN_VERSION` 1.3.0 and grew only because
   more documents now pass the gate and so claim an IRI at all. It is ADR-024's recorded

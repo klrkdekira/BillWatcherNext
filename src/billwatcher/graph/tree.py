@@ -8,7 +8,7 @@ of it. Putting the shared pair here keeps that guarantee without either module i
 
 from dataclasses import dataclass, field
 
-from billwatcher.graph.vocabulary import arrangement_heading, body_opening
+from billwatcher.graph.vocabulary import arrangement_heading, body_opening, confirms_title_block
 
 _BULLET_MARKERS = ("- ", "* ")
 
@@ -81,5 +81,21 @@ def body_start(lines: list[str]) -> int:
         return 0
     for index in range(arrangement + 1, len(lines)):
         if lines[index] and body_opening(lines[index]):
+            if body_opening(lines[index], title_block_only=True) and not any(
+                confirms_title_block(lines[j])
+                for j in range(index + 1, min(len(lines), index + 1 + _TITLE_BLOCK_REACH))
+            ):
+                # `Rang Undang-Undang` alone is also the running head over the Arrangement's
+                # second page. The title block it opens is followed within a few lines by
+                # `bernama` / `intituled` and the long title (`Suatu Akta...` / `An Act...`); a
+                # running head is followed by the next contents entries. Without the confirmation
+                # the body was cut open inside the Arrangement, and read from clause 24.
+                continue
             return index
     return 0
+
+
+# How many non-empty lines after `RANG UNDANG-UNDANG` the title block's own next line has to
+# appear within: the word `bernama`, then the long title, sometimes with the bill's short name in
+# between.
+_TITLE_BLOCK_REACH = 4

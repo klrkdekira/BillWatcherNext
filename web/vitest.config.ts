@@ -8,5 +8,6 @@ export default defineConfig({
     globals: true,
     include: ["src/**/*.test.tsx", "src/**/*.test.ts"],
     restoreMocks: true,
+    setupFiles: ["src/__tests__/setup.ts"],
   },
 });

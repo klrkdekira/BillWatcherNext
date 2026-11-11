@@ -64,6 +64,7 @@ from billwatcher.graph.vocabulary import (
     alpha_successor,
     back_matter_heading,
     container_heading,
+    is_doubled_letter,
     is_doubled_step,
     is_letter_insertion,
     is_roman,
@@ -133,8 +134,17 @@ _TOKEN_RE = re.compile(r"[^0-9a-z]+")
 # The line that opens a bill's own text — a bill's provisions cannot precede it, so it is a more
 # reliable start-of-body marker than "looks like a heading or a numbered line", which an
 # Arrangement of Clauses printed as bare text also satisfies (see `_extractor_view`).
+#
+# Every printed form of it, including the ones a reading splits over two lines — `MAKA, OLEH YANG
+# DEMIKIAN, INILAH DIPERBUAT` / `oleh Parlimen Malaysia seperti yang berikut:` — because a formula
+# this scan misses leaves the recitals before it inside the measured body, where a bill with a
+# preamble (`BAHAWASANYA...`, `WHEREAS...`) then scores its own front matter as uncovered text.
+# The two full forms are matched anywhere on the line — `PURSUANT to Article 76..., ENACTED by
+# the Parliament of Malaysia` puts them mid-sentence — and the short forms only where a line opens.
 _ENACTING_FORMULA_RE = re.compile(
-    r"^(diperbuat\s+oleh\s+parlimen\s+malaysia|enacted\s+by\s+the\s+parliament\s+of\s+malaysia)\b",
+    r"^(oleh\s+parlimen\s+malaysia|maka,?\s+(inilah|oleh\s+yang\s+demikian)"
+    r"|be\s+i[tx]\s+enacted|(now,?\s+therefore,?\s+)?it\s+is\s+enacted)\b"
+    r"|\b(diperbuat\s+oleh\s+parlimen|enacted\s+by\s+the\s+parliament)\b",
     re.IGNORECASE,
 )
 
@@ -385,19 +395,30 @@ def _extractor_view(markdown_text: str) -> str:
     # lock onto it. `body_start` is the same cut the parser makes, which is what keeps this
     # measuring the text the extractor was actually shown rather than an approximation of it.
     floor = body_start(kept)
+    for index in range(floor, len(kept)):
+        if _ENACTING_FORMULA_RE.search(kept[index]):
+            # The body begins at the first structural marker *after* the formula, not at the
+            # line after it: the first clause's marginal note sits between the two, and a
+            # recital that happens to open `Perkara 76...` before the formula is not a marker.
+            # The formula itself may run over two lines (`MAKA, OLEH YANG DEMIKIAN, menurut
+            # peruntukan Fasal (4)` / `Perkara 76 Perlembagaan Persekutuan, DIPERBUAT oleh
+            # Parlimen`), each of which matches, so every consecutive matching line is passed.
+            floor = index + 1
+            while floor < len(kept) and _ENACTING_FORMULA_RE.search(kept[floor]):
+                floor += 1
+            break
     start = floor
     for index in range(floor, len(kept)):
         line = kept[index]
+        numbered = provision_number(line)
+        digits = re.match(r"\d+", numbered[0]) if numbered is not None else None
         if (
             container_heading(line) is not None
             or schedule_heading(line) is not None
-            or provision_number(line) is not None
+            # `2009. [ ]` is the long title's year wrapped onto its own line, not clause 2009.
+            or (digits is not None and int(digits.group()) < 1000)
         ):
             start = index
-            break
-    for index in range(floor, len(kept)):
-        if _ENACTING_FORMULA_RE.match(kept[index]):
-            start = max(start, index + 1)
             break
 
     end = len(kept)
@@ -559,8 +580,15 @@ def _check_run(nodes: list[Node]) -> list[Finding]:
 
 def _compare(previous: Node, node: Node) -> list[Finding]:
     prev_num, cur_num = previous.num or "", node.num or ""
+    node_type = node.node_type
+    if node_type in _LETTER_NUMBERED and _roman_pair(prev_num, cur_num):
+        # An amendment bill numbers the paragraphs directly beneath a clause `(i)`, `(ii)`,
+        # `(iii)` as readily as `(a)`, `(b)`, and the tree types them by position, not by
+        # numeral. Read as letters, `(xviii)` -> `(xix)` walks the alphabet and never arrives,
+        # so the run is judged as the numerals it prints.
+        node_type = "subparagraph"
     if (
-        node.node_type in _ROMAN_NUMBERED
+        node_type in _ROMAN_NUMBERED
         and prev_num.isalpha()
         and cur_num.isalpha()
         and alpha_successor(prev_num).casefold() == cur_num.casefold()
@@ -573,19 +601,19 @@ def _compare(previous: Node, node: Node) -> list[Finding]:
         # conventions within one run, so if the letter reading says this pair is exactly
         # consecutive, that is the reading — the roman one below is reached only when it is not.
         return []
-    if node.node_type in _ROMAN_NUMBERED and is_doubled_step(prev_num, cur_num):
+    if node_type in _ROMAN_NUMBERED and is_doubled_step(prev_num, cur_num):
         # `(cc)` -> `(dd)`: the doubled-letter list older drafting printed beneath `(i)`, `(ii)`.
         # Both are roman numerals as well, and read that way the step is 200 -> 500.
         return []
-    if node.node_type in _LETTER_NUMBERED and is_letter_insertion(prev_num, cur_num):
+    if node_type in _LETTER_NUMBERED and is_letter_insertion(prev_num, cur_num):
         # `(a)` -> `(aa)` -> `(b)`: an inserted paragraph, the lettered form of `5` -> `5A` -> `6`.
         # Walking the alphabet from `a` reaches `aa` twenty-six steps later, which reported a gap
         # on every reprint carrying an insertion (measured: 131 findings on one signature).
         return []
-    expected = _successor(prev_num, node.node_type)
+    expected = _successor(prev_num, node_type)
     if expected is None:
         return []
-    order = _order(prev_num, cur_num, node.node_type)
+    order = _order(prev_num, cur_num, node_type)
     if order is not None and order <= 0:
         return [
             Finding(
@@ -598,6 +626,27 @@ def _compare(previous: Node, node: Node) -> list[Finding]:
     if node.num != expected and order is not None and order > 1:
         return [Finding(kind="sequence_gap", eid=node.eid, expected=expected, found=node.num)]
     return []
+
+
+def _roman_pair(previous: str, current: str) -> bool:
+    """Whether two tokens are consecutive-looking roman numerals rather than letters.
+
+    `(c)` -> `(d)` is a letter step even though both are numerals, and `(cc)` -> `(dd)` a doubled
+    one; a pair with a numeral of two or more letters (`(i)` -> `(ii)`, `(xviii)` -> `(xix)`) is
+    the roman list an amendment bill sets directly beneath a clause.
+    """
+    return (
+        is_roman(previous)
+        and is_roman(current)
+        and not _doubled_list_letter(previous)
+        and not _doubled_list_letter(current)
+        and max(len(previous), len(current)) > 1
+    )
+
+
+def _doubled_list_letter(token: str) -> bool:
+    """`cc`, `dd`: a doubled-letter list entry. `ii` and `iii` are doubled too, and are numerals."""
+    return is_doubled_letter(token) and token[0].casefold() != "i"
 
 
 def _successor(num: str, node_type: str) -> str | None:

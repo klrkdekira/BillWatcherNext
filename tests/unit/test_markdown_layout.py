@@ -530,3 +530,88 @@ def test_text_drawn_off_the_left_edge_of_the_page_is_not_on_the_page() -> None:
     assert texts.count("36. Menteri boleh meminda Jadual Pertama.") == 1
     assert "RAHSIA" not in texts
     assert "1. Every line of this page sits at negative x." in texts
+
+
+def test_a_bracketed_token_at_the_top_of_a_page_is_the_paragraph_that_opens_it() -> None:
+    """`(c)` beside its text on a page's first baseline read as a page number, and the text beside
+    it as the running head — the first line of the page, lost (measured: 16 readings rejected for
+    exactly the paragraph that opened a page). A page number never wears brackets."""
+    pages = [
+        [
+            Placement(180.0, 770.0, "Akta Contoh (Pindaan)", 12.0),
+            Placement(426.0, 769.8, "1", 12.0),
+            Placement(MARGIN, 500, "Perenggan badan pada halaman 1."),
+        ],
+        [
+            Placement(MARGIN + 30, 770.0, "(c)", 12.0),
+            Placement(MARGIN + 66, 770.0, "to regulate all activities relating to the", 12.0),
+            Placement(MARGIN + 66, 750.0, "tobacco industry; and", 12.0),
+            Placement(MARGIN, 500, "Perenggan badan pada halaman 2."),
+        ],
+    ]
+    result = extract_layout(build_pdf(pages))
+    second = [line for line in result.lines if line.page == 2]
+    assert [line.role for line in second if line.text == "(c)"] != ["page_number"]
+    kept = [line.text for line in result.content_lines() if line.page == 2]
+    assert "(c)" in kept
+    assert "to regulate all activities relating to the" in kept
+
+
+def test_a_clause_number_hanging_on_the_last_baseline_is_not_a_page_number() -> None:
+    """`7.` at the foot of a page with `(1) Segala tanah...` beside it is the clause whose number
+    hangs on the page's last baseline; `4.` beside the running head at the top is the page number
+    one printing sets with a full stop. Both read as numbers; the rank on the page and the bracket
+    beside the clause tell them apart."""
+    pages = [
+        [
+            Placement(120.0, 770.0, "4.", 12.0),
+            Placement(180.0, 770.0, "Rang Undang-Undang", 12.0),
+            Placement(MARGIN, 500, "Perenggan badan pada halaman 4."),
+            Placement(MARGIN, 60.0, "7.", 12.0),
+            Placement(
+                MARGIN + 20, 60.0, "(1) Segala tanah dan aset yang sebaik sebelum tarikh", 12.0
+            ),
+            Placement(MARGIN, 40.0, "permulaan kuat kuasa terletak hak pada Universiti.", 12.0),
+        ],
+        [
+            Placement(MARGIN, 500, "Perenggan badan pada halaman 5."),
+            Placement(MARGIN, 60.0, "8.", 12.0),
+            Placement(MARGIN + 20, 60.0, "(1) Semua wang dalam Kumpulan Wang berpindah.", 12.0),
+        ],
+    ]
+    result = extract_layout(build_pdf(pages))
+    by_text = {line.text: line.role for line in result.lines}
+    assert by_text["4."] == "page_number"
+    assert by_text["Rang Undang-Undang"] == "header"
+    assert by_text["7."] != "page_number"
+    assert by_text["8."] != "page_number"
+    kept = [line.text for line in result.content_lines()]
+    assert "7." in kept and "8." in kept
+    assert "(1) Segala tanah dan aset yang sebaik sebelum tarikh" in kept
+
+
+def test_a_page_carries_one_page_number_so_the_item_beneath_it_keeps_its_number() -> None:
+    """`70` at the top of the page, then `17.` beside `If any person fails to comply...` on the
+    next baseline, still in the header band and still among the first lines: the second number
+    is the Schedule's paragraph 17, and its sentence beside it is no running head."""
+    pages = [
+        [
+            Placement(MARGIN, 785.0, "70", 12.0),
+            Placement(MARGIN, 765.0, "17.", 10.0),
+            Placement(
+                MARGIN + 24,
+                765.0,
+                "If any person fails to comply with the requirements of any notice given",
+                10.0,
+            ),
+            Placement(MARGIN, 745.0, "under paragraph 12 or 13—", 10.0),
+            Placement(MARGIN, 500, "Perenggan badan pada halaman 70."),
+        ]
+    ]
+    result = extract_layout(build_pdf(pages))
+    by_text = {line.text: line.role for line in result.lines}
+    assert by_text["70"] == "page_number"
+    assert by_text["17."] != "page_number"
+    kept = [line.text for line in result.content_lines()]
+    assert "17." in kept
+    assert "If any person fails to comply with the requirements of any notice given" in kept

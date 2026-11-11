@@ -148,7 +148,13 @@ _MAX_BOLD_SHARE = 0.4
 # the space before a new provision is 27.6pt, so anything close to half again is a block break.
 _BLOCK_GAP_RATIO = 1.4
 
-_PAGE_NUMBER_RE = re.compile(r"^\W*(?:\d{1,4}|[ivxlcdm]{1,7})\W*$", re.IGNORECASE)
+# A page number never wears brackets: `(c)` or `(3)` at the very top of a page is the paragraph or
+# subsection that happens to open it, and reading it as a page number discarded the token and the
+# line beside it as a running head — the first line of the page, lost (measured: 16 readings
+# rejected for exactly the paragraph that opened a page). A full stop is allowed: one printing
+# numbers its verso pages `4.` beside the running head. What tells that `4.` from the clause number
+# `7.` hanging on a page's last baseline is `_page_numbers` below.
+_PAGE_NUMBER_RE = re.compile(r"^[^\w()]*(?:\d{1,4}|[ivxlcdm]{1,7})[^\w()]*$", re.IGNORECASE)
 
 ROLES = frozenset({"body", "heading", "provision", "marginal", "header", "footer", "page_number"})
 
@@ -405,7 +411,62 @@ def _carries_text(text: str) -> bool:
     return any(character.isalnum() for character in text)
 
 
-def _beside_a_page_number(lines: list[Line], boxes: dict[int, PageBox]) -> frozenset[int]:
+def _page_numbers(lines: list[Line], boxes: dict[int, PageBox]) -> frozenset[int]:
+    """Indices of the lines that are page numbers.
+
+    A page number reads as one (`_PAGE_NUMBER_RE`), sits in the header or footer band, and is
+    among the first or last lines printed on its page. The rank test is what tells it from a
+    clause number: `7.` hanging on a page's last baseline reads as a page number and sits in the
+    footer band, but its own text runs on beside it and a wrapped line sits beneath, so it is not
+    the last thing on the page (measured: clause 7 of one bill lost with its number). A number
+    whose neighbour on the baseline opens with a bracket — `7.` beside `(1) Segala tanah`, the
+    clause's first subsection — or runs to a sentence's length is that clause's number even at
+    the very edge: a running head is a short title and never begins with a bracket. And a page
+    carries one page number at each edge, so `17.` beneath the `70` already printed at the top
+    of its page is the item that opens the page, not a second number for it (measured: a
+    Schedule's paragraph 17 lost with its number).
+    """
+    ranks = _ranks_on_page(lines)
+    found: set[int] = set()
+    taken: set[tuple[int, bool]] = set()
+    for index, line in enumerate(lines):
+        box = boxes.get(line.page)
+        height = box.height if box else 1.0
+        relative_y = line.y / height if height else 0.0
+        in_header = relative_y >= _HEADER_BAND
+        if not (in_header or relative_y <= _FOOTER_BAND):
+            continue
+        if not _PAGE_NUMBER_RE.match(line.text):
+            continue
+        if not _is_at_the_edge_of_its_page(ranks[index], in_header=in_header):
+            continue
+        if (line.page, in_header) in taken:
+            continue
+        if any(
+            other.page == line.page
+            and other is not line
+            and abs(other.y - line.y) <= _SAME_BASELINE
+            and (
+                other.text.lstrip().startswith("(")
+                or len(other.text.strip()) > _RUNNING_HEAD_MAX_CHARS
+            )
+            for other in lines[max(0, index - 3) : index + 4]
+        ):
+            continue
+        found.add(index)
+        taken.add((line.page, in_header))
+    return frozenset(found)
+
+
+# The longest a running head beside a page number runs to. `Kerajaan Tempatan (Pindaan)` and
+# `Rang Undang-Undang` are the corpus's shapes; a provision's first line beside its hanging number
+# is a sentence and runs past this.
+_RUNNING_HEAD_MAX_CHARS = 50
+
+
+def _beside_a_page_number(
+    lines: list[Line], boxes: dict[int, PageBox], page_numbers: frozenset[int]
+) -> frozenset[int]:
     """Indices of lines printed on the same baseline as a page number, at the edge of their page.
 
     The one running-head signal that needs no other page to confirm it. A page number is
@@ -418,21 +479,12 @@ def _beside_a_page_number(lines: list[Line], boxes: dict[int, PageBox]) -> froze
     """
     ranks = _ranks_on_page(lines)
     numbers: dict[int, list[float]] = {}
-    for index, line in enumerate(lines):
-        box = boxes.get(line.page)
-        height = box.height if box else 1.0
-        relative_y = line.y / height if height else 0.0
-        in_header = relative_y >= _HEADER_BAND
-        if not (in_header or relative_y <= _FOOTER_BAND):
-            continue
-        if _PAGE_NUMBER_RE.match(line.text) and _is_at_the_edge_of_its_page(
-            ranks[index], in_header=in_header
-        ):
-            numbers.setdefault(line.page, []).append(line.y)
+    for index in page_numbers:
+        numbers.setdefault(lines[index].page, []).append(lines[index].y)
 
     beside: set[int] = set()
     for index, line in enumerate(lines):
-        if _PAGE_NUMBER_RE.match(line.text):
+        if index in page_numbers:
             continue
         box = boxes.get(line.page)
         height = box.height if box else 1.0
@@ -472,7 +524,8 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
     leading = _leading(lines)
     gaps = _gaps_before(lines)
     furniture = _repeated_furniture(lines, boxes, page_count=len(pages))
-    beside_page_number = _beside_a_page_number(lines, boxes)
+    page_numbers = _page_numbers(lines, boxes)
+    beside_page_number = _beside_a_page_number(lines, boxes, page_numbers)
 
     classified: list[Line] = []
     for index, line in enumerate(lines):
@@ -482,9 +535,8 @@ def _classify(lines: list[Line], pages: list[PageBox]) -> tuple[Line, ...]:
         body_margin = page_margins.get(line.page, body_margin)
         relative_y = line.y / height if height else 0.0
         in_header = relative_y >= _HEADER_BAND
-        in_footer = relative_y <= _FOOTER_BAND
 
-        if (in_header or in_footer) and _PAGE_NUMBER_RE.match(line.text):
+        if index in page_numbers:
             role = "page_number"
         elif index in beside_page_number:
             # A running head, recognised from *this* page alone rather than from repetition

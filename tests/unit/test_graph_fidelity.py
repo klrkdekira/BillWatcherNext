@@ -971,3 +971,53 @@ def test_an_inserted_paragraph_letter_and_a_doubled_letter_step_are_consecutive(
         root, "1. Tajuk perenggan a aa b d subperenggan butiran cc dd", unit="clause"
     )
     assert [(f.kind, f.expected, f.found) for f in verdict.findings] == [("sequence_gap", "c", "d")]
+
+
+def test_a_paragraph_run_printed_in_roman_numerals_is_judged_as_numerals() -> None:
+    """An amendment bill numbers the paragraphs directly beneath a clause `(i)`, `(ii)`...; walked
+    as letters, `(xviii)` -> `(xix)` never arrives and `(i)` -> `(ii)` is twenty-seven steps."""
+    root = Node("body", None, None, "")
+    clause = Node("clause", "2", None, "")
+    root.children.append(clause)
+    for numeral in ("i", "ii", "iii", "xviii", "xix"):
+        clause.children.append(Node("paragraph", numeral, None, "", paragraphs=[f"item {numeral}"]))
+    assign_eids(root)
+    findings = fidelity._sequence_findings(root, unit="clause")
+    assert [(f.kind, f.expected, f.found) for f in findings] == [("sequence_gap", "iv", "xviii")]
+    # `(c)` -> `(d)` stays a letter step even though both are numerals too.
+    clause.children = [
+        Node("paragraph", letter, None, "", paragraphs=["x"]) for letter in ("a", "b", "c", "d")
+    ]
+    assign_eids(root)
+    assert fidelity._sequence_findings(root, unit="clause") == []
+
+
+def test_the_coverage_view_begins_after_a_two_line_enacting_formula_and_never_at_a_year() -> None:
+    """`MAKA, OLEH YANG DEMIKIAN, menurut peruntukan Fasal (4)` / `Perkara 76 Perlembagaan
+    Persekutuan, DIPERBUAT oleh Parlimen` is one formula over two lines, the second of which also
+    reads as an Article heading; `2009. [ ]` is the long title's year, not clause 2009."""
+    two_line = "\n".join(
+        [
+            "## RANG UNDANG-UNDANG",
+            "bernama",
+            "Suatu Akta untuk meminda Akta Jalan.",
+            "BAHAWASANYA adalah suai manfaat Akta itu dipinda;",
+            "MAKA, OLEH YANG DEMIKIAN, menurut peruntukan Fasal (4)",
+            "## Perkara 76 Perlembagaan Persekutuan, DIPERBUAT oleh Parlimen",
+            "Malaysia seperti yang berikut:",
+            "### Tajuk ringkas",
+            "1. Akta ini bolehlah dinamakan Akta Jalan (Pindaan) 2007.",
+        ]
+    )
+    assert fidelity._extractor_view(two_line).startswith("1. Akta ini")
+    year = "\n".join(
+        [
+            "## A BILL",
+            "intituled",
+            "An Act to amend the Commission Act",
+            "2009. [ ]",
+            "### Short title",
+            "1. This Act may be cited.",
+        ]
+    )
+    assert fidelity._extractor_view(year).startswith("1. This Act")
